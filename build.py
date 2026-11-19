@@ -12,7 +12,7 @@ HEADER = '''# /// script
 #
 # [tool.orcaslicer.plugin]
 # name = "Farm Send"
-# description = "Send the sliced plate to your Elegoo Centauri Carbon 2 and Snapmaker U1 printers, with live status."
+# description = "Print farm panel: send a sliced plate to several Elegoo Centauri Carbon 2 and Snapmaker U1 printers at once and start them, with live status."
 # author = "Mike Lugo"
 # version = "%s"
 # ///
@@ -69,6 +69,11 @@ def main():
         handle.write(out)
     compile(out, target, "exec")
     print("built %s (%d lines)" % (target, out.count("\n")))
+    # The same file under the name the OrcaSlicer Plugin Hub expects: <name>_<platform>.py.
+    upload = os.path.join(HERE, "dist", "farm_send_any.py")
+    with open(upload, "w", encoding="utf-8") as handle:
+        handle.write(out)
+    print("built %s (for the Plugin Hub)" % upload)
 
 
 if __name__ == "__main__":

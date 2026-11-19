@@ -1,15 +1,31 @@
 # Farm Send for OrcaSlicer
 
-A docked panel that sends the plate you just sliced to your printers, with live status.
+A docked panel for small print farms: slice a plate once per printer type, then upload it and start it on several printers at once, with live status for every printer.
 
-Each printer card shows state, progress, time left with the expected finish time, temperatures and when it was last checked. Status updates on its own every few seconds; **Refresh** in the header asks every printer now, and **refresh** on a card asks that one.
+![Farm Send panel](docs/panel.png)
 
-While the panel is open, OrcaSlicer shows a notification when a print finishes, is cancelled, pauses, or a printer stops with an error. The same note stays on the printer card with its time until the printer moves on. Nothing is reported while OrcaSlicer is closed, and the notification appears inside OrcaSlicer, not as a system notification.
-Built for OrcaSlicer 2.5.1's Python plugin system.
+- **Elegoo Centauri Carbon 2**: upload and start the print. Stock OrcaSlicer can upload to a Centauri Carbon 2 but cannot start it.
+- **Snapmaker U1**: upload and start the print, with bed leveling, flow calibration and time-lapse options.
+- **Other Moonraker / Klipper printers**: upload and a plain start. Not tested beyond the U1.
 
-- **Elegoo Centauri Carbon 2**: upload, and start the print. Stock OrcaSlicer can upload to a CC2 but cannot start it.
-- **Snapmaker U1 / any Moonraker printer**: upload, and start the print.
-- Not covered: Kobra 2 Max (uses the Desktop-to-Pi helper), MK3S.
+Each printer card shows state, progress, time left with the expected finish time, temperatures and when it was last checked. Status updates on its own every few seconds; **Refresh** in the header asks every printer now, and the refresh icon on a card asks that one.
+
+While the panel is open, OrcaSlicer shows a notification when a print finishes, is cancelled, pauses, or a printer stops with an error. The same note stays on the printer card until the printer moves on. Nothing is reported while OrcaSlicer is closed, and the notification appears inside OrcaSlicer, not as a system notification.
+
+## Status: early release
+
+Farm Send uses OrcaSlicer's Python plugin system (OrcaSlicer 2.5.1 or newer), which OrcaSlicer itself calls experimental.
+
+| | |
+|---|---|
+| Developed and tested on | Linux, OrcaSlicer 2.5.1 |
+| Windows, macOS | **Not tested.** Reports welcome |
+| Centauri Carbon 2 | Tested on two printers, single-filament jobs. Multi-colour jobs through the multi-colour unit are not tested |
+| Snapmaker U1 | Tested on three printers, firmware 2.1.2. Slicer filament slot N prints on toolhead N |
+
+The printer protocols were worked out from the vendors' own clients, not from published specifications. A firmware update can break them.
+
+**It starts real prints on real machines.** Look at the bed before you confirm.
 
 ## Use
 
@@ -55,17 +71,22 @@ A Centauri Carbon 2 holding 250 or more files shows a warning on its card: uploa
 1. OrcaSlicer > menu > **Plugins** > **Install local plugin** > `dist/farm_send/farm_send.py`
 2. Tick **Activate**. OrcaSlicer asks once for: read access to its own temp G-code folder, permission to start threads, and network access to each saved printer address. Answering No stops the plugin from loading.
 3. Expand the row and click the run arrow. The panel docks to the right of the 3D view.
-4. **Import** pulls printers from your user printer presets (address and access code). **Add printer** adds one by hand; **Test connection** fills in the model.
+4. **Import** pulls printers from your user printer presets (address and access code). **Add** adds one by hand; **Test connection** fills in the model.
 
 The panel has to be opened from the Plugins dialog once per OrcaSlicer session.
 After adding a printer, OrcaSlicer asks for network access to it the next time the plugin loads.
 
-Printers are stored in `<OrcaSlicer config>/orca_plugins/plugin_data/farm_send/farm_send_printers.json`, readable only by you because it holds access codes.
+## Permissions and privacy
+
+- **Network**: only the printer addresses you save. The plugin contacts nothing else: no cloud, no telemetry, no update check.
+- **Files**: read access to OrcaSlicer's temp G-code folder, to copy each slice. Everything it writes stays in its own storage folder.
+- **Access codes are stored as plain text** in `<OrcaSlicer config>/orca_plugins/plugin_data/farm_send/farm_send_printers.json`. The file is created readable only by your user account. Anyone with access to your account can read it, as with the printer presets OrcaSlicer itself stores.
+- Printers are reached over plain HTTP, MQTT and websocket on your local network, as the vendors' own slicers do. Use it on a network you trust.
 
 ## Develop
 
 ```
-python3 tests/test_farm.py            # 52 tests against in-process fake printers
+python3 tests/test_farm.py            # tests against in-process fake printers
 python3 tests/hardware_check.py       # read-only check of your real printers
 python3 tests/hardware_check.py --upload "U1 #2"   # 1 KB upload, list, delete. Never prints.
 ./install.sh                          # rebuild and copy over the installed plugin
@@ -82,7 +103,9 @@ python3 tests/hardware_check.py --upload "U1 #2"   # 1 KB upload, list, delete. 
 - **Other Moonraker printers**: fall back to `/printer/print/start`.
 - The plate box and the confirmation show the toolhead, colour and grams the G-code uses, and what the printer reports as loaded in that toolhead.
 
-## Verification status (2026-11-18, OrcaSlicer 2.5.1, all five printers mid-print)
+## What has been verified, and how
+
+Tested 2026-11-18 and 19 on OrcaSlicer 2.5.1 (Linux) with two Centauri Carbon 2s ("CC1", "CC2") and three Snapmaker U1s.
 
 In-app checks ran in an OrcaSlicer instance on a hidden virtual display (Xvfb), started through the desktop launcher.
 

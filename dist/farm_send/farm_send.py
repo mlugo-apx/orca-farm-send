@@ -3,7 +3,7 @@
 #
 # [tool.orcaslicer.plugin]
 # name = "Farm Send"
-# description = "Send the sliced plate to your Elegoo Centauri Carbon 2 and Snapmaker U1 printers, with live status."
+# description = "Print farm panel: send a sliced plate to several Elegoo Centauri Carbon 2 and Snapmaker U1 printers at once and start them, with live status."
 # author = "Mike Lugo"
 # version = "0.1.0"
 # ///
@@ -2595,7 +2595,7 @@ PANEL_HTML = r"""<style>
       "<label class='field'>Type<select id='f-kind'>" +
         "<option value='moonraker'>Snapmaker U1 / Moonraker</option>" +
         "<option value='elegoo_cc2'>Elegoo Centauri Carbon 2</option></select></label>" +
-      "<label class='field'>IP address or host name<input id='f-address' value='" + esc(p.address) + "' placeholder='192.168.0.62'></label>" +
+      "<label class='field'>IP address or host name<input id='f-address' value='" + esc(p.address) + "' placeholder='192.168.1.50'></label>" +
       "<label class='field' id='row-code'>Access code<input id='f-code' value='" + esc(p.access_code) + "' placeholder='shown on the printer screen'></label>" +
       "<label class='field' id='row-key'>API key (leave empty if none)<input id='f-key' value='" + esc(p.api_key) + "'></label>" +
       "<label class='field'>Printer model<input id='f-model' value='" + esc(p.model) + "' placeholder='filled in by Test connection'></label>" +
