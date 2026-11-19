@@ -2855,6 +2855,13 @@ PANEL_HTML = r"""<style>
     if (state.sends[p.id] && state.sends[p.id].active) return "busy with a send";
     return "";
   }
+  var counting = 0;   // printers still to answer after a recount was asked for
+  function recount() {
+    counting = state.printers.length;
+    renderStorage();
+    send("check_storage");
+    setTimeout(function () { counting = 0; renderStorage(); }, 30000);   // never stuck on "Counting..."
+  }
   function renderStorage() {
     $("storage").style.display = state.printers.length ? "block" : "none";
     var removable = 0;
@@ -2872,11 +2879,14 @@ PANEL_HTML = r"""<style>
              "<span style='white-space:nowrap'>" + detail + "</span></div>";
     }).join("");
     $("storage").innerHTML =
-      "<div class='row spread'><span class='card-title'>Stored files</span>" +
-        "<button type='button' class='quiet' id='clean-open'" + (removable ? "" : " disabled") + ">Clean up" + (removable ? " (" + removable + ")" : "") + "</button></div>" +
+      "<div class='row spread'><span class='card-title'>Stored files</span><div class='row'>" +
+        "<span class='small muted'>" + (counting ? "Counting..." : "") + "</span>" +
+        "<button type='button' class='icon' id='clean-refresh' title='Count the stored files on every printer again' aria-label='Count the stored files again'>" + svg("refresh") + "</button>" +
+        "<button type='button' class='quiet' id='clean-open'" + (removable ? "" : " disabled") + ">Clean up" + (removable ? " (" + removable + ")" : "") + "</button></div></div>" +
       "<div class='row spread small muted' style='gap:8px;margin-top:2px'><span class='file'>Rule: " + esc(state.cleanup.text) +
         (state.cleanup.auto ? " \u00b7 automatic" : "") + "</span>" +
         "<button type='button' class='linkish' style='flex:none' id='clean-rule'>change</button></div>" + rows;
+    $("clean-refresh").onclick = recount;
     $("clean-open").onclick = cleanupDialog;
     $("clean-rule").onclick = ruleDialog;
   }
@@ -2939,7 +2949,7 @@ PANEL_HTML = r"""<style>
     else if (d.pick) { selected[d.pick] = t.checked; renderMulti(); renderPrinters(); }
   });
   $("btn-add").onclick = function () { editPrinter(null); };
-  $("btn-refresh").onclick = function () { refresh(state.printers.map(function (p) { return p.id; })); send("check_storage"); };
+  $("btn-refresh").onclick = function () { refresh(state.printers.map(function (p) { return p.id; })); recount(); };
   $("btn-import").onclick = function () { send("import_presets"); };
 
   orca.onMessage(function (message) {
@@ -2953,6 +2963,7 @@ PANEL_HTML = r"""<style>
       delete refreshing[message.id];
       state.status[message.id] = message.status; renderMulti(); renderPrinters(); renderStorage();
     } else if (message.command === "storage") {
+      if (counting > 0) counting -= 1;
       state.storage[message.id] = message.storage; renderStorage(); renderPrinters();
     } else if (message.command === "send") {
       if (message.send) state.sends[message.id] = message.send; else delete state.sends[message.id];
