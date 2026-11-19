@@ -2106,6 +2106,10 @@ PANEL_HTML = r"""<style>
   .group + .box { margin-top: 5px; }
   .slim { padding: 6px 10px; cursor: pointer; }
   .type + .type { margin-top: 9px; padding-top: 9px; border-top: 1px solid var(--orca-border); }
+  .icon { background: none; border: none; padding: 2px; margin: 0; line-height: 0; color: var(--orca-muted); border-radius: 4px; flex: none; }
+  .icon:hover { color: var(--orca-fg); background: var(--orca-border); }
+  .icon svg, .chev svg { width: 14px; height: 14px; display: block; pointer-events: none; }
+  .chev { color: var(--orca-muted); line-height: 0; flex: none; }
   .linkish { background: none; border: none; padding: 0 2px; color: var(--orca-muted); font-size: 12px; text-decoration: underline; }
   label.field { display: block; margin-top: 8px; font-size: 12px; }
   label.field input, label.field select { display: block; width: 100%; box-sizing: border-box; margin-top: 3px; }
@@ -2211,6 +2215,23 @@ PANEL_HTML = r"""<style>
                            new Date(now.getFullYear(), now.getMonth(), now.getDate())) / 86400000);
     var day = days === 0 ? "" : days === 1 ? " tomorrow" : " " + end.toLocaleDateString([], { weekday: "short" });
     return "done ~" + clock(end, false) + day;
+  }
+
+  // Icons are drawn here, not taken from a font, so they look the same on every system.
+  var ICONS = {
+    refresh: "<path d='M13 8a5 5 0 1 1-1.5-3.6'/><path d='M13 2.5v3h-3'/>",
+    edit: "<path d='M2.5 13.5l.6-2.9 7.6-7.6 2.3 2.3-7.6 7.6z'/><path d='M9.4 4.3l2.3 2.3'/>",
+    up: "<path d='M3.5 10l4.5-4.5 4.5 4.5'/>",
+    down: "<path d='M3.5 6l4.5 4.5 4.5-4.5'/>"
+  };
+  function svg(name) {
+    return "<svg viewBox='0 0 16 16' fill='none' stroke='currentColor' stroke-width='1.6' stroke-linecap='round' " +
+           "stroke-linejoin='round' aria-hidden='true'>" + ICONS[name] + "</svg>";
+  }
+  // A small icon button. The hint doubles as the label for screen readers.
+  function iconButton(name, attribute, id, hint) {
+    return "<button type='button' class='icon' " + attribute + "='" + esc(id) + "' title='" + esc(hint) + "' aria-label='" + esc(hint) + "'>" +
+           svg(name) + "</button>";
   }
 
   function send(command, extra) {
@@ -2454,9 +2475,10 @@ PANEL_HTML = r"""<style>
     return "<div class='box slim' data-expand='" + esc(p.id) + "' title='Show details'>" +
       "<div class='row spread' data-expand='" + esc(p.id) + "'><div class='row' style='min-width:0' data-expand='" + esc(p.id) + "'>" +
         "<span class='dot " + esc(status.state) + "'></span><span class='card-title' data-expand='" + esc(p.id) + "'>" + esc(p.name) + "</span></div>" +
+      "<div class='row' style='flex:none' data-expand='" + esc(p.id) + "'>" +
       "<span class='small muted' style='white-space:nowrap' data-expand='" + esc(p.id) + "'>" +
         esc(refreshing[p.id] ? "Checking..." : (status.state === "printing" ? progressText(status) || "Printing" : (status.state_text || status.state))) +
-      "</span></div></div>";
+      "</span><span class='chev' data-expand='" + esc(p.id) + "'>" + svg("down") + "</span></div></div></div>";
   }
   function fullCard(p, status, group) {
     var sending = state.sends[p.id];
@@ -2507,9 +2529,9 @@ PANEL_HTML = r"""<style>
         "<span class='dot " + esc(status.needs_clearing ? "paused" : status.state) + "'" + fold + "></span>" +
         "<span class='card-title'" + fold + ">" + esc(p.name) + "</span></div>" +
         "<div class='row'><span class='small muted'" + fold + ">" + esc(stateText) + "</span>" +
-        (fold ? "<button type='button' class='linkish' data-collapse='" + esc(p.id) + "'>collapse</button>" : "") +
-        "<button type='button' class='linkish' data-refresh='" + esc(p.id) + "' title='Ask this printer for its status now'>refresh</button>" +
-        "<button type='button' class='linkish' data-edit='" + esc(p.id) + "'>edit</button></div></div>" +
+        (fold ? iconButton("up", "data-collapse", p.id, "Collapse") : "") +
+        iconButton("refresh", "data-refresh", p.id, "Refresh: ask this printer for its status now") +
+        iconButton("edit", "data-edit", p.id, "Edit this printer") + "</div></div>" +
       lines + sendLine +
       "<div class='actions'>" +
         "<button type='button' class='quiet' data-upload='" + esc(p.id) + "'" + (uploadWhy ? " disabled" : "") + ">Upload</button>" +
