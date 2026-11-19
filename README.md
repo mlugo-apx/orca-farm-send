@@ -62,7 +62,7 @@ python3 tests/hardware_check.py --upload "U1 #2"   # 1 KB upload, list, delete. 
 ## How it works
 
 - **Capture**: OrcaSlicer fires a `GCodeExportFinished` lifecycle event after each slice with the path of the plate's temp G-code. No preset or post-processing change is needed. Post-processing scripts are therefore not applied; the panel warns when the preset has any.
-- **CC2**: chunked HTTP `PUT /upload` with an MD5 header, then MQTT on port 1883 (register, status `1002`, start `1020`). One client id per printer is reused, because the printer has only a few client slots and holds each for about a minute.
+- **CC2**: chunked HTTP `PUT /upload` with an MD5 header, then MQTT on port 1883 (register, status `1002`, start `1020`). One client id per printer is reused, because the printer has only a few client slots and holds each for about a minute. The slot is per running OrcaSlicer: several OrcaSlicer windows with the panel open, plus ElegooSlicer, can fill the slots and show "too many connected apps" until one closes.
 - **Snapmaker U1**: `/server/files/upload` with `print=false`, then `server.files.start_local_print` over the websocket with `bed_level`, `flow_calibrate` and `time_lapse_camera` options. That method does not exist over HTTP. A plain Moonraker start carries no options, and the U1 then skips auto bed leveling. Stock OrcaSlicer's U1 start G-code tries `SET_PRINT_AUTO_BED_LEVELING`, which firmware 2.1.2 rejects as unknown.
 - **Other Moonraker printers**: fall back to `/printer/print/start`.
 - The plate box and the confirmation show the toolhead, colour and grams the G-code uses, and what the printer reports as loaded in that toolhead.
@@ -80,10 +80,10 @@ In-app checks ran in an OrcaSlicer instance on a hidden virtual display (Xvfb), 
 | CC2 slot leak fixed | Real CC2: 40 polls in 65 s, second client still connects |
 | Install, activate, panel, Import, live cards | Inside OrcaSlicer 2.5.1 |
 | Slice capture event | Inside OrcaSlicer 2.5.1: event received with the temp path |
-| CC2 upload | Fake printer only. Both CC2s were printing |
+| CC2 upload, list, delete | Real CC1 and CC2 (2026-11-19) |
 | Upload and start on U1 #1 and #2, single and batch | Real printers, 2026-11-19, 24-clip plate in white on toolhead 2 |
 | U1 start with bed leveling option | Real printers: leveling flag on, and the printer's "does not do auto-leveling" message no longer appears |
-| Start print on CC2 | Fake printer only |
+| Start print on CC2, with bed leveling | Real CC1 and CC2 from the panel inside OrcaSlicer: 25-layer test tile completed on both (2026-11-19) |
 | Slice capture, copy and plate display | Inside OrcaSlicer 2.5.1 |
 | Slice for U1, switch presets, slice for CC2, both plates kept | Inside OrcaSlicer 2.5.1 |
 | Slice-for "Use" switching printer, filament slots and process, both directions | Inside OrcaSlicer 2.5.1 |
