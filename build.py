@@ -45,10 +45,16 @@ def main():
     panel = read("panel.html")
     if '"""' in panel:
         sys.exit('panel.html must not contain """')
-    core_imports, core_body = split_imports(read("core.py").split('"""', 2)[2])
-    app_imports, app_body = split_imports(strip(read("app.py").split('"""', 2)[2]))
-    shell_imports, shell_body = split_imports(strip(read("shell.py")))
-    imports = sorted(set(core_imports + app_imports + shell_imports + ["import glob", "import os", "import tempfile", "import threading", "import time", "import uuid"]))
+    # Imports are collected from the WHOLE source of each module, including the parts stripped
+    # from the bundle: each module's own "import x" lines live in its strip block next to the
+    # cross-module imports, and dropping them leaves a NameError that only shows up at run time.
+    stdlib = []
+    for name in ("core.py", "app.py", "shell.py"):
+        stdlib += [line for line in split_imports(read(name))[0] if line != "import orca"]
+    core_body = split_imports(read("core.py").split('"""', 2)[2])[1]
+    app_body = split_imports(strip(read("app.py").split('"""', 2)[2]))[1]
+    shell_body = split_imports(strip(read("shell.py")))[1]
+    imports = sorted(set(stdlib))
     out = HEADER + "\n".join(imports) + "\n\nimport orca\n\n" + \
         "PLUGIN_VERSION = %r\n\n" % VERSION + \
         "# ======================================================================================\n# core\n" + core_body + \

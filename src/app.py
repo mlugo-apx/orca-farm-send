@@ -148,6 +148,8 @@ class FarmApp:
             job["error"] = "OrcaSlicer blocked reading the sliced G-code. Approve the permission prompt and slice again."
         except OSError as error:
             job["error"] = "Cannot read the sliced G-code: %s" % (error.strerror or error)
+        except Exception as error:      # never leave the panel stuck on "Reading..."
+            job["error"] = "Could not read the sliced G-code: %s" % error
         if job["error"]:
             self._remove_file(copy + ".part")
             self._remove_file(copy)

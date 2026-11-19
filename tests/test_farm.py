@@ -11,8 +11,25 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "src"))
 sys.path.insert(0, HERE)
 
-import core  # noqa: E402
-from app import FarmApp  # noqa: E402
+if os.environ.get("FARM_SEND_BUNDLE"):
+    # Run the same tests against the single-file plugin OrcaSlicer actually loads, with a stand-in
+    # for the orca module. Catches anything the bundler loses, which the source modules cannot show.
+    import importlib.util
+    import types
+
+    orca = types.ModuleType("orca")
+    orca.script = types.SimpleNamespace(ScriptPluginCapabilityBase=object)
+    orca.base = object
+    orca.plugin = lambda cls: cls
+    sys.modules["orca"] = orca
+    spec = importlib.util.spec_from_file_location("farm_send_bundle", os.environ["FARM_SEND_BUNDLE"])
+    core = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(core)
+    FarmApp = core.FarmApp
+    print("testing bundle: %s" % os.environ["FARM_SEND_BUNDLE"], file=sys.stderr)
+else:
+    import core  # noqa: E402
+    from app import FarmApp  # noqa: E402
 from fakes import FakeCC2, FakeMoonraker  # noqa: E402
 
 U1_GCODE = "; HEADER_BLOCK_START\n; total layer number: 12\n; total filament used [g] = 3.50\n" \
