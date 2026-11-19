@@ -681,7 +681,8 @@ class ElegooCC2:
 
     def delete_file(self, filename):
         with self._session() as session:
-            reply = session.request(CC2_DELETE_FILE, {"storage_media": "local", "file_path": filename})
+            # The printer takes a list of paths; a bare string is rejected as "invalid parameter".
+            reply = session.request(CC2_DELETE_FILE, {"storage_media": "local", "file_path": [filename]})
         _cc2_check(reply, "Could not delete file")
 
     def start_print(self, filename, options=None):

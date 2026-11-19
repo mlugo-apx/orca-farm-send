@@ -334,8 +334,13 @@ class FakeCC2:
         elif method == 1044:
             result = {"error_code": 0, "file_list": [{"filename": name} for name in self.files]}
         elif method == 1047:
-            self.files.pop(params.get("file_path"), None)
-            result = {"error_code": 0}
+            paths = params.get("file_path")
+            if not isinstance(paths, list):   # the real printer rejects a bare string
+                result = {"error_code": 1003, "message": "invalid parameter"}
+            else:
+                for path in paths:
+                    self.files.pop(path, None)
+                result = {"error_code": 0}
         else:
             result = {"error_code": 1001}
         self._send_publish(conn, "%s/%s/api_response" % (base, match.group(1)), {"id": body.get("id"), "method": method, "result": result})
