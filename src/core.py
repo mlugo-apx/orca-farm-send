@@ -137,7 +137,7 @@ def _filaments_used(text):
     if not match:
         return []
     grams = [float(value) if re.match(r"^-?\d+(\.\d+)?$", value.strip()) else 0.0 for value in match.group(1).split(",")]
-    colors, presets, types = (_config_list(text, key) for key in ("filament_color", "filament_settings_id", "filament_type"))
+    colors, presets, types = (_config_list(text, key) for key in ("filament_colour", "filament_settings_id", "filament_type"))
     used = []
     for index, amount in enumerate(grams):
         if amount > 0:

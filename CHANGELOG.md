@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1
+
+- Fixes 0.2.0, where a sliced or kept plate no longer showed its filament color: the plugin read the wrong setting name from the G-code. Use 0.2.1 instead of 0.2.0.
+
 ## 0.2.0
 
 - **Library.** Click "save to library" on a sliced plate, give it an item name and the number of parts on it, and it is kept on this computer. The Plates box has a Library view with search; Send uploads a kept plate to the printers you tick and starts them, without opening the project or slicing again.
