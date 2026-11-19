@@ -928,9 +928,45 @@ def normalize_cc2_status(info):
         sub = job.get("state") or ""
         if str(sub).lower() in ("paused", "pausing"):
             out["state"], out["state_text"] = "paused", "Paused"
+    # An idle printer keeps showing 100% after a print that ran to the end, and 0 before any print.
+    progress = machine.get("progress")
+    out["last_result"] = "complete" if state == "idle" and isinstance(progress, (int, float)) and progress >= 100 else ""
     if out["errors"] and state == "idle":
         out["state_text"] = "Idle (warning %s)" % ", ".join(str(e) for e in out["errors"])
     return out
+
+
+WATCHED_STATES = ("idle", "printing", "paused", "error")
+
+
+def status_event(before, now, name):
+    """What changed on a printer between two status reads that is worth telling the user.
+
+    before: the last status seen in a watched state, or None on the first read. Returns
+    (level, text) or None. "Offline" and "busy" reads are skipped by the caller, so a print that
+    ends while the network blips is still reported from the last "printing" read."""
+    if not before or now.get("state") not in WATCHED_STATES:
+        return None
+    was, state = before.get("state"), now.get("state")
+    job = before.get("filename") or now.get("filename") or "its print"
+    if state == "error" and was != "error":
+        return "error", "%s stopped with an error: %s" % (name, now.get("state_text") or "Error")
+    if state == "paused" and was == "printing":
+        return "error", "%s paused %s" % (name, job)
+    if state == "idle" and was in ("printing", "paused"):
+        result = now.get("last_result") or ""
+        progress = before.get("progress")
+        if result == "cancelled":
+            return "info", "%s: %s was cancelled" % (name, job)
+        if result == "complete" or (isinstance(progress, (int, float)) and progress >= 99):
+            return "info", "%s finished %s" % (name, job)
+        # No result reported (Centauri Carbon 2) and not near the end: do not claim it finished.
+        return "info", "%s stopped printing %s at %d%%" % (name, job, progress or 0)
+    if state in ("printing", "paused"):
+        fresh = [code for code in now.get("errors") or [] if code not in (before.get("errors") or [])]
+        if fresh:
+            return "error", "%s reports a problem while printing (code %s)" % (name, ", ".join(str(code) for code in fresh))
+    return None
 
 
 def _temp(block):
@@ -1133,6 +1169,7 @@ def normalize_moonraker_status(status, klippy_info=None, estimated_time=None):
                "cancelled": ("idle", "Idle (last print cancelled)"), "printing": ("printing", "Printing"),
                "paused": ("paused", "Paused"), "error": ("error", "Error")}
     state, text = mapping.get(raw_state, ("busy", raw_state.capitalize() or "Unknown"))
+    result = raw_state if raw_state in ("complete", "cancelled") else ""
     if not raw_state and klippy_info is not None:
         info = klippy_info()
         if info.get("state") != "ready":
@@ -1140,7 +1177,8 @@ def normalize_moonraker_status(status, klippy_info=None, estimated_time=None):
     if state == "error" and stats.get("message"):
         text = "Error: %s" % str(stats["message"]).splitlines()[0]
     out = {"state": state, "state_text": text, "filename": stats.get("filename") or "", "progress": None,
-           "remaining_s": None, "nozzle": None, "bed": _temp(status.get("heater_bed")), "errors": []}
+           "remaining_s": None, "nozzle": None, "bed": _temp(status.get("heater_bed")), "errors": [],
+           "last_result": result}
     # Report the hottest tool: on a tool changer the parked tools sit near ambient.
     tools = [_temp(status.get(name)) for name in ("extruder", "extruder1", "extruder2", "extruder3")]
     tools = [tool for tool in tools if tool]

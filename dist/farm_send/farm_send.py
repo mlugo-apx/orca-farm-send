@@ -948,9 +948,45 @@ def normalize_cc2_status(info):
         sub = job.get("state") or ""
         if str(sub).lower() in ("paused", "pausing"):
             out["state"], out["state_text"] = "paused", "Paused"
+    # An idle printer keeps showing 100% after a print that ran to the end, and 0 before any print.
+    progress = machine.get("progress")
+    out["last_result"] = "complete" if state == "idle" and isinstance(progress, (int, float)) and progress >= 100 else ""
     if out["errors"] and state == "idle":
         out["state_text"] = "Idle (warning %s)" % ", ".join(str(e) for e in out["errors"])
     return out
+
+
+WATCHED_STATES = ("idle", "printing", "paused", "error")
+
+
+def status_event(before, now, name):
+    """What changed on a printer between two status reads that is worth telling the user.
+
+    before: the last status seen in a watched state, or None on the first read. Returns
+    (level, text) or None. "Offline" and "busy" reads are skipped by the caller, so a print that
+    ends while the network blips is still reported from the last "printing" read."""
+    if not before or now.get("state") not in WATCHED_STATES:
+        return None
+    was, state = before.get("state"), now.get("state")
+    job = before.get("filename") or now.get("filename") or "its print"
+    if state == "error" and was != "error":
+        return "error", "%s stopped with an error: %s" % (name, now.get("state_text") or "Error")
+    if state == "paused" and was == "printing":
+        return "error", "%s paused %s" % (name, job)
+    if state == "idle" and was in ("printing", "paused"):
+        result = now.get("last_result") or ""
+        progress = before.get("progress")
+        if result == "cancelled":
+            return "info", "%s: %s was cancelled" % (name, job)
+        if result == "complete" or (isinstance(progress, (int, float)) and progress >= 99):
+            return "info", "%s finished %s" % (name, job)
+        # No result reported (Centauri Carbon 2) and not near the end: do not claim it finished.
+        return "info", "%s stopped printing %s at %d%%" % (name, job, progress or 0)
+    if state in ("printing", "paused"):
+        fresh = [code for code in now.get("errors") or [] if code not in (before.get("errors") or [])]
+        if fresh:
+            return "error", "%s reports a problem while printing (code %s)" % (name, ", ".join(str(code) for code in fresh))
+    return None
 
 
 def _temp(block):
@@ -1153,6 +1189,7 @@ def normalize_moonraker_status(status, klippy_info=None, estimated_time=None):
                "cancelled": ("idle", "Idle (last print cancelled)"), "printing": ("printing", "Printing"),
                "paused": ("paused", "Paused"), "error": ("error", "Error")}
     state, text = mapping.get(raw_state, ("busy", raw_state.capitalize() or "Unknown"))
+    result = raw_state if raw_state in ("complete", "cancelled") else ""
     if not raw_state and klippy_info is not None:
         info = klippy_info()
         if info.get("state") != "ready":
@@ -1160,7 +1197,8 @@ def normalize_moonraker_status(status, klippy_info=None, estimated_time=None):
     if state == "error" and stats.get("message"):
         text = "Error: %s" % str(stats["message"]).splitlines()[0]
     out = {"state": state, "state_text": text, "filename": stats.get("filename") or "", "progress": None,
-           "remaining_s": None, "nozzle": None, "bed": _temp(status.get("heater_bed")), "errors": []}
+           "remaining_s": None, "nozzle": None, "bed": _temp(status.get("heater_bed")), "errors": [],
+           "last_result": result}
     # Report the hottest tool: on a tool changer the parked tools sit near ambient.
     tools = [_temp(status.get(name)) for name in ("extruder", "extruder1", "extruder2", "extruder3")]
     tools = [tool for tool in tools if tool]
@@ -1406,6 +1444,8 @@ class FarmApp:
         self.status = {}          # printer id -> normalized status
         self._status_at = {}
         self._status_busy = set()
+        self._watched = {}        # printer id -> last status in a watched state, for change notices
+        self.notices = {}         # printer id -> {level, text, at}: the last change, kept on the card
         self.sends = {}           # printer id -> {active, text, percent, ok}
         self._cancel = {}
         # Slicing presets. read_presets() must run on the UI thread and returns the current selection
@@ -1735,7 +1775,7 @@ class FarmApp:
             if self.sends.get(printer_id, {}).get("active"):
                 return
             self.store.remove(printer_id)
-            for table in (self.status, self._status_at, self.sends):
+            for table in (self.status, self._status_at, self.sends, self._watched, self.notices):
                 table.pop(printer_id, None)
         self.post_state()
 
@@ -1893,6 +1933,21 @@ class FarmApp:
             if self.store.get(printer_id) is None:
                 return
             status["checked_at"] = time.time()   # wall clock, shown on the card
+            event = None
+            if status.get("state") in WATCHED_STATES:
+                name = (self.store.get(printer_id) or printer).get("name") or "Printer"
+                event = status_event(self._watched.get(printer_id), status, name)
+                self._watched[printer_id] = status
+                note = self.notices.get(printer_id)
+                if event:
+                    self.notices[printer_id] = {"level": event[0], "text": event[1], "at": status["checked_at"],
+                                                "state": status["state"]}
+                elif note and note["state"] != status["state"] and status["state"] in ("idle", "printing"):
+                    # Over once the printer moved on: the next print runs, a pause was resumed, an
+                    # error was cleared. A note raised while printing stays for the rest of the print.
+                    del self.notices[printer_id]
+            if printer_id in self.notices:
+                status["notice"] = self.notices[printer_id]
             self.status[printer_id] = status
             # "Started <file>" is only true while that print runs. Once the printer is idle again
             # (finished or cancelled) the line would be stale, so it is dropped.
@@ -1903,6 +1958,8 @@ class FarmApp:
                 del self.sends[printer_id]
         if stale:
             self.post({"command": "send", "id": printer_id, "send": None})
+        if event:
+            self._notify(event[0], "Farm Send: %s" % event[1])
         self.post({"command": "status", "id": printer_id, "status": status})
 
 
@@ -2264,6 +2321,8 @@ PANEL_HTML = r"""<style>
       var checked = status.checked_at ? "checked " + clock(new Date(status.checked_at * 1000), true) : "";
       if (temps.length || checked) lines += "<div class='row spread small muted' style='flex-wrap:wrap'><span>" + temps.join(" · ") +
                                             "</span><span style='white-space:nowrap'>" + checked + "</span></div>";
+      if (status.notice) lines += "<div class='small " + (status.notice.level === "error" ? "err" : "ok") + "'>" + esc(status.notice.text) +
+                                  " \u00b7 " + clock(new Date(status.notice.at * 1000), false) + "</div>";
       if (status.state === "offline" && status.detail) lines += "<div class='small muted'>" + esc(status.detail) + "</div>";
       var sendLine = "";
       if (sending) {

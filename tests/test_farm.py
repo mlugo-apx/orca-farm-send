@@ -451,6 +451,74 @@ class AppTests(unittest.TestCase):
     def _statuses(self):
         return [post["id"] for post in self.posts if post.get("command") == "status"]
 
+    def _read(self, printer):
+        count = len(self._statuses())
+        self.app.handle({"command": "refresh", "id": printer["id"]})
+        self.assertTrue(wait_for(lambda: len(self._statuses()) > count))
+        return self.app.status[printer["id"]]
+
+    def test_notice_when_a_print_finishes_pauses_or_fails(self):
+        self.assertNotIn("notice", self._read(self.p_u1))       # first look: nothing to report
+        self.u1.state = "printing"
+        self.assertNotIn("notice", self._read(self.p_u1))       # starting is not news
+        self.u1.state = "paused"
+        self.assertEqual(self._read(self.p_u1)["notice"]["level"], "error")
+        self.assertEqual(self.notes[-1], ("error", "Farm Send: U1 #1 paused busy.gcode"))
+        self.assertEqual(len(self.notes), 1)
+        self._read(self.p_u1)
+        self.assertEqual(len(self.notes), 1)                    # told once, but the card keeps the note
+        self.assertIn("notice", self.app.status[self.p_u1["id"]])
+        self.u1.state = "printing"                              # resumed: the pause note goes away
+        self.assertNotIn("notice", self._read(self.p_u1))
+        self.u1.state = "complete"
+        status = self._read(self.p_u1)
+        self.assertEqual(self.notes[-1], ("info", "Farm Send: U1 #1 finished busy.gcode"))
+        self.assertEqual(status["notice"]["text"], "U1 #1 finished busy.gcode")
+        self.assertIn("notice", self._read(self.p_u1))          # stays on the card while idle
+        self.u1.state = "printing"                              # next print: the old note is cleared
+        self.assertNotIn("notice", self._read(self.p_u1))
+        self.u1.state = "error"
+        self._read(self.p_u1)
+        self.assertEqual(self.notes[-1][0], "error")
+        self.assertIn("stopped with an error", self.notes[-1][1])
+        self.assertEqual(len(self.notes), 3)
+
+    def test_notice_survives_a_network_blip_and_reports_cancel(self):
+        self.u1.state = "printing"
+        self._read(self.p_u1)
+        address = self.p_u1["address"]
+        self.app.store.upsert(dict(self.p_u1, address="127.0.0.1:9"))   # unreachable for one read
+        self.assertEqual(self._read(self.p_u1)["state"], "offline")
+        self.assertEqual(self.notes, [])                                # offline alone is not news
+        self.app.store.upsert(dict(self.p_u1, address=address))
+        self.u1.state = "cancelled"
+        self._read(self.p_u1)
+        self.assertEqual(self.notes, [("info", "Farm Send: U1 #1: busy.gcode was cancelled")])
+
+    def test_cc2_finish_is_only_claimed_at_100_percent(self):
+        self.cc2.status_code = 2
+        self._read(self.p_cc2)
+        self.cc2.status_code, self.cc2.progress = 1, 100     # idle, and the printer still shows 100%
+        self._read(self.p_cc2)
+        self.assertIn("CC1 finished", self.notes[-1][1])
+        self.cc2.status_code, self.cc2.progress = 2, None
+        self._read(self.p_cc2)
+        self.cc2.status_code = 1                             # idle at 0%: stopped early, not finished
+        self._read(self.p_cc2)
+        self.assertIn("CC1 stopped printing", self.notes[-1][1])
+        self.assertIn("at 40%", self.notes[-1][1])
+
+    def test_status_event_rules(self):
+        idle, printing = {"state": "idle"}, {"state": "printing", "filename": "a.gcode", "progress": 50, "errors": []}
+        self.assertIsNone(core.status_event(None, printing, "P"))
+        self.assertIsNone(core.status_event(idle, printing, "P"))
+        self.assertIsNone(core.status_event(printing, {"state": "offline"}, "P"))
+        self.assertIsNone(core.status_event(printing, {"state": "busy"}, "P"))
+        self.assertIsNone(core.status_event({"state": "error"}, {"state": "error", "state_text": "Error"}, "P"))
+        self.assertEqual(core.status_event(printing, dict(printing, errors=[205]), "P"),
+                         ("error", "P reports a problem while printing (code 205)"))
+        self.assertIsNone(core.status_event(dict(printing, errors=[205]), dict(printing, errors=[205]), "P"))
+
     def test_refresh_one_printer_and_all(self):
         self.app.handle({"command": "poll"})
         self.assertTrue(wait_for(lambda: len(self._statuses()) == 3))

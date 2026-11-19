@@ -157,6 +157,7 @@ class FakeCC2:
     def __init__(self, token="abc123", serial="SNFAKE0001"):
         self.token, self.serial = token, serial
         self.files, self.started, self.status_code = {}, [], 1
+        self.progress = None   # override the reported progress, e.g. 100 on an idle printer after a print
         self.partial = {}
         self.need_mesh_force = False
         self.register_error = "ok"
@@ -320,7 +321,7 @@ class FakeCC2:
         method, params = body.get("method"), body.get("params") or {}
         if method == 1002:
             printing = self.status_code == 2
-            result = {"error_code": 0, "machine_status": {"status": self.status_code, "progress": 40 if printing else 0, "exception_status": []},
+            result = {"error_code": 0, "machine_status": {"status": self.status_code, "progress": self.progress if self.progress is not None else (40 if printing else 0), "exception_status": []},
                       "print_status": {"filename": "busy.gcode" if printing else "", "remaining_time_sec": 1200, "state": "printing" if printing else ""},
                       "extruder": {"temperature": 250, "target": 250}, "heater_bed": {"temperature": 70, "target": 70}}
         elif method == 1020:

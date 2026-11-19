@@ -354,6 +354,8 @@
       var checked = status.checked_at ? "checked " + clock(new Date(status.checked_at * 1000), true) : "";
       if (temps.length || checked) lines += "<div class='row spread small muted' style='flex-wrap:wrap'><span>" + temps.join(" · ") +
                                             "</span><span style='white-space:nowrap'>" + checked + "</span></div>";
+      if (status.notice) lines += "<div class='small " + (status.notice.level === "error" ? "err" : "ok") + "'>" + esc(status.notice.text) +
+                                  " \u00b7 " + clock(new Date(status.notice.at * 1000), false) + "</div>";
       if (status.state === "offline" && status.detail) lines += "<div class='small muted'>" + esc(status.detail) + "</div>";
       var sendLine = "";
       if (sending) {

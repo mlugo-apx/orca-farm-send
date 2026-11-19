@@ -6,8 +6,8 @@ import threading
 import time
 import uuid
 
-from core import (KIND_CC2, FarmError, PrinterStore, can_start, job_filename, make_client, model_key, model_matches,
-                  parse_gcode_meta, presets_to_printers, set_shared_dir, strip_model_suffix, validate_printer)
+from core import (KIND_CC2, WATCHED_STATES, FarmError, PrinterStore, can_start, job_filename, make_client, model_key, model_matches,
+                  parse_gcode_meta, presets_to_printers, set_shared_dir, status_event, strip_model_suffix, validate_printer)
 # BUNDLE-STRIP-END
 
 SLICE_DIR = "slices"
@@ -48,6 +48,8 @@ class FarmApp:
         self.status = {}          # printer id -> normalized status
         self._status_at = {}
         self._status_busy = set()
+        self._watched = {}        # printer id -> last status in a watched state, for change notices
+        self.notices = {}         # printer id -> {level, text, at}: the last change, kept on the card
         self.sends = {}           # printer id -> {active, text, percent, ok}
         self._cancel = {}
         # Slicing presets. read_presets() must run on the UI thread and returns the current selection
@@ -377,7 +379,7 @@ class FarmApp:
             if self.sends.get(printer_id, {}).get("active"):
                 return
             self.store.remove(printer_id)
-            for table in (self.status, self._status_at, self.sends):
+            for table in (self.status, self._status_at, self.sends, self._watched, self.notices):
                 table.pop(printer_id, None)
         self.post_state()
 
@@ -535,6 +537,21 @@ class FarmApp:
             if self.store.get(printer_id) is None:
                 return
             status["checked_at"] = time.time()   # wall clock, shown on the card
+            event = None
+            if status.get("state") in WATCHED_STATES:
+                name = (self.store.get(printer_id) or printer).get("name") or "Printer"
+                event = status_event(self._watched.get(printer_id), status, name)
+                self._watched[printer_id] = status
+                note = self.notices.get(printer_id)
+                if event:
+                    self.notices[printer_id] = {"level": event[0], "text": event[1], "at": status["checked_at"],
+                                                "state": status["state"]}
+                elif note and note["state"] != status["state"] and status["state"] in ("idle", "printing"):
+                    # Over once the printer moved on: the next print runs, a pause was resumed, an
+                    # error was cleared. A note raised while printing stays for the rest of the print.
+                    del self.notices[printer_id]
+            if printer_id in self.notices:
+                status["notice"] = self.notices[printer_id]
             self.status[printer_id] = status
             # "Started <file>" is only true while that print runs. Once the printer is idle again
             # (finished or cancelled) the line would be stale, so it is dropped.
@@ -545,4 +562,6 @@ class FarmApp:
                 del self.sends[printer_id]
         if stale:
             self.post({"command": "send", "id": printer_id, "send": None})
+        if event:
+            self._notify(event[0], "Farm Send: %s" % event[1])
         self.post({"command": "status", "id": printer_id, "status": status})
