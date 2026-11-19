@@ -1,6 +1,8 @@
 import json
 import os
+import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -176,6 +178,19 @@ class MoonrakerTests(unittest.TestCase):
         self.assertEqual((status["state"], round(status["progress"])), ("printing", 25))
         self.assertEqual(status["remaining_s"], 1800)
 
+    def test_time_left_uses_the_slicer_estimate(self):
+        self.fake.state, self.fake.estimated_time = "printing", 4000
+        core._MOONRAKER_ESTIMATES.clear()
+        self.assertEqual(self.client.status()["remaining_s"], 3000)   # 75% of the estimate is left
+        self.client.status()
+        self.assertEqual(self.fake.metadata_calls, 1)                 # asked once per file
+
+    def test_time_left_early_in_a_print(self):
+        # 25 minutes of heating and leveling, 1% of the file printed: no extrapolated 41 hours.
+        self.assertIsNone(core.moonraker_remaining(0.01, 1500, None))
+        self.assertEqual(core.moonraker_remaining(0.01, 1500, 18849), 18660)
+        self.assertEqual(core.moonraker_remaining(0.25, 600, None), 1800)
+
     def test_start_missing_file_is_an_error(self):
         with self.assertRaises(core.FarmError):
             self.client.start_print("nope.gcode")
@@ -331,6 +346,71 @@ class CC2Tests(unittest.TestCase):
         self.assertEqual(self.client.list_files(), ["a.gcode"])
         self.client.delete_file("a.gcode")
         self.assertEqual(self.client.list_files(), [])
+
+
+class SharedSlotTests(unittest.TestCase):
+    """Every OrcaSlicer window of one user shares a single client slot per Centauri Carbon 2."""
+
+    def setUp(self):
+        self.folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.folder, True)
+        self.addCleanup(core.set_shared_dir, None)
+        core.set_shared_dir(self.folder)
+
+    def _new_window(self):
+        core._CC2_CLIENT_IDS.clear()   # what a second OrcaSlicer process starts with
+
+    def test_same_id_across_processes_and_different_per_printer_and_computer(self):
+        mine = core._cc2_client_id("SN1")
+        # A real second process, always from the source module: the id rule is the same code.
+        script = "import sys; sys.path.insert(0, %r); import core; core.set_shared_dir(%r); print(core._cc2_client_id('SN1'))"
+        other = subprocess.run([sys.executable, "-c", script % (os.path.join(HERE, "..", "src"), self.folder)],
+                               capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual(mine, other)
+        self.assertEqual(len(mine), 10)
+        self.assertNotEqual(mine, core._cc2_client_id("SN2"))
+        with tempfile.TemporaryDirectory() as elsewhere:   # another computer has another token
+            core.set_shared_dir(elsewhere)
+            self.assertNotEqual(mine, core._cc2_client_id("SN1"))
+
+    def test_token_file_is_private_and_survives_damage(self):
+        first = core._cc2_client_id("SN1")
+        path = os.path.join(self.folder, "cc2_client_token")
+        if os.name == "posix":
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        with open(path, "w") as handle:
+            handle.write("garbage")
+        self._new_window()
+        again = core._cc2_client_id("SN1")
+        self.assertEqual(len(again), 10)
+        self.assertNotEqual(first, again)
+        self._new_window()
+        self.assertEqual(again, core._cc2_client_id("SN1"))
+
+    def test_windows_take_turns(self):
+        first, second = core._cc2_file_lock("SN1"), core._cc2_file_lock("SN1")
+        self.assertTrue(first.acquire(1))
+        self.assertFalse(second.acquire(0.2))
+        self.assertTrue(core._cc2_file_lock("SN2").acquire(0.2))   # another printer is not held up
+        first.release()
+        self.assertTrue(second.acquire(1))
+        second.release()
+
+    def test_many_windows_fit_in_one_printer_slot(self):
+        fake = FakeCC2()
+        self.addCleanup(fake.close)
+        fake.max_clients = 1
+        for _ in range(4):
+            self._new_window()
+            client = core.ElegooCC2(fake.address, "abc123", mqtt_port=fake.mqtt_port)
+            self.assertEqual(client.status()["state"], "idle")
+        self.assertEqual(len(fake.registered), 1)
+
+    def test_without_a_shared_folder_each_process_has_its_own_id(self):
+        core.set_shared_dir(None)
+        first = core._cc2_client_id("SN1")
+        self._new_window()
+        self.assertNotEqual(first, core._cc2_client_id("SN1"))
 
 
 class AppTests(unittest.TestCase):

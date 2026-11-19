@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 class FakeMoonraker:
     def __init__(self, api_key="", snapmaker=False):
         self.files, self.started, self.state, self.api_key = {}, [], "standby", api_key
+        self.estimated_time, self.metadata_calls = None, 0   # slicer estimate served as file metadata
         self.snapmaker, self.start_options = snapmaker, []
         self.tools = {"filament_color_rgba": ["000000FF", "FFFFFFFF", "6F4C2FFF", "FEE5A5FF"], "filament_type": ["PETG"] * 4,
                       "filament_exist": [True, True, True, False]}
@@ -93,6 +94,9 @@ class FakeMoonraker:
                         "extruder": {"temperature": 25.0, "target": 0.0},
                         "extruder1": {"temperature": 220.0, "target": 220.0},
                         **({"print_task_config": outer.tools} if outer.snapmaker else {})}}})
+                elif self.path.startswith("/server/files/metadata") and outer.estimated_time is not None:
+                    outer.metadata_calls += 1
+                    self._json(200, {"result": {"estimated_time": outer.estimated_time}})
                 elif self.path.startswith("/server/files/list"):
                     self._json(200, {"result": [{"path": name} for name in outer.files]})
                 else:

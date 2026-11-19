@@ -26,6 +26,7 @@ def main():
     if not paths:
         sys.exit("No saved printers found. Open the Farm Send panel in OrcaSlicer and use Import first.")
     printers = core.PrinterStore(paths[0]).printers
+    core.set_shared_dir(os.path.dirname(paths[0]))   # share the plugin's CC2 client slot
     failures = 0
     for printer in printers:
         client = core.make_client(printer)

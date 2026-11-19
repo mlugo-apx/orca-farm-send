@@ -13,6 +13,15 @@ import time
 import urllib.parse
 import uuid
 
+try:
+    import fcntl
+except ImportError:   # Windows
+    fcntl = None
+try:
+    import msvcrt
+except ImportError:   # everything else
+    msvcrt = None
+
 CHUNK = 1024 * 1024
 KIND_CC2 = "elegoo_cc2"
 KIND_MOONRAKER = "moonraker"
@@ -691,20 +700,114 @@ def _cc2_check(reply, what):
 _CC2_CLIENT_IDS = {}
 _CC2_CLIENT_LOCK = threading.Lock()
 _CC2_SERIAL_LOCKS = {}
+_CC2_SHARED_DIR = None
+
+
+def set_shared_dir(path):
+    """Folder that every OrcaSlicer window of this user shares (the plugin's storage folder).
+
+    With it set, all windows use the same client id for a printer and take turns through a lock
+    file, so together they occupy one of the printer's few client slots instead of one each."""
+    global _CC2_SHARED_DIR
+    with _CC2_CLIENT_LOCK:
+        if path != _CC2_SHARED_DIR:
+            _CC2_SHARED_DIR = path
+            _CC2_CLIENT_IDS.clear()
+
+
+def _cc2_install_token(folder):
+    """A random token kept in the shared folder, so two computers never pick the same client id."""
+    path = os.path.join(folder, "cc2_client_token")
+    for _ in range(3):   # read; or replace a damaged file, create, then read back
+        try:
+            with open(path, "r", encoding="ascii") as handle:
+                token = handle.read().strip()
+            if re.fullmatch(r"[0-9a-f]{32}", token):
+                return token
+        except (OSError, ValueError):
+            pass
+        try:
+            # O_EXCL: when two windows start together, one creates the file and the other reads it.
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            with os.fdopen(fd, "w", encoding="ascii") as handle:
+                handle.write(uuid.uuid4().hex)
+        except FileExistsError:
+            try:   # present but unreadable or damaged: replace it
+                if os.path.getsize(path) != 32:
+                    os.unlink(path)
+            except OSError:
+                pass
+        except OSError:
+            return None
+    return None
 
 
 def _cc2_client_id(serial):
-    """One client id per printer for the life of the process.
+    """One client id per printer: shared by every window when a shared folder is set, otherwise
+    for the life of this process.
 
     The printer keeps a registration slot per client id for about a minute after the client goes
     away and has only a few slots. A fresh id on every status poll fills them all within a minute
     and locks out ElegooSlicer and the printer's own web page; a stable id re-uses one slot."""
     with _CC2_CLIENT_LOCK:
         if serial not in _CC2_CLIENT_IDS:
+            token = _cc2_install_token(_CC2_SHARED_DIR) if _CC2_SHARED_DIR else None
+            tail = hashlib.sha256(("%s/%s" % (token, serial)).encode("utf-8")).hexdigest() if token else uuid.uuid4().hex
             # Same shape as the vendor web client: "0" + tag + hex, 10 characters.
-            _CC2_CLIENT_IDS[serial] = ("0fs" + uuid.uuid4().hex)[:10]
-            _CC2_SERIAL_LOCKS[serial] = threading.Lock()
+            _CC2_CLIENT_IDS[serial] = ("0fs" + tail)[:10]
+            _CC2_SERIAL_LOCKS.setdefault(serial, threading.Lock())
         return _CC2_CLIENT_IDS[serial]
+
+
+class _FileLock:
+    """Lock between processes on one computer. Released by the system if the process dies."""
+
+    def __init__(self, path):
+        self.path, self._handle = path, None
+
+    def acquire(self, timeout):
+        if fcntl is None and msvcrt is None:
+            return True
+        try:
+            fd = os.open(self.path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        except OSError:
+            return True   # cannot lock here: carry on unshared instead of failing every request
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                if fcntl is not None:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                else:
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                self._handle = fd
+                return True
+            except OSError:
+                if time.monotonic() >= deadline:
+                    os.close(fd)
+                    return False
+                time.sleep(0.05)
+
+    def release(self):
+        fd, self._handle = self._handle, None
+        if fd is None:
+            return
+        try:
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            else:
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+
+
+def _cc2_file_lock(serial):
+    if not _CC2_SHARED_DIR:
+        return None
+    name = "cc2_%s.lock" % hashlib.sha256(serial.encode("utf-8")).hexdigest()[:16]
+    return _FileLock(os.path.join(_CC2_SHARED_DIR, name))
 
 
 class _CC2Session:
@@ -721,10 +824,15 @@ class _CC2Session:
         self._serial_lock = _CC2_SERIAL_LOCKS[self.serial]
         if not self._serial_lock.acquire(timeout=30):
             raise FarmError("The printer is busy answering another request")
+        # Other OrcaSlicer windows use the same client id, so only one may talk at a time.
+        self._file_lock = _cc2_file_lock(self.serial)
+        if self._file_lock is not None and not self._file_lock.acquire(timeout=30):
+            self._serial_lock.release()
+            raise FarmError("The printer is busy answering another OrcaSlicer window")
         try:
             self.mqtt.connect()
         except BaseException:
-            self._serial_lock.release()
+            self._release()
             raise
         try:
             base = "elegoo/%s" % self.serial
@@ -748,14 +856,21 @@ class _CC2Session:
                 raise FarmError("Printer rejected the registration: %s" % (error or "unknown reason"))
         except BaseException:
             self.mqtt.close()
-            self._serial_lock.release()
+            self._release()
             raise
+
+    def _release(self):
+        try:
+            if self._file_lock is not None:
+                self._file_lock.release()
+        finally:
+            self._serial_lock.release()
 
     def __exit__(self, *exc):
         try:
             self.mqtt.close()
         finally:
-            self._serial_lock.release()
+            self._release()
         return False
 
     def request(self, method, params, timeout=None):
@@ -875,7 +990,26 @@ class Moonraker:
     def status(self):
         reply = self._get("/printer/objects/query?print_stats&virtual_sdcard&heater_bed&display_status&toolhead&extruder"
                           "&extruder1&extruder2&extruder3&print_task_config")
-        return normalize_moonraker_status(reply.get("result", {}).get("status", {}), self._klippy_state)
+        status = reply.get("result", {}).get("status", {})
+        filename = (status.get("print_stats") or {}).get("filename") or ""
+        active = (status.get("print_stats") or {}).get("state") in ("printing", "paused")
+        return normalize_moonraker_status(status, self._klippy_state, self._estimated_time(filename) if active else None)
+
+    def _estimated_time(self, filename):
+        """The slicer's time estimate for a file, asked once per file and remembered."""
+        if not filename:
+            return None
+        key = (self.address, filename)
+        if key not in _MOONRAKER_ESTIMATES:
+            try:
+                reply = self._get("/server/files/metadata?filename=%s" % urllib.parse.quote(filename))
+                value = (reply.get("result") or {}).get("estimated_time")
+            except FarmError:
+                return None   # not remembered: ask again on the next poll
+            if len(_MOONRAKER_ESTIMATES) > 64:
+                _MOONRAKER_ESTIMATES.clear()
+            _MOONRAKER_ESTIMATES[key] = float(value) if isinstance(value, (int, float)) and value > 0 else None
+        return _MOONRAKER_ESTIMATES[key]
 
     def _klippy_state(self):
         return (self._get("/printer/info").get("result") or {})
@@ -975,7 +1109,23 @@ class Moonraker:
         return "snapmaker"
 
 
-def normalize_moonraker_status(status, klippy_info=None):
+_MOONRAKER_ESTIMATES = {}
+
+
+def moonraker_remaining(progress, elapsed, estimated_time=None):
+    """Seconds left. progress is 0..1 of the file, elapsed is Klipper's print_duration.
+
+    With the slicer's estimate: the unprinted share of it. Without: extrapolate from elapsed
+    time, but only once enough has printed, because print_duration also counts heating and bed
+    leveling and that swamps the early figure (29 hours shown for a 5 hour job at 1%)."""
+    if estimated_time:
+        return int(estimated_time * (1.0 - progress))
+    if isinstance(elapsed, (int, float)) and progress >= 0.10:
+        return int(elapsed / progress - elapsed)
+    return None
+
+
+def normalize_moonraker_status(status, klippy_info=None, estimated_time=None):
     stats = status.get("print_stats") or {}
     sdcard = status.get("virtual_sdcard") or {}
     raw_state = str(stats.get("state") or "").lower()
@@ -1002,9 +1152,8 @@ def normalize_moonraker_status(status, klippy_info=None):
         progress = sdcard.get("progress")
         if isinstance(progress, (int, float)):
             out["progress"] = max(0.0, min(100.0, float(progress) * 100.0))
-            elapsed = stats.get("print_duration")
-            if isinstance(elapsed, (int, float)) and progress > 0.01:
-                out["remaining_s"] = int(elapsed / progress - elapsed)
+            progress = max(0.0, min(1.0, float(progress)))
+            out["remaining_s"] = moonraker_remaining(progress, stats.get("print_duration"), estimated_time)
     return out
 
 

@@ -7,7 +7,7 @@ import time
 import uuid
 
 from core import (KIND_CC2, FarmError, PrinterStore, can_start, job_filename, make_client, model_key, model_matches,
-                  parse_gcode_meta, presets_to_printers, strip_model_suffix, validate_printer)
+                  parse_gcode_meta, presets_to_printers, set_shared_dir, strip_model_suffix, validate_printer)
 # BUNDLE-STRIP-END
 
 SLICE_DIR = "slices"
@@ -31,6 +31,7 @@ class FarmApp:
     def __init__(self, storage_dir, post, notify=None, preset_dirs=(), default_name=None, spawn=None,
                  read_presets=None, apply_presets=None):
         self.store = PrinterStore(os.path.join(storage_dir, "farm_send_printers.json"))
+        set_shared_dir(storage_dir)   # every OrcaSlicer window shares one client slot per CC2
         self._post = post
         self._notify = notify or (lambda level, text: None)
         self.preset_dirs = list(preset_dirs)
