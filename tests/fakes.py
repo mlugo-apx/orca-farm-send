@@ -159,6 +159,7 @@ class FakeCC2:
     def __init__(self, token="abc123", serial="SNFAKE0001"):
         self.token, self.serial = token, serial
         self.files, self.started, self.status_code = {}, [], 1
+        self.put_connections, self.busy_puts = set(), 0   # connections used for uploads; 429s still to give
         self.file_times, self.stuck, self.list_calls, self.delete_calls = {}, set(), 0, 0
         self.progress = None   # override the reported progress, e.g. 100 on an idle printer after a print
         self.partial = {}
@@ -169,6 +170,7 @@ class FakeCC2:
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"   # keep-alive, like the printer: an upload reuses one connection
             def log_message(self, *args):
                 pass
 
@@ -190,6 +192,14 @@ class FakeCC2:
                                                                     "software_version": {"ota_version": "1.0"}}})
 
             def do_PUT(self):
+                outer.put_connections.add(self.client_address)
+                if outer.busy_puts > 0:               # "too many requests", as the real printer answers
+                    outer.busy_puts -= 1
+                    self.rfile.read(int(self.headers["Content-Length"]))
+                    self.send_response(429)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
                 if self.headers.get("X-Token") != outer.token:
                     self.send_response(401)
                     self.send_header("Content-Length", "0")

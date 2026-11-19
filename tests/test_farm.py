@@ -465,6 +465,42 @@ class WorkerPoolTests(unittest.TestCase):
         self.assertTrue(wait_for(lambda: done == ["x"]))
 
 
+class CC2UploadTests(unittest.TestCase):
+    """The printer refuses a burst of connections with HTTP 429, so a plate goes up over one."""
+
+    def setUp(self):
+        self.fake = FakeCC2(); self.addCleanup(self.fake.close)
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.path = os.path.join(self.tmp.name, "plate.gcode")
+        with open(self.path, "wb") as handle:
+            handle.write(os.urandom(10_000))
+        self.client = core.ElegooCC2(self.fake.address, "abc123", mqtt_port=self.fake.mqtt_port)
+        old = (core.CHUNK, core.CC2_UPLOAD_PAUSE)
+        core.CHUNK, core.CC2_UPLOAD_PAUSE = 1000, 0.01                # ten pieces, quick retries
+        self.addCleanup(lambda: setattr(core, "CHUNK", old[0]) or setattr(core, "CC2_UPLOAD_PAUSE", old[1]))
+
+    def test_all_pieces_share_one_connection(self):
+        seen = []
+        self.client.upload(self.path, "plate.gcode", progress=lambda sent, total: seen.append(sent))
+        with open(self.path, "rb") as handle:
+            self.assertEqual(self.fake.files["plate.gcode"], handle.read())
+        self.assertEqual(len(self.fake.put_connections), 1)
+        self.assertEqual(seen[-1], 10_000)
+
+    def test_busy_printer_is_retried_and_the_piece_is_resent(self):
+        self.fake.busy_puts = 3
+        self.client.upload(self.path, "plate.gcode")
+        with open(self.path, "rb") as handle:
+            self.assertEqual(self.fake.files["plate.gcode"], handle.read())
+
+    def test_gives_up_with_a_plain_message_when_it_stays_busy(self):
+        self.fake.busy_puts = 99
+        with self.assertRaises(core.FarmError) as caught:
+            self.client.upload(self.path, "plate.gcode")
+        self.assertIn("HTTP 429", str(caught.exception))
+        self.assertNotIn("plate.gcode", self.fake.files)
+
+
 class LibraryTests(unittest.TestCase):
     """Plates kept for reprinting: save from a slice, send later without slicing, pick the toolhead."""
 

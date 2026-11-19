@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.3
+
+- **Fixes "HTTP 429 from printer" when sending to a Centauri Carbon 2.** Any plate larger than about 3 MB failed partway through the upload. The plugin opened a new connection for every 1 MB piece, and the printer refuses a burst of connections. The upload now uses one kept-open connection, as OrcaSlicer's own Elegoo uploader does, and a busy reply or dropped connection is retried instead of failing the send. A 23 MB plate that failed before now uploads in about 5 seconds.
+
 ## 0.2.2
 
 - **Library folders, with folders inside folders.** **New folder** makes one at the top; the plus on a folder makes one inside it (up to four levels). The pencil and bin rename or remove a folder. Renaming carries everything inside along. Removing a folder keeps what is in it: its plates and subfolders move up one level. Pick a folder when you save a plate, or move a plate later with its pencil. Folders open and close one by one or with expand all / collapse all, a folder shows how many plates are inside it at any depth, and a search looks in every folder.

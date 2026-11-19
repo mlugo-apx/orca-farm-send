@@ -23,6 +23,8 @@ except ImportError:   # everything else
     msvcrt = None
 
 CHUNK = 1024 * 1024
+CC2_UPLOAD_TRIES = 5      # per piece, when the printer says busy (HTTP 429) or drops the connection
+CC2_UPLOAD_PAUSE = 3.0    # seconds before the first retry; grows with each one. The printer needed about 6 s.
 KIND_CC2 = "elegoo_cc2"
 KIND_MOONRAKER = "moonraker"
 KINDS = {KIND_CC2: "Elegoo Centauri Carbon 2 (ElegooLink)", KIND_MOONRAKER: "Moonraker / Klipper (Snapmaker U1)"}
@@ -624,33 +626,72 @@ class ElegooCC2:
                 "firmware": (info.get("software_version") or {}).get("ota_version", "")}
 
     def upload(self, path, filename, progress=None, cancelled=None):
+        """Send the file in 1 MB pieces over ONE kept-open connection, as OrcaSlicer's own ElegooLink
+        client does. The printer answers HTTP 429 once a few connections arrive within seconds, so a
+        connection per piece fails on any plate larger than about 3 MB (seen on a 23 MB plate; the
+        same plate took 6 s over one connection). A 429 or a dropped connection is retried on a new
+        connection after a pause, resending the same piece."""
         filename = safe_filename(filename)
         size = os.path.getsize(path)
         if size <= 0:
             raise FarmError("The G-code file is empty")
         md5 = file_md5(path)
-        url = "http://%s/upload" % self.address
-        sent = 0
-        with open(path, "rb") as handle:
-            while sent < size:
-                if cancelled is not None and cancelled():
-                    raise FarmError("Upload cancelled")
-                chunk = handle.read(CHUNK)
-                if not chunk:
-                    raise FarmError("The G-code file changed while uploading")
-                headers = {
-                    "Accept": "application/json",
-                    "Content-Type": "application/octet-stream",
-                    "Content-Range": "bytes %d-%d/%d" % (sent, sent + len(chunk) - 1, size),
-                    "X-File-Name": filename,   # raw, exactly as OrcaSlicer's own ElegooLink client sends it
-                    "X-File-MD5": md5,
-                    "X-Token": self.token,
-                }
-                reply = http_json(url, method="PUT", data=chunk, headers=headers, timeout=180)
-                _cc2_check(reply if "error_code" in reply else {"error_code": -1}, "Upload failed")
-                sent += len(chunk)
-                if progress is not None:
-                    progress(sent, size)
+        host, port, target = _split_url("http://%s/upload" % self.address)
+        connection, sent = None, 0
+        try:
+            with open(path, "rb") as handle:
+                while sent < size:
+                    chunk = handle.read(CHUNK)
+                    if not chunk:
+                        raise FarmError("The G-code file changed while uploading")
+                    headers = {
+                        "Accept": "application/json",
+                        "Content-Type": "application/octet-stream",
+                        "Content-Length": str(len(chunk)),
+                        "Content-Range": "bytes %d-%d/%d" % (sent, sent + len(chunk) - 1, size),
+                        "X-File-Name": filename,   # raw, exactly as OrcaSlicer's own ElegooLink client sends it
+                        "X-File-MD5": md5,
+                        "X-Token": self.token,
+                    }
+                    for attempt in range(CC2_UPLOAD_TRIES):
+                        if cancelled is not None and cancelled():
+                            raise FarmError("Upload cancelled")
+                        status, raw, problem = 0, b"", ""
+                        try:
+                            if connection is None:
+                                connection = http.client.HTTPConnection(host, port, timeout=180)
+                            connection.request("PUT", target, body=chunk, headers=headers)
+                            response = connection.getresponse()
+                            status, raw = response.status, response.read()
+                        except PermissionError:
+                            raise
+                        except (socket.timeout, TimeoutError):
+                            problem = "timed out"
+                        except (OSError, http.client.HTTPException) as error:
+                            problem = str(getattr(error, "strerror", None) or error)
+                        if status == 200:
+                            break
+                        if status in (401, 403):
+                            raise FarmError("Access denied (HTTP %d). Check the access code or API key." % status)
+                        # Busy or dropped: start over on a fresh connection after a growing pause.
+                        if connection is not None:
+                            connection.close()
+                            connection = None
+                        if attempt == CC2_UPLOAD_TRIES - 1 or (status and status != 429):
+                            raise FarmError("Upload failed: %s" % (("HTTP %d from printer" % status) if status else
+                                                                   ("cannot reach printer: " + problem)))
+                        time.sleep(CC2_UPLOAD_PAUSE * (attempt + 1))
+                    try:
+                        reply = json.loads(raw.decode("utf-8", errors="replace")) if raw else {}
+                    except ValueError:
+                        reply = {}
+                    _cc2_check(reply if isinstance(reply, dict) and "error_code" in reply else {"error_code": -1}, "Upload failed")
+                    sent += len(chunk)
+                    if progress is not None:
+                        progress(sent, size)
+        finally:
+            if connection is not None:
+                connection.close()
         return filename
 
     # -- MQTT -------------------------------------------------------------------------
