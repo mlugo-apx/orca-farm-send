@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.1
+
+- Fixed: a copy installed from the OrcaSlicer Plugin Hub could not find its saved printers or your printer presets, because hub installs use a different folder layout than file installs. File installs were not affected.
+
 ## 0.1.0
 
 First public release.
