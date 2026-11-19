@@ -6,7 +6,7 @@ import threading
 import time
 import uuid
 
-from core import (CC2_MANY_FILES, KIND_CC2, WATCHED_STATES, BedLog, FarmError, bed_needs_clearing, files_to_clean, rule_text,
+from core import (CC2_MANY_FILES, STORE_FILE, KIND_CC2, WATCHED_STATES, BedLog, FarmError, bed_needs_clearing, files_to_clean, rule_text,
                   storage_summary, PrinterStore, can_start, job_filename, make_client, model_key, model_matches,
                   parse_gcode_meta, presets_to_printers, set_shared_dir, status_event, strip_model_suffix, validate_printer)
 # BUNDLE-STRIP-END
@@ -33,7 +33,7 @@ def _short_duration(seconds):
 class FarmApp:
     def __init__(self, storage_dir, post, notify=None, preset_dirs=(), default_name=None, spawn=None,
                  read_presets=None, apply_presets=None):
-        self.store = PrinterStore(os.path.join(storage_dir, "farm_send_printers.json"))
+        self.store = PrinterStore(os.path.join(storage_dir, STORE_FILE))
         set_shared_dir(storage_dir)   # every OrcaSlicer window shares one client slot per CC2
         self.beds = BedLog(os.path.join(storage_dir, "farm_send_beds.json"))
         self.cleaned = BedLog(os.path.join(storage_dir, "farm_send_cleaned.json"))   # last automatic cleanup per printer

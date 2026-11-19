@@ -1529,6 +1529,39 @@ def bed_needs_clearing(known, status):
     return None
 
 
+STORE_FILE = "farm_send_printers.json"
+
+
+def data_dir_of(path):
+    """OrcaSlicer's data folder, found from any path inside its orca_plugins folder.
+
+    A plugin installed from a file lives in <data>/orca_plugins/<folder>/ with its storage in
+    <data>/orca_plugins/plugin_data/<key>/. One installed from the Plugin Hub sits two levels
+    deeper, under _subscribed/<user id>/. Walking up to "orca_plugins" works for both."""
+    path = os.path.abspath(path or "")
+    while True:
+        parent = os.path.dirname(path)
+        if os.path.basename(path) == "orca_plugins":
+            return parent
+        if not parent or parent == path:
+            return ""
+        path = parent
+
+
+def saved_store_files(data_dir):
+    """This plugin's own printer files under plugin_data, wherever OrcaSlicer put its storage."""
+    if not data_dir:
+        return []
+    base = os.path.join(data_dir, "orca_plugins", "plugin_data")
+    found = []
+    for folder, _dirs, files in os.walk(base):
+        if folder[len(base):].count(os.sep) > 4:   # <key>, or _subscribed/<user>/<key>; no deeper
+            continue
+        if STORE_FILE in files:
+            found.append(os.path.join(folder, STORE_FILE))
+    return sorted(found)
+
+
 def presets_to_printers(preset_dir):
     """Build printer entries from OrcaSlicer user machine presets that have a print host set."""
     found = []
@@ -1613,7 +1646,7 @@ def _short_duration(seconds):
 class FarmApp:
     def __init__(self, storage_dir, post, notify=None, preset_dirs=(), default_name=None, spawn=None,
                  read_presets=None, apply_presets=None):
-        self.store = PrinterStore(os.path.join(storage_dir, "farm_send_printers.json"))
+        self.store = PrinterStore(os.path.join(storage_dir, STORE_FILE))
         set_shared_dir(storage_dir)   # every OrcaSlicer window shares one client slot per CC2
         self.beds = BedLog(os.path.join(storage_dir, "farm_send_beds.json"))
         self.cleaned = BedLog(os.path.join(storage_dir, "farm_send_cleaned.json"))   # last automatic cleanup per printer
@@ -2996,9 +3029,9 @@ PLUGIN_TITLE = "Farm Send"
 
 
 def _data_dir_from_file():
-    """<data_dir> derived from this file's install path: <data_dir>/orca_plugins/<folder>/<file>.py"""
+    """OrcaSlicer's data folder, derived from where this file is installed."""
     try:
-        return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        return data_dir_of(__file__)
     except NameError:
         return ""
 
@@ -3022,7 +3055,7 @@ def _saved_hosts():
     if not base:
         return []
     hosts = set()
-    for path in glob.glob(os.path.join(base, "orca_plugins", "plugin_data", "*", "farm_send_printers.json")):
+    for path in saved_store_files(base):
         hosts.update(PrinterStore(path).hosts())
     return sorted(hosts)
 
@@ -3038,7 +3071,7 @@ class FarmSend(orca.script.ScriptPluginCapabilityBase):
     def _ensure_app(self):
         if self.app is None:
             storage = orca.host.plugin.storage()
-            data_dir = os.path.dirname(os.path.dirname(os.path.dirname(storage)))
+            data_dir = data_dir_of(storage)   # works for a file install and a Plugin Hub install
             preset_dirs = sorted(glob.glob(os.path.join(data_dir, "user", "*", "machine")))
             self.app = FarmApp(storage, self._post, self._notify, preset_dirs, self._default_name,
                                read_presets=self._read_presets, apply_presets=self._apply_presets)

@@ -348,6 +348,39 @@ class CC2Tests(unittest.TestCase):
         self.assertEqual(self.client.list_files(), [])
 
 
+class InstallLayoutTests(unittest.TestCase):
+    """A plugin installed from a file and one installed from the Plugin Hub live in different folders."""
+
+    def test_data_dir_and_saved_printers_for_both_layouts(self):
+        with tempfile.TemporaryDirectory() as data:
+            plugins = os.path.join(data, "orca_plugins")
+            layouts = {
+                "file": (os.path.join(plugins, "farm_send.py", "farm_send.py"),
+                         os.path.join(plugins, "plugin_data", "farm_send")),
+                "hub": (os.path.join(plugins, "_subscribed", "user-123", "farm_send", "farm_send_any.py"),
+                        os.path.join(plugins, "plugin_data", "_subscribed", "user-123", "farm_send")),
+            }
+            for name, (plugin_file, storage) in layouts.items():
+                self.assertEqual(core.data_dir_of(plugin_file), data, name)
+                self.assertEqual(core.data_dir_of(storage), data, name)
+                os.makedirs(storage)
+                store = core.PrinterStore(os.path.join(storage, core.STORE_FILE))
+                store.upsert({"name": name, "kind": core.KIND_MOONRAKER, "address": "10.0.0.%d" % (len(name)), "model": "Snapmaker U1"})
+            found = core.saved_store_files(data)
+            self.assertEqual(len(found), 2)
+            hosts = sorted(host for path in found for host in core.PrinterStore(path).hosts())
+            self.assertEqual(hosts, ["10.0.0.3", "10.0.0.4"])
+            # another plugin's data is not this plugin's business
+            os.makedirs(os.path.join(plugins, "plugin_data", "other_plugin"))
+            open(os.path.join(plugins, "plugin_data", "other_plugin", "secrets.json"), "w").close()
+            self.assertEqual(len(core.saved_store_files(data)), 2)
+
+    def test_paths_outside_orcaslicer_give_nothing(self):
+        self.assertEqual(core.data_dir_of("/somewhere/else/file.py"), "")
+        self.assertEqual(core.data_dir_of(""), "")
+        self.assertEqual(core.saved_store_files(""), [])
+
+
 class SharedSlotTests(unittest.TestCase):
     """Every OrcaSlicer window of one user shares a single client slot per Centauri Carbon 2."""
 

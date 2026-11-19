@@ -5,7 +5,7 @@ import tempfile
 
 import orca
 from app import FarmApp
-from core import PrinterStore
+from core import PrinterStore, data_dir_of, saved_store_files
 PANEL_HTML = ""
 # BUNDLE-STRIP-END
 
@@ -13,9 +13,9 @@ PLUGIN_TITLE = "Farm Send"
 
 
 def _data_dir_from_file():
-    """<data_dir> derived from this file's install path: <data_dir>/orca_plugins/<folder>/<file>.py"""
+    """OrcaSlicer's data folder, derived from where this file is installed."""
     try:
-        return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        return data_dir_of(__file__)
     except NameError:
         return ""
 
@@ -39,7 +39,7 @@ def _saved_hosts():
     if not base:
         return []
     hosts = set()
-    for path in glob.glob(os.path.join(base, "orca_plugins", "plugin_data", "*", "farm_send_printers.json")):
+    for path in saved_store_files(base):
         hosts.update(PrinterStore(path).hosts())
     return sorted(hosts)
 
@@ -55,7 +55,7 @@ class FarmSend(orca.script.ScriptPluginCapabilityBase):
     def _ensure_app(self):
         if self.app is None:
             storage = orca.host.plugin.storage()
-            data_dir = os.path.dirname(os.path.dirname(os.path.dirname(storage)))
+            data_dir = data_dir_of(storage)   # works for a file install and a Plugin Hub install
             preset_dirs = sorted(glob.glob(os.path.join(data_dir, "user", "*", "machine")))
             self.app = FarmApp(storage, self._post, self._notify, preset_dirs, self._default_name,
                                read_presets=self._read_presets, apply_presets=self._apply_presets)

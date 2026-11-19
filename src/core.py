@@ -1509,6 +1509,39 @@ def bed_needs_clearing(known, status):
     return None
 
 
+STORE_FILE = "farm_send_printers.json"
+
+
+def data_dir_of(path):
+    """OrcaSlicer's data folder, found from any path inside its orca_plugins folder.
+
+    A plugin installed from a file lives in <data>/orca_plugins/<folder>/ with its storage in
+    <data>/orca_plugins/plugin_data/<key>/. One installed from the Plugin Hub sits two levels
+    deeper, under _subscribed/<user id>/. Walking up to "orca_plugins" works for both."""
+    path = os.path.abspath(path or "")
+    while True:
+        parent = os.path.dirname(path)
+        if os.path.basename(path) == "orca_plugins":
+            return parent
+        if not parent or parent == path:
+            return ""
+        path = parent
+
+
+def saved_store_files(data_dir):
+    """This plugin's own printer files under plugin_data, wherever OrcaSlicer put its storage."""
+    if not data_dir:
+        return []
+    base = os.path.join(data_dir, "orca_plugins", "plugin_data")
+    found = []
+    for folder, _dirs, files in os.walk(base):
+        if folder[len(base):].count(os.sep) > 4:   # <key>, or _subscribed/<user>/<key>; no deeper
+            continue
+        if STORE_FILE in files:
+            found.append(os.path.join(folder, STORE_FILE))
+    return sorted(found)
+
+
 def presets_to_printers(preset_dir):
     """Build printer entries from OrcaSlicer user machine presets that have a print host set."""
     found = []
