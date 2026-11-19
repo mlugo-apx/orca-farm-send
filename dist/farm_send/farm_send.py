@@ -134,6 +134,15 @@ def normalize_model(name):
     return re.sub(r"[^a-z0-9]", "", (name or "").lower())
 
 
+def model_key(name):
+    """Stable key for a printer type: 'Elegoo Centauri Carbon 2' and 'CentauriCarbon2' share one."""
+    key = normalize_model(name)
+    for vendor in ("elegoo", "snapmaker"):
+        if key.startswith(vendor) and len(key) > len(vendor):
+            key = key[len(vendor):]
+    return key
+
+
 def model_matches(gcode_model, printer_model):
     """True when G-code sliced for gcode_model may be sent to a printer of printer_model.
 
@@ -891,14 +900,19 @@ class PrinterStore:
         self.path = path
         self._lock = threading.Lock()
         self.printers = []
+        self.combos = {}
         self.load()
 
     def load(self):
+        self.combos = {}
         try:
             with open(self.path, "r", encoding="utf-8") as handle:
                 data = json.load(handle)
             self.printers = [p for p in data.get("printers", []) if isinstance(p, dict) and p.get("id")]
-        except (OSError, ValueError):
+            combos = data.get("combos", {})
+            if isinstance(combos, dict):
+                self.combos = {key: value for key, value in combos.items() if isinstance(value, dict) and value.get("printer")}
+        except (OSError, ValueError, AttributeError):
             self.printers = []
 
     def save(self):
@@ -911,7 +925,7 @@ class PrinterStore:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 if hasattr(os, "fchmod"):
                     os.fchmod(handle.fileno(), 0o600)   # also tightens a leftover temp file
-                json.dump({"version": 1, "printers": self.printers}, handle, indent=2)
+                json.dump({"version": 1, "printers": self.printers, "combos": self.combos}, handle, indent=2)
             os.replace(temp, self.path)
 
     def get(self, printer_id):
@@ -934,6 +948,20 @@ class PrinterStore:
     def remove(self, printer_id):
         self.printers = [p for p in self.printers if p["id"] != printer_id]
         self.save()
+
+    def set_combo(self, model, printer, process, filaments):
+        """Remember which presets to slice with for one printer type."""
+        key = model_key(model)
+        if not key or not printer:
+            raise FarmError("Select a printer preset in OrcaSlicer first")
+        self.combos[key] = {"label": model.strip(), "printer": printer, "process": process or "",
+                            "filaments": [name for name in (filaments or []) if name]}
+        self.save()
+        return key
+
+    def remove_combo(self, key):
+        if self.combos.pop(key, None) is not None:
+            self.save()
 
     def hosts(self):
         return sorted({host_of(p.get("address", "")).split(":")[0] for p in self.printers if p.get("address")})
@@ -1019,7 +1047,8 @@ def _short_duration(seconds):
 
 
 class FarmApp:
-    def __init__(self, storage_dir, post, notify=None, preset_dirs=(), default_name=None, spawn=None):
+    def __init__(self, storage_dir, post, notify=None, preset_dirs=(), default_name=None, spawn=None,
+                 read_presets=None, apply_presets=None):
         self.store = PrinterStore(os.path.join(storage_dir, "farm_send_printers.json"))
         self._post = post
         self._notify = notify or (lambda level, text: None)
@@ -1035,6 +1064,13 @@ class FarmApp:
         self._status_busy = set()
         self.sends = {}           # printer id -> {active, text, percent, ok}
         self._cancel = {}
+        # Slicing presets. read_presets() must run on the UI thread and returns the current selection
+        # {"model", "printer", "process", "filaments"}; apply_presets(combo) switches to a saved one
+        # and must run OFF the UI thread, because it waits for OrcaSlicer's own selection dialogs.
+        self._read_presets = read_presets
+        self._apply_presets = apply_presets
+        self.current = None
+        self.combo_note = {"text": "", "ok": True, "busy": False}
 
     @staticmethod
     def _spawn_thread(target, *args):
@@ -1140,6 +1176,7 @@ class FarmApp:
             "display_name": self._job_base_name(job), "summary": " · ".join(bits),
             "printer_model": meta.get("printer_model", ""), "sliced_at": _clock(job["captured_at"]),
             "post_process": bool((meta.get("post_process") or "").strip()),
+            "presets": " \u00b7 ".join(part for part in (meta.get("process_preset"), meta.get("filament_preset")) if part),
             "matches": {p["id"]: model_matches(meta.get("printer_model"), p.get("model")) for p in self.store.printers},
         }
 
@@ -1155,7 +1192,36 @@ class FarmApp:
                 "slicing": self.slicing,
                 "status": dict(self.status),
                 "sends": dict(self.sends),
+                "combos": self._combo_views(),
+                "current": dict(self.current) if self.current else None,
+                "combo_note": dict(self.combo_note),
+                "can_switch": self._apply_presets is not None,
             }
+
+    def _combo_views(self):
+        current = self.current or {}
+        views = []
+        for key, combo in sorted(self.store.combos.items(), key=lambda item: item[1].get("label", "").lower()):
+            active = (current.get("printer") == combo.get("printer") and current.get("process") == combo.get("process")
+                      and list(current.get("filaments") or [])[:len(combo.get("filaments") or [])] == list(combo.get("filaments") or []))
+            views.append({"key": key, "label": combo.get("label", key), "printer": combo.get("printer", ""),
+                          "process": combo.get("process", ""), "filaments": list(combo.get("filaments") or []),
+                          "active": bool(active),
+                          "printers": [p["name"] for p in self.store.printers if model_key(p.get("model")) == key]})
+        return views
+
+    def refresh_current(self):
+        """Re-read OrcaSlicer's selected presets. UI thread only. Returns True when they changed."""
+        if self._read_presets is None:
+            return False
+        try:
+            current = self._read_presets()
+        except Exception:
+            return False
+        if current != self.current:
+            self.current = current
+            return True
+        return False
 
     def post_state(self):
         self.post(self.snapshot())
@@ -1168,11 +1234,63 @@ class FarmApp:
             handler(message)
 
     def _cmd_init(self, message):
+        self.refresh_current()
         self.post_state()
         self.poll(force=True)
 
     def _cmd_poll(self, message):
+        if self.refresh_current():
+            self.post_state()
         self.poll()
+
+    def _set_combo_note(self, text, ok=True, busy=False):
+        with self.lock:
+            self.combo_note = {"text": text, "ok": ok, "busy": busy}
+
+    def _cmd_save_combo(self, message):
+        self.refresh_current()
+        current = self.current or {}
+        try:
+            if not current.get("model"):
+                raise FarmError("Select a printer preset in OrcaSlicer first")
+            self.store.set_combo(current["model"], current.get("printer"), current.get("process"), current.get("filaments"))
+            self._set_combo_note("Saved the current presets for %s." % current["model"])
+        except FarmError as error:
+            self._set_combo_note(str(error), ok=False)
+        except OSError as error:
+            self._set_combo_note("Could not save: %s" % (error.strerror or error), ok=False)
+        self.post_state()
+
+    def _cmd_delete_combo(self, message):
+        try:
+            self.store.remove_combo(message.get("key"))
+            self._set_combo_note("")
+        except OSError as error:
+            self._set_combo_note("Could not save: %s" % (error.strerror or error), ok=False)
+        self.post_state()
+
+    def _cmd_load_combo(self, message):
+        combo = self.store.combos.get(message.get("key"))
+        if combo is None or self._apply_presets is None:
+            return
+        with self.lock:
+            if self.combo_note.get("busy"):
+                return
+            self.combo_note = {"text": "Switching presets to %s..." % combo.get("label", ""), "ok": True, "busy": True}
+        self.post_state()
+        self._spawn(self._load_combo_worker, dict(combo))
+
+    def _load_combo_worker(self, combo):
+        try:
+            skipped = self._apply_presets(combo) or []
+            text = "Presets set for %s. Slice the plate." % combo.get("label", "")
+            if skipped:
+                text += " Not applied: %s." % "; ".join(skipped)
+            self._set_combo_note(text, ok=not skipped)
+        except Exception as error:
+            self._set_combo_note("Presets not switched: %s" % error, ok=False)
+        # The selection is re-read on the next poll, which runs on the UI thread.
+        self.post_state()
 
     def _cmd_select_job(self, message):
         with self.lock:
@@ -1427,6 +1545,7 @@ PANEL_HTML = r"""<style>
   </div>
 </div>
 
+<div class="box" id="combos"></div>
 <div class="box" id="job"></div>
 <div id="multi" class="box" style="display:none"></div>
 <div id="printers"></div>
@@ -1436,7 +1555,8 @@ PANEL_HTML = r"""<style>
 
 <script>
 (function () {
-  var state = { printers: [], job: null, jobs: [], status: {}, sends: {}, slicing: false };
+  var state = { printers: [], job: null, jobs: [], status: {}, sends: {}, slicing: false,
+                combos: [], current: null, combo_note: { text: "" }, can_switch: false };
   var selected = {};
   var $ = function (id) { return document.getElementById(id); };
 
@@ -1572,6 +1692,7 @@ PANEL_HTML = r"""<style>
       html = "<div class='job-name'>" + esc(job.display_name) + "</div>" +
              "<div class='muted small'>" + esc(job.summary) + "</div>" +
              "<div class='muted small'>For " + esc(job.printer_model || "unknown printer") + " · sliced " + esc(job.sliced_at) + "</div>" +
+             (job.presets ? "<div class='muted small file' title='" + esc(job.presets) + "'>" + esc(job.presets) + "</div>" : "") +
              (job.stale ? "<div class='warn small'>Plate or preset changed since this slice.</div>" : "") +
              (job.post_process ? "<div class='warn small'>Post-processing scripts are not applied.</div>" : "");
       if (state.jobs.length > 1) {
@@ -1583,6 +1704,38 @@ PANEL_HTML = r"""<style>
     $("job").innerHTML = html;
     if ($("job-pick")) $("job-pick").onchange = function () { send("select_job", { job_id: this.value }); };
   }
+
+  function renderCombos() {
+    var current = state.current, note = state.combo_note || {}, busy = !!note.busy;
+    var html = "<div class='row spread'><span class='card-title'>Slice for</span>" +
+      "<button type='button' class='linkish' id='combo-save'" + (current && current.model ? "" : " disabled") +
+      " title='Remember the printer, process and filament presets selected in OrcaSlicer right now'>" +
+      "remember current" + (current && current.model ? " for " + esc(current.model) : "") + "</button></div>";
+    if (!state.combos.length) {
+      html += "<div class='muted small' style='margin-top:4px'>Select the printer, process and filament you use for one printer type, " +
+              "then click remember. One click brings them back later.</div>";
+    }
+    html += state.combos.map(function (c) {
+      var detail = [c.process].concat(c.filaments.length ? [c.filaments[0] + (c.filaments.length > 1 ? " +" + (c.filaments.length - 1) : "")] : []);
+      return "<div class='row spread' style='margin-top:7px;gap:8px'>" +
+        "<div style='min-width:0'><div class='file'><b>" + esc(c.label) + "</b>" +
+          (c.active ? " <span class='ok small'>selected</span>" : "") + "</div>" +
+        "<div class='file small muted' title='" + esc(c.printer + " | " + c.process + " | " + c.filaments.join(", ")) + "'>" + esc(detail.join(" · ")) + "</div>" +
+        "<div class='file small muted'>" + (c.printers.length ? esc(c.printers.join(", ")) : "no printers of this type") + "</div></div>" +
+        "<div class='row' style='flex:none'>" +
+        "<button type='button' class='quiet' data-combo-load='" + esc(c.key) + "'" + (busy || c.active || !state.can_switch ? " disabled" : "") + ">Use</button>" +
+        "<button type='button' class='linkish' data-combo-del='" + esc(c.key) + "' title='Forget these presets'>x</button></div></div>";
+    }).join("");
+    if (note.text) html += "<div class='small " + (note.ok ? "muted" : "err") + "' style='margin-top:6px'>" + esc(note.text) + "</div>";
+    $("combos").innerHTML = html;
+    $("combo-save").onclick = function () { send("save_combo"); };
+  }
+
+  $("combos").addEventListener("click", function (event) {
+    var d = event.target.dataset || {};
+    if (d.comboLoad) send("load_combo", { key: d.comboLoad });
+    else if (d.comboDel) send("delete_combo", { key: d.comboDel });
+  });
 
   function renderMulti() {
     var ids = Object.keys(selected).filter(function (id) { return selected[id]; });
@@ -1648,7 +1801,7 @@ PANEL_HTML = r"""<style>
     }).join("");
   }
 
-  function render() { renderJob(); renderMulti(); renderPrinters(); }
+  function render() { renderCombos(); renderJob(); renderMulti(); renderPrinters(); }
 
   function byId(id) { return state.printers.filter(function (p) { return p.id === id; })[0]; }
 
@@ -1666,7 +1819,7 @@ PANEL_HTML = r"""<style>
   orca.onMessage(function (message) {
     if (!message) return;
     if (message.command === "state") {
-      ["printers", "job", "jobs", "slicing"].forEach(function (key) { if (key in message) state[key] = message[key]; });
+      ["printers", "job", "jobs", "slicing", "combos", "current", "combo_note", "can_switch"].forEach(function (key) { if (key in message) state[key] = message[key]; });
       if (message.status) state.status = message.status;
       if (message.sends) state.sends = message.sends;
       render();
@@ -1746,7 +1899,8 @@ class FarmSend(orca.script.ScriptPluginCapabilityBase):
             storage = orca.host.plugin.storage()
             data_dir = os.path.dirname(os.path.dirname(os.path.dirname(storage)))
             preset_dirs = sorted(glob.glob(os.path.join(data_dir, "user", "*", "machine")))
-            self.app = FarmApp(storage, self._post, self._notify, preset_dirs, self._default_name)
+            self.app = FarmApp(storage, self._post, self._notify, preset_dirs, self._default_name,
+                               read_presets=self._read_presets, apply_presets=self._apply_presets)
         return self.app
 
     def _post(self, message):
@@ -1769,6 +1923,41 @@ class FarmSend(orca.script.ScriptPluginCapabilityBase):
             return objects[0].name if objects else ""
         except Exception:
             return ""
+
+    def _read_presets(self):
+        # UI thread only (panel messages).
+        bundle = orca.host.preset_bundle()
+        printer = bundle.current_printer_preset()
+        return {
+            "model": printer.config_value("printer_model") or "",
+            "printer": printer.name,
+            "process": bundle.current_process_preset().name,
+            "filaments": list(bundle.current_filament_preset_names()),
+        }
+
+    def _apply_presets(self, combo):
+        """Switch OrcaSlicer to a saved printer/filament/process selection.
+
+        Runs on a plugin thread, never the UI thread: each call hands the selection to the UI thread
+        and waits, including for OrcaSlicer's own save/discard dialog when a preset has unsaved
+        edits. begin_update() is used only for its selection step; nothing is staged or committed.
+        Printer first, because it decides which filaments and processes can be chosen.
+        Returns the parts that could not be applied; raises if the printer could not be selected."""
+        skipped = []
+        orca.host.preset.printer.begin_update(preset_name=combo["printer"])
+        for index, name in enumerate(combo.get("filaments") or []):
+            try:
+                orca.host.preset.filament.begin_update(index + 1, name)
+            except IndexError:
+                break      # this printer selection has fewer filament slots than were saved
+            except (ValueError, RuntimeError) as error:
+                skipped.append("filament %d (%s)" % (index + 1, str(error).splitlines()[0][:120]))
+        if combo.get("process"):
+            try:
+                orca.host.preset.process.begin_update(preset_name=combo["process"])
+            except (ValueError, RuntimeError) as error:
+                skipped.append("process (%s)" % str(error).splitlines()[0][:120])
+        return skipped
 
     # ---- capability entry points -------------------------------------------------------------
     def execute(self):

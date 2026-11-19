@@ -44,6 +44,7 @@
   </div>
 </div>
 
+<div class="box" id="combos"></div>
 <div class="box" id="job"></div>
 <div id="multi" class="box" style="display:none"></div>
 <div id="printers"></div>
@@ -53,7 +54,8 @@
 
 <script>
 (function () {
-  var state = { printers: [], job: null, jobs: [], status: {}, sends: {}, slicing: false };
+  var state = { printers: [], job: null, jobs: [], status: {}, sends: {}, slicing: false,
+                combos: [], current: null, combo_note: { text: "" }, can_switch: false };
   var selected = {};
   var $ = function (id) { return document.getElementById(id); };
 
@@ -189,6 +191,7 @@
       html = "<div class='job-name'>" + esc(job.display_name) + "</div>" +
              "<div class='muted small'>" + esc(job.summary) + "</div>" +
              "<div class='muted small'>For " + esc(job.printer_model || "unknown printer") + " · sliced " + esc(job.sliced_at) + "</div>" +
+             (job.presets ? "<div class='muted small file' title='" + esc(job.presets) + "'>" + esc(job.presets) + "</div>" : "") +
              (job.stale ? "<div class='warn small'>Plate or preset changed since this slice.</div>" : "") +
              (job.post_process ? "<div class='warn small'>Post-processing scripts are not applied.</div>" : "");
       if (state.jobs.length > 1) {
@@ -200,6 +203,38 @@
     $("job").innerHTML = html;
     if ($("job-pick")) $("job-pick").onchange = function () { send("select_job", { job_id: this.value }); };
   }
+
+  function renderCombos() {
+    var current = state.current, note = state.combo_note || {}, busy = !!note.busy;
+    var html = "<div class='row spread'><span class='card-title'>Slice for</span>" +
+      "<button type='button' class='linkish' id='combo-save'" + (current && current.model ? "" : " disabled") +
+      " title='Remember the printer, process and filament presets selected in OrcaSlicer right now'>" +
+      "remember current" + (current && current.model ? " for " + esc(current.model) : "") + "</button></div>";
+    if (!state.combos.length) {
+      html += "<div class='muted small' style='margin-top:4px'>Select the printer, process and filament you use for one printer type, " +
+              "then click remember. One click brings them back later.</div>";
+    }
+    html += state.combos.map(function (c) {
+      var detail = [c.process].concat(c.filaments.length ? [c.filaments[0] + (c.filaments.length > 1 ? " +" + (c.filaments.length - 1) : "")] : []);
+      return "<div class='row spread' style='margin-top:7px;gap:8px'>" +
+        "<div style='min-width:0'><div class='file'><b>" + esc(c.label) + "</b>" +
+          (c.active ? " <span class='ok small'>selected</span>" : "") + "</div>" +
+        "<div class='file small muted' title='" + esc(c.printer + " | " + c.process + " | " + c.filaments.join(", ")) + "'>" + esc(detail.join(" · ")) + "</div>" +
+        "<div class='file small muted'>" + (c.printers.length ? esc(c.printers.join(", ")) : "no printers of this type") + "</div></div>" +
+        "<div class='row' style='flex:none'>" +
+        "<button type='button' class='quiet' data-combo-load='" + esc(c.key) + "'" + (busy || c.active || !state.can_switch ? " disabled" : "") + ">Use</button>" +
+        "<button type='button' class='linkish' data-combo-del='" + esc(c.key) + "' title='Forget these presets'>x</button></div></div>";
+    }).join("");
+    if (note.text) html += "<div class='small " + (note.ok ? "muted" : "err") + "' style='margin-top:6px'>" + esc(note.text) + "</div>";
+    $("combos").innerHTML = html;
+    $("combo-save").onclick = function () { send("save_combo"); };
+  }
+
+  $("combos").addEventListener("click", function (event) {
+    var d = event.target.dataset || {};
+    if (d.comboLoad) send("load_combo", { key: d.comboLoad });
+    else if (d.comboDel) send("delete_combo", { key: d.comboDel });
+  });
 
   function renderMulti() {
     var ids = Object.keys(selected).filter(function (id) { return selected[id]; });
@@ -265,7 +300,7 @@
     }).join("");
   }
 
-  function render() { renderJob(); renderMulti(); renderPrinters(); }
+  function render() { renderCombos(); renderJob(); renderMulti(); renderPrinters(); }
 
   function byId(id) { return state.printers.filter(function (p) { return p.id === id; })[0]; }
 
@@ -283,7 +318,7 @@
   orca.onMessage(function (message) {
     if (!message) return;
     if (message.command === "state") {
-      ["printers", "job", "jobs", "slicing"].forEach(function (key) { if (key in message) state[key] = message[key]; });
+      ["printers", "job", "jobs", "slicing", "combos", "current", "combo_note", "can_switch"].forEach(function (key) { if (key in message) state[key] = message[key]; });
       if (message.status) state.status = message.status;
       if (message.sends) state.sends = message.sends;
       render();

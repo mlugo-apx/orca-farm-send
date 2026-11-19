@@ -428,5 +428,85 @@ class AppTests(unittest.TestCase):
         self.assertEqual(self.u1.started, [])
 
 
+class ComboTests(unittest.TestCase):
+    def setUp(self):
+        self.folder = tempfile.TemporaryDirectory()
+        self.addCleanup(self.folder.cleanup)
+        self.selected = {"model": "Snapmaker U1", "printer": "Snapmaker U1 (0.4 nozzle) - #1", "process": "0.20 Standard",
+                         "filaments": ["PETG Black", "PETG White"]}
+        self.applied, self.fail, self.skip = [], None, []
+
+        def apply(combo):
+            self.assertIsNot(threading.current_thread(), threading.main_thread())   # never on the UI thread
+            if self.fail:
+                raise RuntimeError(self.fail)
+            self.applied.append(combo)
+            self.selected = {"model": combo["label"], "printer": combo["printer"], "process": combo["process"],
+                             "filaments": list(combo["filaments"])}
+            return list(self.skip)
+
+        self.posts = []
+        self.app = FarmApp(self.folder.name, self.posts.append, read_presets=lambda: dict(self.selected), apply_presets=apply)
+        self.app.store.upsert({"name": "U1 #1", "kind": core.KIND_MOONRAKER, "address": "10.0.0.1", "model": "Snapmaker U1"})
+        self.app.store.upsert({"name": "CC1", "kind": core.KIND_CC2, "address": "10.0.0.2", "model": "Centauri Carbon 2"})
+
+    def note(self):
+        return self.app.snapshot()["combo_note"]
+
+    def test_remember_use_and_persist(self):
+        self.app.handle({"command": "init"})
+        self.app.handle({"command": "save_combo"})
+        self.selected = {"model": "Elegoo Centauri Carbon 2", "printer": "CC1 preset", "process": "0.20 CC2", "filaments": ["Rapid PETG"]}
+        self.app.handle({"command": "save_combo"})
+        combos = {c["label"]: c for c in self.app.snapshot()["combos"]}
+        self.assertEqual(set(combos), {"Snapmaker U1", "Elegoo Centauri Carbon 2"})
+        self.assertEqual(combos["Snapmaker U1"]["printers"], ["U1 #1"])
+        self.assertEqual(combos["Elegoo Centauri Carbon 2"]["printers"], ["CC1"])   # printer says "Centauri Carbon 2"
+        self.assertTrue(combos["Elegoo Centauri Carbon 2"]["active"])
+        self.assertFalse(combos["Snapmaker U1"]["active"])
+        self.app.handle({"command": "load_combo", "key": combos["Snapmaker U1"]["key"]})
+        self.assertTrue(wait_for(lambda: self.applied and not self.note()["busy"]))
+        self.assertEqual(self.applied[0]["printer"], "Snapmaker U1 (0.4 nozzle) - #1")
+        self.assertEqual(self.applied[0]["filaments"], ["PETG Black", "PETG White"])
+        self.assertTrue(self.note()["ok"])
+        self.app.handle({"command": "poll"})
+        self.assertTrue({c["label"]: c["active"] for c in self.app.snapshot()["combos"]}["Snapmaker U1"])
+        again = core.PrinterStore(self.app.store.path)
+        self.assertEqual((len(again.combos), len(again.printers)), (2, 2))
+
+    def test_saving_again_replaces_the_type_entry(self):
+        self.app.handle({"command": "save_combo"})
+        self.selected["process"] = "0.28 Draft"
+        self.app.handle({"command": "save_combo"})
+        self.assertEqual([c["process"] for c in self.app.snapshot()["combos"]], ["0.28 Draft"])
+
+    def test_failure_and_partial_apply_are_reported(self):
+        self.app.handle({"command": "save_combo"})
+        key = self.app.snapshot()["combos"][0]["key"]
+        self.fail = "Switching the edited printer preset was canceled"
+        self.app.handle({"command": "load_combo", "key": key})
+        self.assertTrue(wait_for(lambda: "canceled" in self.note()["text"]))
+        self.assertFalse(self.note()["ok"])
+        self.assertFalse(self.note()["busy"])
+        self.fail, self.skip = None, ["filament 2 (not offered)"]
+        self.app.handle({"command": "load_combo", "key": key})
+        self.assertTrue(wait_for(lambda: "filament 2" in self.note()["text"]))
+        self.assertFalse(self.note()["ok"])
+
+    def test_delete_and_missing_selection(self):
+        self.app.handle({"command": "save_combo"})
+        self.app.handle({"command": "delete_combo", "key": self.app.snapshot()["combos"][0]["key"]})
+        self.assertEqual(self.app.snapshot()["combos"], [])
+        self.selected = {"model": "", "printer": "", "process": "", "filaments": []}
+        self.app.handle({"command": "save_combo"})
+        self.assertFalse(self.note()["ok"])
+        self.assertEqual(core.PrinterStore(self.app.store.path).combos, {})
+
+    def test_old_store_without_combos_still_loads(self):
+        path = write(self.folder.name, "old.json", json.dumps({"version": 1, "printers": [{"id": "a", "name": "x"}]}))
+        store = core.PrinterStore(path)
+        self.assertEqual((len(store.printers), store.combos), (1, {}))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

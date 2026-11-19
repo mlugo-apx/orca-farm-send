@@ -14,6 +14,14 @@ Built for OrcaSlicer 2.5.1's Python plugin system.
 
 Tick several cards to send one plate to several printers of the same model at once.
 
+**Slice for (presets per printer type)**
+
+Select the printer, process and filament presets you use for one printer type, then click **remember current**.
+The panel keeps one entry per type, for example one for the Centauri Carbon 2 and one for the U1.
+**Use** switches all three OrcaSlicer selections back in one click. Then slice.
+If a preset has unsaved edits, OrcaSlicer shows its normal save or discard dialog first.
+The plugin cannot press Slice for you.
+
 **Guards**
 
 - G-code sliced for one printer model cannot be sent to another model. Checked in the plugin, not only in the page.
@@ -37,7 +45,7 @@ Printers are stored in `<OrcaSlicer config>/orca_plugins/plugin_data/farm_send/f
 ## Develop
 
 ```
-python3 tests/test_farm.py            # 38 tests against in-process fake printers
+python3 tests/test_farm.py            # 43 tests against in-process fake printers
 python3 tests/hardware_check.py       # read-only check of your real printers
 python3 tests/hardware_check.py --upload "U1 #2"   # 1 KB upload, list, delete. Never prints.
 ./install.sh                          # rebuild and copy over the installed plugin
@@ -65,4 +73,5 @@ python3 tests/hardware_check.py --upload "U1 #2"   # 1 KB upload, list, delete. 
 | Slice capture event | Inside OrcaSlicer 2.5.1: event received with the temp path |
 | CC2 upload | Fake printer only. Both CC2s were printing |
 | Start print, CC2 and U1 | Fake printers only. No real print was started |
-| Reading the captured G-code inside OrcaSlicer | Not yet: needs the corrected folder permission approved at activation |
+| Reading the captured G-code inside OrcaSlicer | Not yet. Permission is now granted; needs one slice in the app |
+| Slice-for preset switching | Fake host only. Not yet clicked inside OrcaSlicer |

@@ -6,8 +6,8 @@ import threading
 import time
 import uuid
 
-from core import (KIND_CC2, FarmError, PrinterStore, can_start, job_filename, make_client, model_matches, parse_gcode_meta,
-                  presets_to_printers, strip_model_suffix, validate_printer)
+from core import (KIND_CC2, FarmError, PrinterStore, can_start, job_filename, make_client, model_key, model_matches,
+                  parse_gcode_meta, presets_to_printers, strip_model_suffix, validate_printer)
 # BUNDLE-STRIP-END
 
 MAX_JOBS = 8
@@ -28,7 +28,8 @@ def _short_duration(seconds):
 
 
 class FarmApp:
-    def __init__(self, storage_dir, post, notify=None, preset_dirs=(), default_name=None, spawn=None):
+    def __init__(self, storage_dir, post, notify=None, preset_dirs=(), default_name=None, spawn=None,
+                 read_presets=None, apply_presets=None):
         self.store = PrinterStore(os.path.join(storage_dir, "farm_send_printers.json"))
         self._post = post
         self._notify = notify or (lambda level, text: None)
@@ -44,6 +45,13 @@ class FarmApp:
         self._status_busy = set()
         self.sends = {}           # printer id -> {active, text, percent, ok}
         self._cancel = {}
+        # Slicing presets. read_presets() must run on the UI thread and returns the current selection
+        # {"model", "printer", "process", "filaments"}; apply_presets(combo) switches to a saved one
+        # and must run OFF the UI thread, because it waits for OrcaSlicer's own selection dialogs.
+        self._read_presets = read_presets
+        self._apply_presets = apply_presets
+        self.current = None
+        self.combo_note = {"text": "", "ok": True, "busy": False}
 
     @staticmethod
     def _spawn_thread(target, *args):
@@ -149,6 +157,7 @@ class FarmApp:
             "display_name": self._job_base_name(job), "summary": " · ".join(bits),
             "printer_model": meta.get("printer_model", ""), "sliced_at": _clock(job["captured_at"]),
             "post_process": bool((meta.get("post_process") or "").strip()),
+            "presets": " \u00b7 ".join(part for part in (meta.get("process_preset"), meta.get("filament_preset")) if part),
             "matches": {p["id"]: model_matches(meta.get("printer_model"), p.get("model")) for p in self.store.printers},
         }
 
@@ -164,7 +173,36 @@ class FarmApp:
                 "slicing": self.slicing,
                 "status": dict(self.status),
                 "sends": dict(self.sends),
+                "combos": self._combo_views(),
+                "current": dict(self.current) if self.current else None,
+                "combo_note": dict(self.combo_note),
+                "can_switch": self._apply_presets is not None,
             }
+
+    def _combo_views(self):
+        current = self.current or {}
+        views = []
+        for key, combo in sorted(self.store.combos.items(), key=lambda item: item[1].get("label", "").lower()):
+            active = (current.get("printer") == combo.get("printer") and current.get("process") == combo.get("process")
+                      and list(current.get("filaments") or [])[:len(combo.get("filaments") or [])] == list(combo.get("filaments") or []))
+            views.append({"key": key, "label": combo.get("label", key), "printer": combo.get("printer", ""),
+                          "process": combo.get("process", ""), "filaments": list(combo.get("filaments") or []),
+                          "active": bool(active),
+                          "printers": [p["name"] for p in self.store.printers if model_key(p.get("model")) == key]})
+        return views
+
+    def refresh_current(self):
+        """Re-read OrcaSlicer's selected presets. UI thread only. Returns True when they changed."""
+        if self._read_presets is None:
+            return False
+        try:
+            current = self._read_presets()
+        except Exception:
+            return False
+        if current != self.current:
+            self.current = current
+            return True
+        return False
 
     def post_state(self):
         self.post(self.snapshot())
@@ -177,11 +215,63 @@ class FarmApp:
             handler(message)
 
     def _cmd_init(self, message):
+        self.refresh_current()
         self.post_state()
         self.poll(force=True)
 
     def _cmd_poll(self, message):
+        if self.refresh_current():
+            self.post_state()
         self.poll()
+
+    def _set_combo_note(self, text, ok=True, busy=False):
+        with self.lock:
+            self.combo_note = {"text": text, "ok": ok, "busy": busy}
+
+    def _cmd_save_combo(self, message):
+        self.refresh_current()
+        current = self.current or {}
+        try:
+            if not current.get("model"):
+                raise FarmError("Select a printer preset in OrcaSlicer first")
+            self.store.set_combo(current["model"], current.get("printer"), current.get("process"), current.get("filaments"))
+            self._set_combo_note("Saved the current presets for %s." % current["model"])
+        except FarmError as error:
+            self._set_combo_note(str(error), ok=False)
+        except OSError as error:
+            self._set_combo_note("Could not save: %s" % (error.strerror or error), ok=False)
+        self.post_state()
+
+    def _cmd_delete_combo(self, message):
+        try:
+            self.store.remove_combo(message.get("key"))
+            self._set_combo_note("")
+        except OSError as error:
+            self._set_combo_note("Could not save: %s" % (error.strerror or error), ok=False)
+        self.post_state()
+
+    def _cmd_load_combo(self, message):
+        combo = self.store.combos.get(message.get("key"))
+        if combo is None or self._apply_presets is None:
+            return
+        with self.lock:
+            if self.combo_note.get("busy"):
+                return
+            self.combo_note = {"text": "Switching presets to %s..." % combo.get("label", ""), "ok": True, "busy": True}
+        self.post_state()
+        self._spawn(self._load_combo_worker, dict(combo))
+
+    def _load_combo_worker(self, combo):
+        try:
+            skipped = self._apply_presets(combo) or []
+            text = "Presets set for %s. Slice the plate." % combo.get("label", "")
+            if skipped:
+                text += " Not applied: %s." % "; ".join(skipped)
+            self._set_combo_note(text, ok=not skipped)
+        except Exception as error:
+            self._set_combo_note("Presets not switched: %s" % error, ok=False)
+        # The selection is re-read on the next poll, which runs on the UI thread.
+        self.post_state()
 
     def _cmd_select_job(self, message):
         with self.lock:

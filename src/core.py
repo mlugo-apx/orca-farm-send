@@ -114,6 +114,15 @@ def normalize_model(name):
     return re.sub(r"[^a-z0-9]", "", (name or "").lower())
 
 
+def model_key(name):
+    """Stable key for a printer type: 'Elegoo Centauri Carbon 2' and 'CentauriCarbon2' share one."""
+    key = normalize_model(name)
+    for vendor in ("elegoo", "snapmaker"):
+        if key.startswith(vendor) and len(key) > len(vendor):
+            key = key[len(vendor):]
+    return key
+
+
 def model_matches(gcode_model, printer_model):
     """True when G-code sliced for gcode_model may be sent to a printer of printer_model.
 
@@ -871,14 +880,19 @@ class PrinterStore:
         self.path = path
         self._lock = threading.Lock()
         self.printers = []
+        self.combos = {}
         self.load()
 
     def load(self):
+        self.combos = {}
         try:
             with open(self.path, "r", encoding="utf-8") as handle:
                 data = json.load(handle)
             self.printers = [p for p in data.get("printers", []) if isinstance(p, dict) and p.get("id")]
-        except (OSError, ValueError):
+            combos = data.get("combos", {})
+            if isinstance(combos, dict):
+                self.combos = {key: value for key, value in combos.items() if isinstance(value, dict) and value.get("printer")}
+        except (OSError, ValueError, AttributeError):
             self.printers = []
 
     def save(self):
@@ -891,7 +905,7 @@ class PrinterStore:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 if hasattr(os, "fchmod"):
                     os.fchmod(handle.fileno(), 0o600)   # also tightens a leftover temp file
-                json.dump({"version": 1, "printers": self.printers}, handle, indent=2)
+                json.dump({"version": 1, "printers": self.printers, "combos": self.combos}, handle, indent=2)
             os.replace(temp, self.path)
 
     def get(self, printer_id):
@@ -914,6 +928,20 @@ class PrinterStore:
     def remove(self, printer_id):
         self.printers = [p for p in self.printers if p["id"] != printer_id]
         self.save()
+
+    def set_combo(self, model, printer, process, filaments):
+        """Remember which presets to slice with for one printer type."""
+        key = model_key(model)
+        if not key or not printer:
+            raise FarmError("Select a printer preset in OrcaSlicer first")
+        self.combos[key] = {"label": model.strip(), "printer": printer, "process": process or "",
+                            "filaments": [name for name in (filaments or []) if name]}
+        self.save()
+        return key
+
+    def remove_combo(self, key):
+        if self.combos.pop(key, None) is not None:
+            self.save()
 
     def hosts(self):
         return sorted({host_of(p.get("address", "")).split(":")[0] for p in self.printers if p.get("address")})

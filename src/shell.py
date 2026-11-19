@@ -57,7 +57,8 @@ class FarmSend(orca.script.ScriptPluginCapabilityBase):
             storage = orca.host.plugin.storage()
             data_dir = os.path.dirname(os.path.dirname(os.path.dirname(storage)))
             preset_dirs = sorted(glob.glob(os.path.join(data_dir, "user", "*", "machine")))
-            self.app = FarmApp(storage, self._post, self._notify, preset_dirs, self._default_name)
+            self.app = FarmApp(storage, self._post, self._notify, preset_dirs, self._default_name,
+                               read_presets=self._read_presets, apply_presets=self._apply_presets)
         return self.app
 
     def _post(self, message):
@@ -80,6 +81,41 @@ class FarmSend(orca.script.ScriptPluginCapabilityBase):
             return objects[0].name if objects else ""
         except Exception:
             return ""
+
+    def _read_presets(self):
+        # UI thread only (panel messages).
+        bundle = orca.host.preset_bundle()
+        printer = bundle.current_printer_preset()
+        return {
+            "model": printer.config_value("printer_model") or "",
+            "printer": printer.name,
+            "process": bundle.current_process_preset().name,
+            "filaments": list(bundle.current_filament_preset_names()),
+        }
+
+    def _apply_presets(self, combo):
+        """Switch OrcaSlicer to a saved printer/filament/process selection.
+
+        Runs on a plugin thread, never the UI thread: each call hands the selection to the UI thread
+        and waits, including for OrcaSlicer's own save/discard dialog when a preset has unsaved
+        edits. begin_update() is used only for its selection step; nothing is staged or committed.
+        Printer first, because it decides which filaments and processes can be chosen.
+        Returns the parts that could not be applied; raises if the printer could not be selected."""
+        skipped = []
+        orca.host.preset.printer.begin_update(preset_name=combo["printer"])
+        for index, name in enumerate(combo.get("filaments") or []):
+            try:
+                orca.host.preset.filament.begin_update(index + 1, name)
+            except IndexError:
+                break      # this printer selection has fewer filament slots than were saved
+            except (ValueError, RuntimeError) as error:
+                skipped.append("filament %d (%s)" % (index + 1, str(error).splitlines()[0][:120]))
+        if combo.get("process"):
+            try:
+                orca.host.preset.process.begin_update(preset_name=combo["process"])
+            except (ValueError, RuntimeError) as error:
+                skipped.append("process (%s)" % str(error).splitlines()[0][:120])
+        return skipped
 
     # ---- capability entry points -------------------------------------------------------------
     def execute(self):
