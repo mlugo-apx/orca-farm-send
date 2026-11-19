@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.2
+
+- Import now asks OrcaSlicer for the printer presets it has loaded, instead of reading preset files. A signed-in user has two preset folders on disk, and the old Import mixed printers from both.
+- A copy installed from the Plugin Hub and a copy installed from a file no longer read each other's printer list, so neither asks for network access to the other's addresses.
+- Note: the two copies cannot be active at the same time. Deactivate one before activating the other.
+
 ## 0.1.1
 
 - Fixed: a copy installed from the OrcaSlicer Plugin Hub could not find its saved printers or your printer presets, because hub installs use a different folder layout than file installs. File installs were not affected.

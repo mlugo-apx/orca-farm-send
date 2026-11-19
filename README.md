@@ -71,10 +71,12 @@ A Centauri Carbon 2 holding 250 or more files shows a warning on its card: uploa
 1. OrcaSlicer > menu > **Plugins** > **Install local plugin** > `dist/farm_send/farm_send.py`
 2. Tick **Activate**. OrcaSlicer asks once for: read access to its own temp G-code folder, permission to start threads, and network access to each saved printer address. Answering No stops the plugin from loading.
 3. Expand the row and click the run arrow. The panel docks to the right of the 3D view.
-4. **Import** pulls printers from your user printer presets (address and access code). **Add** adds one by hand; **Test connection** fills in the model.
+4. **Import** pulls printers from the printer presets OrcaSlicer has loaded (address and access code). **Add** adds one by hand; **Test connection** fills in the model.
 
 The panel has to be opened from the Plugins dialog once per OrcaSlicer session.
 After adding a printer, OrcaSlicer asks for network access to it the next time the plugin loads.
+
+If you install both the Plugin Hub copy and a local file copy, only one can be active at a time; OrcaSlicer reports a "capability collision" for the second. Each copy keeps its own printer list.
 
 ## Permissions and privacy
 

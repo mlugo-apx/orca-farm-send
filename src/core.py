@@ -1528,22 +1528,61 @@ def data_dir_of(path):
         path = parent
 
 
-def saved_store_files(data_dir):
-    """This plugin's own printer files under plugin_data, wherever OrcaSlicer put its storage."""
+def saved_store_files(data_dir, plugin_file=""):
+    """The printer file(s) belonging to THIS copy of the plugin.
+
+    A copy installed from the Plugin Hub keeps its data in plugin_data/_subscribed/<user id>/<key>/
+    and its code in _subscribed/<user id>/<key>/, so its own data folder is known exactly. A copy
+    installed from a file uses plugin_data/<key>/. The two never read each other's printers:
+    otherwise each would ask for network access to the other's addresses."""
     if not data_dir:
         return []
     base = os.path.join(data_dir, "orca_plugins", "plugin_data")
+    parts = os.path.abspath(plugin_file or "").split(os.sep)
+    if "_subscribed" in parts:
+        at = parts.index("_subscribed")
+        if len(parts) < at + 3:
+            return []
+        path = os.path.join(base, "_subscribed", parts[at + 1], parts[at + 2], STORE_FILE)
+        return [path] if os.path.isfile(path) else []
     found = []
-    for folder, _dirs, files in os.walk(base):
-        if folder[len(base):].count(os.sep) > 4:   # <key>, or _subscribed/<user>/<key>; no deeper
-            continue
-        if STORE_FILE in files:
-            found.append(os.path.join(folder, STORE_FILE))
-    return sorted(found)
+    try:
+        names = sorted(os.listdir(base))
+    except OSError:
+        return found
+    for name in names:
+        path = os.path.join(base, name, STORE_FILE)
+        if name != "_subscribed" and os.path.isfile(path):
+            found.append(path)
+    return found
+
+
+def preset_to_printer(preset, fallback_name=""):
+    """A printer entry from one OrcaSlicer printer preset (its settings as a dict), or None when
+    the preset has no printer address or is not a printer type this plugin drives."""
+    address = host_of(_first(preset.get("print_host")))
+    if not address:
+        return None
+    inherits = _first(preset.get("inherits")) or ""
+    label = _first(preset.get("name")) or fallback_name
+    model = _first(preset.get("printer_model")) or re.sub(r"\s*\(?\d+(\.\d+)?\s*(mm)?\s*nozzle\)?.*$", "", inherits).strip()
+    lowered = (model + " " + inherits + " " + label).lower()
+    host_type = (_first(preset.get("host_type")) or "").lower()
+    if "centauri carbon 2" in lowered:
+        kind = KIND_CC2
+    elif "snapmaker" in lowered or host_type in ("moonraker", "klipper"):
+        kind = KIND_MOONRAKER
+    else:
+        return None
+    key = _first(preset.get("printhost_apikey")) or ""
+    return {"name": short_printer_name(label, inherits, model), "kind": kind, "address": address, "model": model,
+            "access_code": key if kind == KIND_CC2 else "", "api_key": key if kind == KIND_MOONRAKER else ""}
 
 
 def presets_to_printers(preset_dir):
-    """Build printer entries from OrcaSlicer user machine presets that have a print host set."""
+    """Printer entries from the printer preset files in one folder. Used only when OrcaSlicer's own
+    preset list is not available; inside OrcaSlicer the live list is used instead, because a
+    signed-in user has a second preset folder and only one of the two is in use."""
     found = []
     try:
         names = sorted(os.listdir(preset_dir))
@@ -1557,23 +1596,9 @@ def presets_to_printers(preset_dir):
                 preset = json.load(handle)
         except (OSError, ValueError):
             continue
-        address = host_of(_first(preset.get("print_host")))
-        if not address:
-            continue
-        inherits = _first(preset.get("inherits")) or ""
-        label = _first(preset.get("name")) or name[:-5]
-        model = _first(preset.get("printer_model")) or re.sub(r"\s*\(?\d+(\.\d+)?\s*(mm)?\s*nozzle\)?.*$", "", inherits).strip()
-        lowered = (model + " " + inherits + " " + label).lower()
-        host_type = (_first(preset.get("host_type")) or "").lower()
-        if "centauri carbon 2" in lowered:
-            kind = KIND_CC2
-        elif "snapmaker" in lowered or host_type in ("moonraker", "klipper"):
-            kind = KIND_MOONRAKER
-        else:
-            continue
-        found.append({"name": short_printer_name(label, inherits, model), "kind": kind, "address": address, "model": model,
-                      "access_code": _first(preset.get("printhost_apikey")) or "" if kind == KIND_CC2 else "",
-                      "api_key": _first(preset.get("printhost_apikey")) or "" if kind == KIND_MOONRAKER else ""})
+        printer = preset_to_printer(preset, name[:-5]) if isinstance(preset, dict) else None
+        if printer:
+            found.append(printer)
     return found
 
 

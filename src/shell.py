@@ -1,5 +1,4 @@
 # BUNDLE-STRIP-BEGIN
-import glob
 import os
 import tempfile
 
@@ -39,7 +38,11 @@ def _saved_hosts():
     if not base:
         return []
     hosts = set()
-    for path in saved_store_files(base):
+    try:
+        plugin_file = __file__
+    except NameError:
+        plugin_file = ""
+    for path in saved_store_files(base, plugin_file):
         hosts.update(PrinterStore(path).hosts())
     return sorted(hosts)
 
@@ -55,10 +58,9 @@ class FarmSend(orca.script.ScriptPluginCapabilityBase):
     def _ensure_app(self):
         if self.app is None:
             storage = orca.host.plugin.storage()
-            data_dir = data_dir_of(storage)   # works for a file install and a Plugin Hub install
-            preset_dirs = sorted(glob.glob(os.path.join(data_dir, "user", "*", "machine")))
-            self.app = FarmApp(storage, self._post, self._notify, preset_dirs, self._default_name,
-                               read_presets=self._read_presets, apply_presets=self._apply_presets)
+            self.app = FarmApp(storage, self._post, self._notify, (), self._default_name,
+                               read_presets=self._read_presets, apply_presets=self._apply_presets,
+                               list_presets=self._list_printer_presets)
         return self.app
 
     def _post(self, message):
@@ -92,6 +94,23 @@ class FarmSend(orca.script.ScriptPluginCapabilityBase):
             "process": bundle.current_process_preset().name,
             "filaments": list(bundle.current_filament_preset_names()),
         }
+
+    def _list_printer_presets(self):
+        """The user's printer presets as OrcaSlicer has them loaded right now. UI thread only.
+
+        Asked from OrcaSlicer, not read from preset files: a signed-in user has two preset
+        folders on disk and only OrcaSlicer knows which one is in use."""
+        printers = orca.host.preset_bundle().printers
+        found = []
+        for index in range(printers.size()):
+            preset = printers.preset(index)
+            if not preset.is_user():
+                continue
+            entry = {"name": preset.name}
+            for key in ("print_host", "printhost_apikey", "host_type", "printer_model", "inherits"):
+                entry[key] = preset.config_value(key)
+            found.append(entry)
+        return found
 
     def _apply_presets(self, combo):
         """Switch OrcaSlicer to a saved printer/filament/process selection.

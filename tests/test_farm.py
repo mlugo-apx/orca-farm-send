@@ -366,14 +366,39 @@ class InstallLayoutTests(unittest.TestCase):
                 os.makedirs(storage)
                 store = core.PrinterStore(os.path.join(storage, core.STORE_FILE))
                 store.upsert({"name": name, "kind": core.KIND_MOONRAKER, "address": "10.0.0.%d" % (len(name)), "model": "Snapmaker U1"})
-            found = core.saved_store_files(data)
-            self.assertEqual(len(found), 2)
-            hosts = sorted(host for path in found for host in core.PrinterStore(path).hosts())
-            self.assertEqual(hosts, ["10.0.0.3", "10.0.0.4"])
+            # Each copy asks for network access to its OWN printers only, never the other copy's.
+            hosts = lambda name: sorted(host for path in core.saved_store_files(data, layouts[name][0])
+                                        for host in core.PrinterStore(path).hosts())
+            self.assertEqual(hosts("file"), ["10.0.0.4"])
+            self.assertEqual(hosts("hub"), ["10.0.0.3"])
             # another plugin's data is not this plugin's business
             os.makedirs(os.path.join(plugins, "plugin_data", "other_plugin"))
             open(os.path.join(plugins, "plugin_data", "other_plugin", "secrets.json"), "w").close()
-            self.assertEqual(len(core.saved_store_files(data)), 2)
+            self.assertEqual(len(core.saved_store_files(data, layouts["file"][0])), 1)
+            # a hub copy that has saved nothing yet asks for nothing
+            fresh = os.path.join(plugins, "_subscribed", "user-999", "farm_send", "farm_send_any.py")
+            self.assertEqual(core.saved_store_files(data, fresh), [])
+
+    def test_import_uses_the_presets_orcaslicer_has_loaded(self):
+        with tempfile.TemporaryDirectory() as folder:
+            live = [
+                {"name": "Snapmaker U1 (0.4 nozzle) - #1", "print_host": "10.1.1.60", "printhost_apikey": "", "host_type": "moonraker",
+                 "printer_model": "Snapmaker U1", "inherits": "Snapmaker U1 (0.4 nozzle)"},
+                {"name": "Elegoo Centauri Carbon 2 0.4 nozzle - CC1", "print_host": ["10.1.1.65"], "printhost_apikey": "code1",
+                 "host_type": None, "printer_model": "Elegoo Centauri Carbon 2", "inherits": "Elegoo Centauri Carbon 2 0.4 nozzle"},
+                {"name": "Some other printer", "print_host": "", "printhost_apikey": None, "host_type": None, "printer_model": "X", "inherits": ""},
+            ]
+            stale_dir = os.path.join(folder, "stale")           # a second preset folder on disk: must be ignored
+            os.makedirs(stale_dir)
+            write(stale_dir, "old.json", json.dumps({"name": "Snapmaker U1 (0.4 nozzle) - #1", "inherits": "Snapmaker U1 (0.4 nozzle)",
+                                                     "print_host": "10.9.9.99", "host_type": "moonraker"}))
+            posts = []
+            app = FarmApp(os.path.join(folder, "store"), posts.append, preset_dirs=[stale_dir], list_presets=lambda: live) \
+                if os.makedirs(os.path.join(folder, "store")) is None else None
+            app.handle({"command": "import_presets"})
+            self.assertEqual(sorted(p["address"] for p in app.store.printers), ["10.1.1.60", "10.1.1.65"])
+            cc = [p for p in app.store.printers if p["kind"] == core.KIND_CC2][0]
+            self.assertEqual(cc["access_code"], "code1")
 
     def test_paths_outside_orcaslicer_give_nothing(self):
         self.assertEqual(core.data_dir_of("/somewhere/else/file.py"), "")

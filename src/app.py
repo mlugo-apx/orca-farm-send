@@ -8,7 +8,7 @@ import uuid
 
 from core import (CC2_MANY_FILES, STORE_FILE, KIND_CC2, WATCHED_STATES, BedLog, FarmError, bed_needs_clearing, files_to_clean, rule_text,
                   storage_summary, PrinterStore, can_start, job_filename, make_client, model_key, model_matches,
-                  parse_gcode_meta, presets_to_printers, set_shared_dir, status_event, strip_model_suffix, validate_printer)
+                  parse_gcode_meta, preset_to_printer, presets_to_printers, set_shared_dir, status_event, strip_model_suffix, validate_printer)
 # BUNDLE-STRIP-END
 
 SLICE_DIR = "slices"
@@ -32,7 +32,7 @@ def _short_duration(seconds):
 
 class FarmApp:
     def __init__(self, storage_dir, post, notify=None, preset_dirs=(), default_name=None, spawn=None,
-                 read_presets=None, apply_presets=None):
+                 read_presets=None, apply_presets=None, list_presets=None):
         self.store = PrinterStore(os.path.join(storage_dir, STORE_FILE))
         set_shared_dir(storage_dir)   # every OrcaSlicer window shares one client slot per CC2
         self.beds = BedLog(os.path.join(storage_dir, "farm_send_beds.json"))
@@ -43,6 +43,9 @@ class FarmApp:
         self._post = post
         self._notify = notify or (lambda level, text: None)
         self.preset_dirs = list(preset_dirs)
+        # list_presets() returns the printer presets OrcaSlicer has loaded right now, each as a dict
+        # of its settings. UI thread only. When given, Import uses it instead of reading files.
+        self._list_presets = list_presets
         self._default_name = default_name or (lambda: "")
         self._spawn = spawn or self._spawn_thread
         self.lock = threading.RLock()
@@ -431,16 +434,24 @@ class FarmApp:
 
     def _cmd_import_presets(self, message):
         added, seen = [], {p["address"] for p in self.store.printers}
-        for folder in self.preset_dirs:
-            for candidate in presets_to_printers(folder):
-                if candidate["address"] in seen:
-                    continue
-                try:
-                    self.store.upsert(candidate)
-                except (FarmError, OSError):
-                    continue
-                seen.add(candidate["address"])
-                added.append("%s (%s)" % (candidate["name"], candidate["address"]))
+        candidates = []
+        if self._list_presets is not None:
+            try:
+                candidates = [printer for printer in (preset_to_printer(preset) for preset in self._list_presets()) if printer]
+            except Exception:
+                candidates = []
+        else:
+            for folder in self.preset_dirs:
+                candidates += presets_to_printers(folder)
+        for candidate in candidates:
+            if candidate["address"] in seen:
+                continue
+            try:
+                self.store.upsert(candidate)
+            except (FarmError, OSError):
+                continue
+            seen.add(candidate["address"])
+            added.append("%s (%s)" % (candidate["name"], candidate["address"]))
         if added:
             text = "Added %d printer%s from your printer presets:" % (len(added), "" if len(added) == 1 else "s")
         else:
