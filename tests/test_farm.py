@@ -406,11 +406,29 @@ class AppTests(unittest.TestCase):
         (result,) = self.send([self.p_u1], start=False)
         self.assertTrue(result["ok"], result)
 
-    def test_stale_flag_and_project_close_removes_copies(self):
+    def stale_by_type(self):
+        return {view["printer_model"]: view["stale"] for view in self.app.snapshot()["jobs"]}
+
+    def test_rearranging_for_the_next_type_does_not_flag_earlier_plates(self):
+        self.slice(U1_GCODE)
+        self.app.mark_stale()                 # bed re-arranged to fit the other printer
+        self.assertEqual(self.stale_by_type(), {"Snapmaker U1": True})
+        self.slice(CC2_GCODE)                 # slicing for the next type settles the U1 plate
+        self.assertEqual(self.stale_by_type(), {"Snapmaker U1": False, "Elegoo Centauri Carbon 2": False})
+        self.app.mark_stale()                 # a change now can only make the newest slice out of date
+        self.assertEqual(self.stale_by_type(), {"Snapmaker U1": False, "Elegoo Centauri Carbon 2": True})
+        self.slice(U1_GCODE)                  # re-slicing U1 makes it the newest, and settles CC2
+        self.app.mark_stale()
+        self.assertEqual(self.stale_by_type(), {"Snapmaker U1": True, "Elegoo Centauri Carbon 2": False})
+
+    def test_same_layout_for_both_types_shows_no_warning(self):
         self.slice(U1_GCODE)
         self.slice(CC2_GCODE)
-        self.app.mark_stale()
-        self.assertEqual([view["stale"] for view in self.app.snapshot()["jobs"]], [True, True])
+        self.assertEqual(set(self.stale_by_type().values()), {False})
+
+    def test_project_close_removes_copies(self):
+        self.slice(U1_GCODE)
+        self.slice(CC2_GCODE)
         self.app.project_closed()
         self.assertEqual(self.app.snapshot()["jobs"], [])
         self.assertEqual(self.copies(), [])

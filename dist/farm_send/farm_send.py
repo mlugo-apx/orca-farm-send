@@ -1152,6 +1152,12 @@ class FarmApp:
                     replaced += [other["path"] for other in self.jobs if other is not job and other["key"] == job["key"]]
                     self.jobs = [other for other in self.jobs if other is job or other["key"] != job["key"]]
                     job["ready"] = True
+                    # Plates sliced earlier for other printer types are finished work. Re-arranging
+                    # the bed for the next type is normal and must not flag them as out of date, so
+                    # only the newest slice keeps tracking changes to the plate.
+                    for other in self.jobs:
+                        if other is not job:
+                            other["settled"], other["stale"] = True, False
             for path in replaced:
                 self._remove_file(path)
         except FarmError as error:
@@ -1166,10 +1172,11 @@ class FarmApp:
         self.post_state()
 
     def mark_stale(self):
+        """The plate on screen changed. Only the newest slice can be out of date because of it."""
         changed = False
         with self.lock:
             for job in self.jobs:
-                if not job["stale"]:
+                if job["ready"] and not job.get("settled") and not job["stale"]:
                     job["stale"] = changed = True
         if changed:
             self.post_state()
@@ -1744,7 +1751,7 @@ PANEL_HTML = r"""<style>
         "<div class='small'>For <b>" + esc(job.printer_model || "unknown printer") + "</b><span class='muted'> · sliced " + esc(job.sliced_at) +
           (job.printers.length ? " · " + esc(job.printers.join(", ")) : " · no printer of this type") + "</span></div>" +
         (job.presets ? "<div class='muted small file' title='" + esc(job.presets) + "'>" + esc(job.presets) + "</div>" : "") +
-        (job.stale ? "<div class='warn small'>Plate changed since this slice.</div>" : "") +
+        (job.stale ? "<div class='warn small'>Plate changed since this slice. Slice again if this type should get the change.</div>" : "") +
         (job.post_process ? "<div class='warn small'>Post-processing scripts are not applied.</div>" : "") + "</div>";
     }).join("");
     $("job").innerHTML = html;

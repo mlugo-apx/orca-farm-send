@@ -210,7 +210,7 @@
         "<div class='small'>For <b>" + esc(job.printer_model || "unknown printer") + "</b><span class='muted'> · sliced " + esc(job.sliced_at) +
           (job.printers.length ? " · " + esc(job.printers.join(", ")) : " · no printer of this type") + "</span></div>" +
         (job.presets ? "<div class='muted small file' title='" + esc(job.presets) + "'>" + esc(job.presets) + "</div>" : "") +
-        (job.stale ? "<div class='warn small'>Plate changed since this slice.</div>" : "") +
+        (job.stale ? "<div class='warn small'>Plate changed since this slice. Slice again if this type should get the change.</div>" : "") +
         (job.post_process ? "<div class='warn small'>Post-processing scripts are not applied.</div>" : "") + "</div>";
     }).join("");
     $("job").innerHTML = html;

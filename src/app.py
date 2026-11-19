@@ -134,6 +134,12 @@ class FarmApp:
                     replaced += [other["path"] for other in self.jobs if other is not job and other["key"] == job["key"]]
                     self.jobs = [other for other in self.jobs if other is job or other["key"] != job["key"]]
                     job["ready"] = True
+                    # Plates sliced earlier for other printer types are finished work. Re-arranging
+                    # the bed for the next type is normal and must not flag them as out of date, so
+                    # only the newest slice keeps tracking changes to the plate.
+                    for other in self.jobs:
+                        if other is not job:
+                            other["settled"], other["stale"] = True, False
             for path in replaced:
                 self._remove_file(path)
         except FarmError as error:
@@ -148,10 +154,11 @@ class FarmApp:
         self.post_state()
 
     def mark_stale(self):
+        """The plate on screen changed. Only the newest slice can be out of date because of it."""
         changed = False
         with self.lock:
             for job in self.jobs:
-                if not job["stale"]:
+                if job["ready"] and not job.get("settled") and not job["stale"]:
                     job["stale"] = changed = True
         if changed:
             self.post_state()

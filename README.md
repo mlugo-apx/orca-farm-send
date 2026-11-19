@@ -16,7 +16,8 @@ To send everything at once, click **select all with a plate**, then **Upload and
 The U1s get the U1 plate and the CC2s get the CC2 plate, in one action.
 
 The plugin keeps its own copy of each slice, because OrcaSlicer overwrites its temp G-code on the next slice.
-Slicing again for a type replaces that type's plate only. Copies are deleted when the project closes.
+Slicing again for a type replaces that type's plate only.
+You can re-arrange the bed between types: the "plate changed" warning only ever applies to the most recent slice. Copies are deleted when the project closes.
 
 **Slice for (presets per printer type)**
 
@@ -49,7 +50,7 @@ Printers are stored in `<OrcaSlicer config>/orca_plugins/plugin_data/farm_send/f
 ## Develop
 
 ```
-python3 tests/test_farm.py            # 45 tests against in-process fake printers
+python3 tests/test_farm.py            # 47 tests against in-process fake printers
 python3 tests/hardware_check.py       # read-only check of your real printers
 python3 tests/hardware_check.py --upload "U1 #2"   # 1 KB upload, list, delete. Never prints.
 ./install.sh                          # rebuild and copy over the installed plugin
