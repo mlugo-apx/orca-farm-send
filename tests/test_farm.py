@@ -203,6 +203,29 @@ class MoonrakerTests(unittest.TestCase):
             client.start_print("missing.gcode")
         self.assertIn("File not found", str(caught.exception))
 
+    def test_oversized_websocket_frame_is_refused_without_reading_it(self):
+        import socket as socket_module
+        server = socket_module.socket()
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        self.addCleanup(server.close)
+
+        def serve():
+            conn, _ = server.accept()
+            conn.recv(4096)
+            conn.sendall(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n")
+            conn.recv(4096)
+            conn.sendall(b"\x81\x7f" + (2 ** 40).to_bytes(8, "big") + b"x" * 64)    # claims a 1 TB text frame
+            time.sleep(1)
+            conn.close()
+
+        threading.Thread(target=serve, daemon=True).start()
+        begin = time.time()
+        with self.assertRaises(core.FarmError) as caught:
+            core.websocket_rpc("127.0.0.1:%d" % server.getsockname()[1], "x", {}, timeout=5)
+        self.assertIn("oversized", str(caught.exception))
+        self.assertLess(time.time() - begin, 3)
+
     def test_snapmaker_reports_what_each_toolhead_holds(self):
         fake = FakeMoonraker(snapmaker=True)
         self.addCleanup(fake.close)

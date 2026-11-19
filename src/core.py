@@ -273,6 +273,10 @@ def http_json(url, method="GET", data=None, headers=None, timeout=6):
 # offered over HTTP at all
 # --------------------------------------------------------------------------------------
 
+MAX_REPLY_BYTES = 4 * 1024 * 1024    # no printer reply this plugin reads is anywhere near this
+MAX_WS_FRAMES = 2000                 # unrelated notifications tolerated while waiting for one reply
+
+
 class RpcError(Exception):
     def __init__(self, code, message):
         Exception.__init__(self, message)
@@ -311,6 +315,8 @@ def websocket_rpc(address, method, params, timeout=20, path="/websocket"):
                 buffer += chunk
 
         while b"\r\n\r\n" not in buffer:
+            if len(buffer) > 65536:
+                raise FarmError("Printer sent an oversized reply")
             fill(len(buffer) + 1)
         head, _, buffer = buffer.partition(b"\r\n\r\n")
         if b" 101 " not in head.split(b"\r\n")[0] + b" ":
@@ -325,8 +331,8 @@ def websocket_rpc(address, method, params, timeout=20, path="/websocket"):
         else:
             frame = bytes([0x81, 0x80 | 127]) + struct.pack("!Q", size)
         sock.sendall(frame + mask + bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload)))
-        message = b""
-        while True:
+        message = bytearray()
+        for _ in range(MAX_WS_FRAMES):
             fill(2)
             final, opcode, length = buffer[0] & 0x80, buffer[0] & 0x0F, buffer[1] & 0x7F
             offset = 2
@@ -336,6 +342,10 @@ def websocket_rpc(address, method, params, timeout=20, path="/websocket"):
             elif length == 127:
                 fill(10)
                 length, offset = struct.unpack("!Q", buffer[2:10])[0], 10
+            # The length comes from the peer. Refuse before reading, so a hostile or broken device
+            # cannot make the plugin buffer gigabytes inside OrcaSlicer.
+            if length > MAX_REPLY_BYTES or len(message) + length > MAX_REPLY_BYTES:
+                raise FarmError("Printer sent an oversized reply")
             fill(offset + length)
             data, buffer = buffer[offset:offset + length], buffer[offset + length:]
             if opcode == 8:
@@ -346,16 +356,17 @@ def websocket_rpc(address, method, params, timeout=20, path="/websocket"):
             if not final:
                 continue
             try:
-                reply = json.loads(message.decode("utf-8", errors="replace"))
+                reply = json.loads(bytes(message).decode("utf-8", errors="replace"))
             except ValueError:
                 reply = None
-            message = b""
+            message = bytearray()
             if not isinstance(reply, dict) or reply.get("id") != request_id:
                 continue        # status notifications the printer pushes to every client
             if "error" in reply:
                 error = reply["error"] if isinstance(reply["error"], dict) else {}
                 raise RpcError(error.get("code", -1), str(error.get("message", "printer error")))
             return reply.get("result")
+        raise FarmError("Printer did not answer the request")
     except PermissionError:
         raise
     except (socket.timeout, TimeoutError):
@@ -489,6 +500,8 @@ class MiniMqtt:
             if not byte & 0x80:
                 break
             shift += 7
+        if length > MAX_REPLY_BYTES:
+            raise FarmError("Printer sent an oversized reply")
         return header & 0xF0, (self._recv_exact(length, deadline) if length else b"")
 
     def read_message(self, timeout):
@@ -514,6 +527,8 @@ class MiniMqtt:
                     if not byte & 0x80:
                         break
                     shift += 7
+                if length > MAX_REPLY_BYTES:
+                    raise FarmError("Printer sent an oversized reply")
                 data = self._recv_exact(length, hard_deadline) if length else b""
             except socket.timeout:
                 raise FarmError("Printer stopped responding")
