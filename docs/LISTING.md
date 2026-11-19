@@ -6,8 +6,9 @@
 | Name | Farm Send |
 | Version | 0.1.0 |
 | Type | Script |
-| Compatible OrcaSlicer version | 2.5.1 |
-| Image | `docs/screenshot.png` (320 KB) |
+| Min. OrcaSlicer version | 2.5.0 (the only choice the form offers) |
+| Icon | `docs/icon.png` (square; the hub stores it at 320 x 320) |
+| Description media | `docs/screenshot.png` |
 | Tags | print farm, send, multi printer, elegoo, centauri carbon 2, snapmaker u1, moonraker |
 | Public Plugin | on |
 
