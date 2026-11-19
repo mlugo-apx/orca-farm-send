@@ -6,13 +6,16 @@ import threading
 import time
 import uuid
 
-from core import (KIND_CC2, WATCHED_STATES, BedLog, FarmError, bed_needs_clearing, PrinterStore, can_start, job_filename, make_client, model_key, model_matches,
+from core import (CC2_MANY_FILES, KIND_CC2, WATCHED_STATES, BedLog, FarmError, bed_needs_clearing, files_to_clean, rule_text,
+                  storage_summary, PrinterStore, can_start, job_filename, make_client, model_key, model_matches,
                   parse_gcode_meta, presets_to_printers, set_shared_dir, status_event, strip_model_suffix, validate_printer)
 # BUNDLE-STRIP-END
 
 SLICE_DIR = "slices"
 STATUS_MIN_INTERVAL = 3.0
 STATUS_MIN_INTERVAL_CC2 = 8.0   # each CC2 poll is a full MQTT connect + register; be gentle
+STORAGE_INTERVAL = 600.0        # how often each printer's stored files are counted
+AUTO_CLEAN_INTERVAL = 86400.0   # automatic cleanup runs at most once a day per printer
 BLOCKED_TEXT = "OrcaSlicer blocked network access to this printer. Approve the permission prompt, then it retries."
 
 
@@ -33,6 +36,10 @@ class FarmApp:
         self.store = PrinterStore(os.path.join(storage_dir, "farm_send_printers.json"))
         set_shared_dir(storage_dir)   # every OrcaSlicer window shares one client slot per CC2
         self.beds = BedLog(os.path.join(storage_dir, "farm_send_beds.json"))
+        self.cleaned = BedLog(os.path.join(storage_dir, "farm_send_cleaned.json"))   # last automatic cleanup per printer
+        self.storage = {}         # printer id -> {count, bytes, oldest, removable, many, error}
+        self._storage_at = {}
+        self._storage_busy = set()
         self._post = post
         self._notify = notify or (lambda level, text: None)
         self.preset_dirs = list(preset_dirs)
@@ -243,6 +250,8 @@ class FarmApp:
                 "sends": dict(self.sends),
                 "combos": self._combo_views(),
                 "types": self._type_views(),
+                "storage": dict(self.storage),
+                "cleanup": dict(self.store.cleanup, text=rule_text(self.store.cleanup)),
                 "current": dict(self.current) if self.current else None,
                 "combo_note": dict(self.combo_note),
                 "can_switch": self._apply_presets is not None,
@@ -414,8 +423,9 @@ class FarmApp:
             if self.sends.get(printer_id, {}).get("active"):
                 return
             self.store.remove(printer_id)
-            for table in (self.status, self._status_at, self.sends, self._watched, self.notices):
+            for table in (self.status, self._status_at, self.sends, self._watched, self.notices, self.storage, self._storage_at):
                 table.pop(printer_id, None)
+            self.cleaned.forget(printer_id)
             self.beds.forget(printer_id)
         self.post_state()
 
@@ -537,6 +547,155 @@ class FarmApp:
         finally:
             self._cancel.pop(printer_id, None)
             self.poll(force=True, only=printer_id)
+            self.check_storage(force=True, only=printer_id)
+
+    # ---- stored files and cleanup ------------------------------------------------------------------
+    def check_storage(self, force=False, only=None):
+        """Count the files stored on each printer, now and then. A slow, quiet background job."""
+        now = time.monotonic()
+        todo = []
+        with self.lock:
+            for printer in self.store.printers:
+                printer_id = printer["id"]
+                if only is not None and printer_id != only:
+                    continue
+                if printer_id in self._storage_busy or self.sends.get(printer_id, {}).get("active"):
+                    continue
+                if not force and printer_id in self._storage_at and now - self._storage_at[printer_id] < STORAGE_INTERVAL:
+                    continue
+                self._storage_busy.add(printer_id)
+                self._storage_at[printer_id] = now
+                todo.append(dict(printer))
+        for printer in todo:
+            self._spawn(self._storage_worker, printer)
+
+    def _protected(self, printer_id):
+        """Files a cleanup must not touch: whatever the printer is printing or has loaded."""
+        status = self.status.get(printer_id) or {}
+        return [status["filename"]] if status.get("filename") else []
+
+    def _cleanup_block(self, printer):
+        """Why old files cannot be removed from this printer right now, or ''."""
+        status = self.status.get(printer["id"]) or {}
+        state = status.get("state")
+        if state in (None, "unknown", "offline"):
+            return "printer is not reachable"
+        if printer.get("kind") == KIND_CC2 and state != "idle":
+            return "printer is busy; it is cleaned when idle"
+        return ""
+
+    def _set_storage(self, printer, files=None, error=""):
+        printer_id = printer["id"]
+        with self.lock:
+            if self.store.get(printer_id) is None:
+                return None
+            if files is None:
+                entry = dict(self.storage.get(printer_id) or {}, error=error)
+            else:
+                entry = storage_summary(files)
+                entry["removable"] = len(files_to_clean(files, self.store.cleanup, self._protected(printer_id)))
+                entry["many"] = printer.get("kind") == KIND_CC2 and entry["count"] >= CC2_MANY_FILES
+                entry["error"] = ""
+            self.storage[printer_id] = entry
+        self.post({"command": "storage", "id": printer_id, "storage": entry})
+        return entry
+
+    def _storage_worker(self, printer):
+        printer_id = printer["id"]
+        entry = None
+        try:
+            entry = self._set_storage(printer, make_client(printer, timeout=8).list_stored())
+        except FarmError as error:
+            self._set_storage(printer, error=str(error))
+        except Exception:
+            self._set_storage(printer, error="Could not read the stored files")
+        finally:
+            with self.lock:
+                self._storage_busy.discard(printer_id)
+        # Automatic cleanup: only when the user switched it on, at most once a day per printer.
+        if entry and entry.get("removable") and self.store.cleanup.get("auto"):
+            with self.lock:
+                last = self.cleaned.get(printer_id) or 0
+                due = time.time() - last >= AUTO_CLEAN_INTERVAL and not self._cleanup_block(printer) \
+                    and not self.sends.get(printer_id, {}).get("active")
+                if due:
+                    self.cleaned.set(printer_id, time.time())
+                    self._cancel[printer_id] = threading.Event()
+                    self._set_send(printer_id, True, "Removing old files...", percent=0)
+            if due:
+                self._cleanup_worker(printer, automatic=True)
+
+    def _cmd_save_cleanup(self, message):
+        try:
+            self.store.set_cleanup(message.get("rule"))
+        except OSError as error:
+            self._notify("error", "Farm Send: could not save the cleanup rule: %s" % (error.strerror or error))
+        self.post_state()
+        self.check_storage(force=True)
+
+    def _cmd_check_storage(self, message):
+        self.check_storage(force=True)
+
+    def _cmd_cleanup(self, message):
+        """Remove the files the rule marks as old from each listed printer."""
+        work = []
+        with self.lock:
+            for printer_id in message.get("printer_ids") or []:
+                printer = self.store.get(printer_id)
+                if printer is None or self.sends.get(printer_id, {}).get("active"):
+                    continue
+                block = self._cleanup_block(printer)
+                if block:
+                    self._set_send(printer_id, False, "Not cleaned: %s." % block, ok=False)
+                    continue
+                self._cancel[printer_id] = threading.Event()
+                self._set_send(printer_id, True, "Checking stored files...", percent=0)
+                work.append(dict(printer))
+        for printer in work:
+            self._spawn(self._cleanup_worker, printer)
+
+    def _cleanup_worker(self, printer, automatic=False):
+        printer_id, name = printer["id"], printer["name"]
+        cancel = self._cancel.get(printer_id) or threading.Event()
+        try:
+            client = make_client(printer, timeout=8)
+            # Ask the printer again right now: what it is printing decides what must be kept.
+            status = client.status()
+            if printer.get("kind") == KIND_CC2 and status.get("state") != "idle":
+                raise FarmError("Not cleaned: the printer is %s." % str(status.get("state_text") or status.get("state")).lower())
+            protect = [status["filename"]] if status.get("filename") else []
+            files = client.list_stored()
+            chosen = files_to_clean(files, self.store.cleanup, protect)
+            if not chosen:
+                self._set_send(printer_id, False, "Nothing to remove: %s." % rule_text(self.store.cleanup), ok=True)
+                self._set_storage(printer, files)
+                return
+
+            def progress(done, total):
+                self._set_send(printer_id, True, "Removing old files: %d of %d" % (done, total), percent=100.0 * done / max(1, total))
+
+            progress(0, len(chosen))
+            client.delete_files([item["name"] for item in chosen], progress=progress, cancelled=cancel.is_set)
+            # The printer says "ok" even when it kept a file, so count what is really gone.
+            left = client.list_stored()
+            still = {item["name"] for item in left}
+            gone = [item for item in chosen if item["name"] not in still]
+            freed = sum(item.get("size") or 0 for item in gone) / 1048576.0
+            text = "Removed %d old file%s (%.0f MB)" % (len(gone), "" if len(gone) == 1 else "s", freed)
+            if len(gone) < len(chosen):
+                text += ", %d could not be removed" % (len(chosen) - len(gone)) if not cancel.is_set() else ", stopped early"
+            self._set_send(printer_id, False, text, ok=len(gone) == len(chosen) or cancel.is_set())
+            self._set_storage(printer, left)
+            if automatic and gone:
+                self._notify("info", "Farm Send: %s: %s" % (name, text.lower()))
+        except FarmError as error:
+            self._set_send(printer_id, False, str(error), ok=False)
+        except PermissionError:
+            self._set_send(printer_id, False, BLOCKED_TEXT, ok=False)
+        except Exception as error:
+            self._set_send(printer_id, False, "Unexpected error: %s" % error, ok=False)
+        finally:
+            self._cancel.pop(printer_id, None)
 
     # ---- status polling --------------------------------------------------------------------------
     def poll(self, force=False, only=None):
@@ -556,6 +715,8 @@ class FarmApp:
                 todo.append(dict(printer))
         for printer in todo:
             self._spawn(self._status_worker, printer)
+        if only is None:
+            self.check_storage()
 
     def _status_worker(self, printer):
         printer_id = printer["id"]

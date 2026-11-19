@@ -574,6 +574,106 @@ class AppTests(unittest.TestCase):
         self.assertEqual(view["key"], u1["key"])              # the panel matches plate to type by this
         self.assertEqual(job["key"], u1["key"])
 
+    def _stock(self, fake, ages_days):
+        """Put files of the given ages on a fake printer; returns their names, oldest last."""
+        names = []
+        for index, days in enumerate(ages_days):
+            name = "old_%02d_%dd.gcode" % (index, days)
+            fake.files[name] = b"x" * 1000
+            fake.file_times[name] = time.time() - days * 86400
+            names.append(name)
+        return names
+
+    def _cleanup(self, printers):
+        self.app.handle({"command": "cleanup", "printer_ids": [p["id"] for p in printers]})
+        self.assertTrue(wait_for(lambda: all(not self.app.sends.get(p["id"], {"active": True})["active"] for p in printers)))
+        return [self.app.sends[p["id"]] for p in printers]
+
+    def test_cleanup_removes_only_old_files_on_both_printer_types(self):
+        for fake in (self.u1, self.cc2):
+            self._stock(fake, [1, 10, 40, 90])
+        self._read(self.p_u1), self._read(self.p_cc2)
+        self.app.handle({"command": "save_cleanup", "rule": {"mode": "age", "days": 30}})
+        self.assertTrue(wait_for(lambda: self.app.storage.get(self.p_cc2["id"], {}).get("removable") == 2
+                                 and self.app.storage.get(self.p_u1["id"], {}).get("removable") == 2))
+        self.assertEqual(self.app.storage[self.p_cc2["id"]]["count"], 4)
+        results = self._cleanup([self.p_u1, self.p_cc2])
+        for result in results:
+            self.assertTrue(result["ok"], result)
+            self.assertIn("Removed 2 old files", result["text"])
+        for fake in (self.u1, self.cc2):
+            self.assertEqual(sorted(fake.files), ["old_00_1d.gcode", "old_01_10d.gcode"])
+        self.assertEqual(self.app.storage[self.p_cc2["id"]]["removable"], 0)
+        (again,) = self._cleanup([self.p_u1])
+        self.assertIn("Nothing to remove", again["text"])
+
+    def test_cleanup_keeps_the_file_being_printed_and_skips_a_busy_cc2(self):
+        names = self._stock(self.u1, [50, 60, 70])
+        self.u1.files["busy.gcode"] = b"x"
+        self.u1.file_times["busy.gcode"] = time.time() - 80 * 86400   # old, but it is printing
+        self.u1.state = "printing"
+        self._stock(self.cc2, [50, 60])
+        self.cc2.status_code = 2
+        self._read(self.p_u1), self._read(self.p_cc2)
+        u1, cc2 = self._cleanup([self.p_u1, self.p_cc2])
+        self.assertTrue(u1["ok"], u1)
+        self.assertEqual(sorted(self.u1.files), ["busy.gcode"])
+        self.assertFalse(cc2["ok"])
+        self.assertIn("busy", cc2["text"])
+        self.assertEqual(len(self.cc2.files), 2)
+        self.assertEqual(self.cc2.delete_calls, 0)
+        self.assertEqual(len(names), 3)
+
+    def test_cleanup_by_count_pages_through_a_full_cc2_and_reports_stuck_files(self):
+        names = self._stock(self.cc2, list(range(1, 251)))        # 250 files: three pages of 100
+        self.cc2.stuck = {names[-1]}                              # the printer keeps one and still says ok
+        self._read(self.p_cc2)
+        self.app.handle({"command": "save_cleanup", "rule": {"mode": "count", "keep": 20}})
+        self.assertTrue(wait_for(lambda: self.app.storage.get(self.p_cc2["id"], {}).get("removable") == 230))
+        self.assertTrue(self.app.storage[self.p_cc2["id"]]["many"])
+        (result,) = self._cleanup([self.p_cc2])
+        self.assertFalse(result["ok"])
+        self.assertIn("Removed 229 old files", result["text"])
+        self.assertIn("1 could not be removed", result["text"])
+        self.assertEqual(sorted(self.cc2.files), sorted(names[:20] + [names[-1]]))
+        self.assertEqual(self.cc2.delete_calls, 23)               # ten files per request, one session
+
+    def test_automatic_cleanup_is_off_by_default_and_runs_once_a_day(self):
+        self._stock(self.u1, [40, 50])
+        self._read(self.p_u1)
+        self.app.check_storage(force=True, only=self.p_u1["id"])
+        self.assertTrue(wait_for(lambda: self.app.storage.get(self.p_u1["id"], {}).get("removable") == 2))
+        time.sleep(0.3)
+        self.assertEqual(len(self.u1.files), 2)                   # counted, not touched
+        self.app.handle({"command": "save_cleanup", "rule": {"mode": "age", "days": 30, "auto": True}})
+        self.assertTrue(wait_for(lambda: not self.u1.files))
+        self.assertTrue(wait_for(lambda: any("removed 2 old files" in text for _, text in self.notes)))
+        self._stock(self.u1, [45])                                # more old files the same day: left alone
+        self.app.check_storage(force=True, only=self.p_u1["id"])
+        self.assertTrue(wait_for(lambda: self.app.storage[self.p_u1["id"]].get("removable") == 1))
+        time.sleep(0.3)
+        self.assertEqual(len(self.u1.files), 1)
+
+    def test_cleanup_rules(self):
+        now = 1000 * 86400.0
+        files = [{"name": "f%d.gcode" % d, "modified": now - d * 86400, "size": 1} for d in (1, 5, 31, 60)]
+        files.append({"name": "undated.gcode", "modified": 0, "size": 1})
+        pick = lambda rule, protect=(): [f["name"] for f in core.files_to_clean(files, rule, protect, now)]
+        self.assertEqual(pick({"mode": "age", "days": 30}), ["f60.gcode", "f31.gcode"])       # oldest first, undated kept
+        self.assertEqual(pick({"mode": "age", "days": 30}, ["sub/f60.gcode"]), ["f31.gcode"])
+        self.assertEqual(pick({"mode": "count", "keep": 2}), ["undated.gcode", "f60.gcode", "f31.gcode"])
+        self.assertEqual(pick({"mode": "count", "keep": 99}), [])
+        self.assertEqual(core.clean_rule({"mode": "nonsense", "days": 0, "keep": "x"}),
+                         {"mode": "age", "days": 1, "keep": 50, "auto": False})
+        self.assertEqual(core.rule_text({"mode": "count", "keep": 20}), "keep the newest 20 files")
+        self.assertEqual(core.storage_summary(files)["count"], 5)
+
+    def test_cleanup_rule_is_saved(self):
+        self.app.handle({"command": "save_cleanup", "rule": {"mode": "count", "keep": 12}})
+        other = FarmApp(self.folder.name, lambda message: None)
+        self.assertEqual((other.store.cleanup["mode"], other.store.cleanup["keep"]), ("count", 12))
+        self.assertEqual(self.app.snapshot()["cleanup"]["text"], "keep the newest 12 files")
+
     def test_refresh_one_printer_and_all(self):
         self.app.handle({"command": "poll"})
         self.assertTrue(wait_for(lambda: len(self._statuses()) == 3))

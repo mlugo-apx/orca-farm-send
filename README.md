@@ -33,6 +33,14 @@ Select the printer, process and filament presets you use for one printer type, c
 If a preset has unsaved edits, OrcaSlicer shows its normal save or discard dialog first.
 The plugin cannot press Slice for you.
 
+**Stored files and cleanup**
+
+The **Stored files** box at the bottom lists every printer with its file count, size and oldest file, and how many files count as old under your rule.
+**change** sets the rule: keep files newer than N days, or keep the newest N files. **Clean up** shows what will be removed per printer and asks before deleting.
+The file a printer is printing is always kept. A Centauri Carbon 2 is only cleaned while idle. Deleted files cannot be brought back.
+"Clean automatically, once a day" is off by default and only runs while the panel is open, so it does not replace a scheduled job for an unattended farm.
+A Centauri Carbon 2 holding 250 or more files shows a warning on its card: uploads began failing on printers holding 355 and 516 files.
+
 **Guards**
 
 - G-code sliced for one printer model cannot be sent to another model. Checked in the plugin, not only in the page.
@@ -88,6 +96,8 @@ In-app checks ran in an OrcaSlicer instance on a hidden virtual display (Xvfb), 
 | Refresh one printer and Refresh all, finish time, last-checked time | Clicked inside OrcaSlicer 2.5.1 against all five real printers |
 | Notices for finished, cancelled, paused, error | Fake printers. Real CC2s confirmed to report 100% when idle after a completed print; no real print has ended with the panel open yet |
 | Plates per printer type, grouped printer list, expandable busy rows, presets dialog, Bed cleared | Clicked inside OrcaSlicer 2.5.1 against all five real printers |
+| Stored-file counts, cleanup rule and confirmation dialog | Real printers: counts and rule previews on all five; dialogs opened inside OrcaSlicer 2.5.1 and cancelled |
+| Cleanup deleting files | Fake printers (250-file CC2, kept-file case). Real CC2: paging and batch delete proven with probe files only. No real user file has been deleted |
 | Time left on a U1 | Real U1s: 4h55m shown 44 minutes into a 5h14m job (was 11 to 12 hours) |
 | CC2 slot leak fixed | Real CC2: 40 polls in 65 s, second client still connects |
 | Install, activate, panel, Import, live cards | Inside OrcaSlicer 2.5.1 |

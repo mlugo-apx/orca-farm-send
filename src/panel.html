@@ -56,6 +56,7 @@
 <div class="box" id="job"></div>
 <div id="multi" class="box" style="display:none"></div>
 <div id="printers"></div>
+<div class="box" id="storage" style="display:none;margin-top:14px"></div>
 <p id="empty" class="muted" style="display:none">No printers yet. Use Import to pull them from your printer presets, or Add.</p>
 
 <div id="overlay"><div id="dialog"></div></div>
@@ -63,7 +64,8 @@
 <script>
 (function () {
   var state = { printers: [], jobs: [], job_for: {}, status: {}, sends: {}, slicing: false,
-                combos: [], types: [], current: null, combo_note: { text: "" }, can_switch: false };
+                combos: [], types: [], current: null, combo_note: { text: "" }, can_switch: false,
+                storage: {}, cleanup: { mode: "age", days: 30, keep: 50, auto: false, text: "" } };
   var selected = {};
   var expanded = {};   // busy printers shown as a full card instead of one line
   var $ = function (id) { return document.getElementById(id); };
@@ -421,6 +423,8 @@
     if (status.notice) lines += "<div class='small " + (status.notice.level === "error" ? "err" : "ok") + "'>" + esc(status.notice.text) +
                                 " \u00b7 " + clock(new Date(status.notice.at * 1000), false) + "</div>";
     if (status.state === "offline" && status.detail) lines += "<div class='small muted'>" + esc(status.detail) + "</div>";
+    var stored = state.storage[p.id];
+    if (stored && stored.many) lines += "<div class='small warn'>" + stored.count + " stored files. Uploads to this printer can start failing: clean up below.</div>";
     if (status.needs_clearing) {
       lines += "<div class='row spread' style='margin-top:6px;gap:8px'><span class='warn small'>Take the finished print off the bed.</span>" +
                "<button type='button' class='quiet' style='flex:none' data-cleared='" + esc(p.id) + "'>Bed cleared</button></div>";
@@ -478,7 +482,92 @@
     }).join("");
   }
 
-  function render() { renderJob(); renderMulti(); renderPrinters(); }
+  // ---- stored files and cleanup ----------------------------------------------------------
+  function megabytes(bytes) {
+    var mb = (bytes || 0) / 1048576;
+    return mb >= 1024 ? (mb / 1024).toFixed(1) + " GB" : Math.round(mb) + " MB";
+  }
+  function ageText(seconds) {
+    if (!seconds) return "";
+    var days = Math.floor((Date.now() / 1000 - seconds) / 86400);
+    return days < 1 ? "today" : days + " d";
+  }
+  // Why old files cannot be removed from this printer right now. Mirrors the check in the plugin.
+  function cleanBlock(p) {
+    var status = state.status[p.id];
+    if (!status || status.state === "unknown" || status.state === "offline") return "not reachable";
+    if (p.kind === "elegoo_cc2" && status.state !== "idle") return "busy, cleaned when idle";
+    if (state.sends[p.id] && state.sends[p.id].active) return "busy with a send";
+    return "";
+  }
+  function renderStorage() {
+    $("storage").style.display = state.printers.length ? "block" : "none";
+    var removable = 0;
+    var rows = state.printers.map(function (p) {
+      var st = state.storage[p.id];
+      var detail;
+      if (!st || st.count == null) detail = "<span class='muted'>" + esc(st && st.error ? st.error : "counting...") + "</span>";
+      else {
+        removable += st.removable || 0;
+        detail = "<span class='" + (st.many ? "warn" : "muted") + "'>" + st.count + " file" + (st.count === 1 ? "" : "s") + " \u00b7 " + megabytes(st.bytes) +
+                 (st.oldest ? " \u00b7 oldest " + ageText(st.oldest) : "") + "</span>" +
+                 (st.removable ? " <span class='warn'>\u00b7 " + st.removable + " old</span>" : "");
+      }
+      return "<div class='row spread small' style='gap:8px;margin-top:3px'><span class='file'>" + esc(p.name) + "</span>" +
+             "<span style='white-space:nowrap'>" + detail + "</span></div>";
+    }).join("");
+    $("storage").innerHTML =
+      "<div class='row spread'><span class='card-title'>Stored files</span>" +
+        "<button type='button' class='quiet' id='clean-open'" + (removable ? "" : " disabled") + ">Clean up" + (removable ? " (" + removable + ")" : "") + "</button></div>" +
+      "<div class='row spread small muted' style='gap:8px;margin-top:2px'><span class='file'>Rule: " + esc(state.cleanup.text) +
+        (state.cleanup.auto ? " \u00b7 automatic" : "") + "</span>" +
+        "<button type='button' class='linkish' style='flex:none' id='clean-rule'>change</button></div>" + rows;
+    $("clean-open").onclick = cleanupDialog;
+    $("clean-rule").onclick = ruleDialog;
+  }
+  function ruleDialog() {
+    var c = state.cleanup;
+    showDialog("<h4>Which stored files to keep</h4>" +
+      "<p class='small muted' style='margin:0 0 6px'>Files on the printers that fall outside the rule count as old. Nothing is deleted until you click Clean up, unless you tick automatic.</p>" +
+      "<div class='check'><input type='radio' name='r-mode' id='r-age'" + (c.mode === "age" ? " checked" : "") + "><label for='r-age'>Keep files newer than</label>" +
+        "<input id='r-days' type='number' min='1' max='3650' style='width:64px' value='" + esc(c.days) + "'><span>days</span></div>" +
+      "<div class='check' style='margin-top:8px'><input type='radio' name='r-mode' id='r-count'" + (c.mode === "count" ? " checked" : "") + "><label for='r-count'>Keep the newest</label>" +
+        "<input id='r-keep' type='number' min='1' max='5000' style='width:64px' value='" + esc(c.keep) + "'><span>files</span></div>" +
+      "<div class='check' style='margin-top:12px'><input type='checkbox' id='r-auto'" + (c.auto ? " checked" : "") + "><label for='r-auto'>Clean automatically, once a day</label></div>" +
+      "<p class='small muted' style='margin:4px 0 0'>Automatic cleanup only runs while this panel is open. The file being printed is always kept, and a Centauri Carbon 2 is only cleaned while idle.</p>" +
+      "<div class='dialog-actions'><button type='button' class='quiet' id='dlg-cancel'>Cancel</button><button type='button' id='dlg-ok'>Save</button></div>");
+    $("dlg-cancel").onclick = hideDialog;
+    $("dlg-ok").onclick = function () {
+      send("save_cleanup", { rule: { mode: $("r-count").checked ? "count" : "age", days: parseInt($("r-days").value, 10) || c.days,
+                                     keep: parseInt($("r-keep").value, 10) || c.keep, auto: $("r-auto").checked } });
+      hideDialog();
+    };
+  }
+  function cleanupDialog() {
+    var total = 0;
+    var rows = state.printers.map(function (p) {
+      var st = state.storage[p.id] || {}, n = st.removable || 0, why = cleanBlock(p);
+      if (!n) return "";
+      if (!why) total += n;
+      return "<div class='check'><input type='checkbox' data-clean='" + esc(p.id) + "' data-count='" + n + "' id='cl-" + esc(p.id) + "'" +
+             (why ? " disabled" : " checked") + "><label for='cl-" + esc(p.id) + "'>" + esc(p.name) + ": " + n + " old file" + (n === 1 ? "" : "s") +
+             (why ? " <span class='muted'>(" + esc(why) + ")</span>" : "") + "</label></div>";
+    }).join("");
+    showDialog("<h4>Remove old files from the printers?</h4>" +
+      "<p class='small' style='margin:0 0 8px'>Rule: " + esc(state.cleanup.text) + ". The file a printer is printing is always kept.</p>" + rows +
+      "<p class='small warn' style='margin:10px 0 0'>Deleted files cannot be brought back.</p>" +
+      "<div class='dialog-actions'><button type='button' class='quiet' id='dlg-cancel'>Cancel</button>" +
+      "<button type='button' class='danger' id='dlg-ok'" + (total ? "" : " disabled") + ">Delete old files</button></div>");
+    $("dlg-cancel").onclick = hideDialog;
+    $("dlg-ok").onclick = function () {
+      var ids = [];
+      Array.prototype.forEach.call($("dialog").querySelectorAll("input[data-clean]"), function (box) { if (box.checked && !box.disabled) ids.push(box.dataset.clean); });
+      if (ids.length) send("cleanup", { printer_ids: ids });
+      hideDialog();
+    };
+  }
+
+  function render() { renderJob(); renderMulti(); renderPrinters(); renderStorage(); }
 
   function byId(id) { return state.printers.filter(function (p) { return p.id === id; })[0]; }
 
@@ -495,19 +584,21 @@
     else if (d.pick) { selected[d.pick] = t.checked; renderMulti(); renderPrinters(); }
   });
   $("btn-add").onclick = function () { editPrinter(null); };
-  $("btn-refresh").onclick = function () { refresh(state.printers.map(function (p) { return p.id; })); };
+  $("btn-refresh").onclick = function () { refresh(state.printers.map(function (p) { return p.id; })); send("check_storage"); };
   $("btn-import").onclick = function () { send("import_presets"); };
 
   orca.onMessage(function (message) {
     if (!message) return;
     if (message.command === "state") {
-      ["printers", "jobs", "job_for", "slicing", "combos", "types", "current", "combo_note", "can_switch"].forEach(function (key) { if (key in message) state[key] = message[key]; });
+      ["printers", "jobs", "job_for", "slicing", "combos", "types", "current", "combo_note", "can_switch", "storage", "cleanup"].forEach(function (key) { if (key in message) state[key] = message[key]; });
       if (message.status) state.status = message.status;
       if (message.sends) state.sends = message.sends;
       render();
     } else if (message.command === "status") {
       delete refreshing[message.id];
-      state.status[message.id] = message.status; renderMulti(); renderPrinters();
+      state.status[message.id] = message.status; renderMulti(); renderPrinters(); renderStorage();
+    } else if (message.command === "storage") {
+      state.storage[message.id] = message.storage; renderStorage(); renderPrinters();
     } else if (message.command === "send") {
       if (message.send) state.sends[message.id] = message.send; else delete state.sends[message.id];
       renderMulti(); renderPrinters();

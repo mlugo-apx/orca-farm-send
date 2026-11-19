@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 class FakeMoonraker:
     def __init__(self, api_key="", snapmaker=False):
         self.files, self.started, self.state, self.api_key = {}, [], "standby", api_key
+        self.file_times = {}   # file name -> modified time, for cleanup tests
         self.estimated_time, self.metadata_calls = None, 0   # slicer estimate served as file metadata
         self.snapmaker, self.start_options = snapmaker, []
         self.tools = {"filament_color_rgba": ["000000FF", "FFFFFFFF", "6F4C2FFF", "FEE5A5FF"], "filament_type": ["PETG"] * 4,
@@ -98,7 +99,8 @@ class FakeMoonraker:
                     outer.metadata_calls += 1
                     self._json(200, {"result": {"estimated_time": outer.estimated_time}})
                 elif self.path.startswith("/server/files/list"):
-                    self._json(200, {"result": [{"path": name} for name in outer.files]})
+                    self._json(200, {"result": [{"path": name, "modified": outer.file_times.get(name, 0), "size": len(data)}
+                                                for name, data in outer.files.items()]})
                 else:
                     self._json(404, {"error": {"message": "not found"}})
 
@@ -157,6 +159,7 @@ class FakeCC2:
     def __init__(self, token="abc123", serial="SNFAKE0001"):
         self.token, self.serial = token, serial
         self.files, self.started, self.status_code = {}, [], 1
+        self.file_times, self.stuck, self.list_calls, self.delete_calls = {}, set(), 0, 0
         self.progress = None   # override the reported progress, e.g. 100 on an idle printer after a print
         self.partial = {}
         self.need_mesh_force = False
@@ -337,14 +340,21 @@ class FakeCC2:
                 self.status_code = 2
                 result = {"error_code": 0}
         elif method == 1044:
-            result = {"error_code": 0, "file_list": [{"filename": name} for name in self.files]}
+            names = list(self.files)   # paged like the real printer: at most 100 per request
+            offset, limit = int(params.get("offset", 0)), min(100, int(params.get("limit", 100)))
+            self.list_calls += 1
+            result = {"error_code": 0, "total": len(names), "offset": offset,
+                      "file_list": [{"filename": name, "type": "file", "size": len(self.files[name]),
+                                     "create_time": self.file_times.get(name, 0)} for name in names[offset:offset + limit]]}
         elif method == 1047:
             paths = params.get("file_path")
             if not isinstance(paths, list):   # the real printer rejects a bare string
                 result = {"error_code": 1003, "message": "invalid parameter"}
             else:
+                self.delete_calls += 1
                 for path in paths:
-                    self.files.pop(path, None)
+                    if path not in self.stuck:   # the real printer says "ok" even when it keeps a file
+                        self.files.pop(path, None)
                 result = {"error_code": 0}
         else:
             result = {"error_code": 1001}

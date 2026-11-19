@@ -577,6 +577,9 @@ CC2_START_PRINT = 1020
 CC2_GET_FILE_LIST = 1044
 CC2_GET_FILE_DETAIL = 1046
 CC2_DELETE_FILE = 1047
+CC2_DELETE_BATCH = 10      # files per delete request
+CC2_MAX_LISTED = 5000      # stop paging a list that never ends
+CC2_MANY_FILES = 250       # uploads began failing (error 9002) on printers holding 355 and 516 files
 CC2_ERR_BED_MESH_MISSING = 1026
 CC2_ERRORS = {
     109: "filament runout", 1000: "access code rejected", 1003: "invalid parameter", 1004: "the printer could not write the file",
@@ -667,6 +670,39 @@ class ElegooCC2:
             reply = session.request(CC2_GET_FILE_LIST, {"storage_media": "local", "offset": 0, "limit": limit}, timeout=15)
         _cc2_check(reply, "Could not list files")
         return [entry.get("filename", "") for entry in reply.get("file_list") or []]
+
+    def list_stored(self):
+        """Every stored file as {name, modified, size}. The printer hands out 100 per request."""
+        files = []
+        with self._session() as session:
+            while len(files) < CC2_MAX_LISTED:
+                reply = session.request(CC2_GET_FILE_LIST, {"storage_media": "local", "offset": len(files), "limit": 100}, timeout=15)
+                _cc2_check(reply, "Could not list files")
+                page = [entry for entry in reply.get("file_list") or [] if isinstance(entry, dict)]
+                files += [{"name": str(entry.get("filename") or ""), "modified": float(entry.get("create_time") or 0),
+                           "size": int(entry.get("size") or 0)}
+                          for entry in page if entry.get("type", "file") == "file" and entry.get("filename")]
+                total = reply.get("total")
+                if not page or len(page) < 100 or (isinstance(total, int) and len(files) >= total):
+                    break
+        return files
+
+    def delete_files(self, names, progress=None, cancelled=None):
+        """Delete stored files in one session, a few per request. Returns how many requests of
+        names were sent; the printer answers "ok" even for a file it did not delete, so the caller
+        lists again to see what is really gone."""
+        names, done = list(names), 0
+        with self._session() as session:
+            for start in range(0, len(names), CC2_DELETE_BATCH):
+                if cancelled is not None and cancelled():
+                    break
+                batch = names[start:start + CC2_DELETE_BATCH]
+                reply = session.request(CC2_DELETE_FILE, {"storage_media": "local", "file_path": batch}, timeout=20)
+                _cc2_check(reply, "Could not delete files")
+                done += len(batch)
+                if progress is not None:
+                    progress(done, len(names))
+        return done
 
     def delete_file(self, filename):
         with self._session() as session:
@@ -832,6 +868,7 @@ class _CC2Session:
         try:
             self.mqtt.connect()
         except BaseException:
+            self.mqtt.close()   # the socket may be open even though the MQTT handshake failed
             self._release()
             raise
         try:
@@ -1054,6 +1091,24 @@ class Moonraker:
         reply = self._get("/server/files/list?root=gcodes", timeout=15)
         return [entry.get("path", "") for entry in reply.get("result") or []]
 
+    def list_stored(self):
+        """Every stored G-code file as {name, modified, size}."""
+        reply = self._get("/server/files/list?root=gcodes", timeout=20)
+        return [{"name": str(entry.get("path") or ""), "modified": float(entry.get("modified") or 0), "size": int(entry.get("size") or 0)}
+                for entry in reply.get("result") or []
+                if isinstance(entry, dict) and str(entry.get("path") or "").lower().endswith((".gcode", ".g", ".gco"))]
+
+    def delete_files(self, names, progress=None, cancelled=None):
+        names, done = list(names), 0
+        for name in names:
+            if cancelled is not None and cancelled():
+                break
+            self.delete_file(name)
+            done += 1
+            if progress is not None:
+                progress(done, len(names))
+        return done
+
     def delete_file(self, filename):
         http_json("http://%s/server/files/gcodes/%s" % (self.address, urllib.parse.quote(filename)), method="DELETE",
                   headers=self._headers(), timeout=self.timeout)
@@ -1258,10 +1313,16 @@ class PrinterStore:
         self._lock = threading.Lock()
         self.printers = []
         self.combos = {}
+        self.cleanup = dict(DEFAULT_CLEANUP)
         self.load()
+
+    def set_cleanup(self, rule):
+        self.cleanup = clean_rule(rule)
+        self.save()
 
     def load(self):
         self.combos = {}
+        self.cleanup = dict(DEFAULT_CLEANUP)
         try:
             with open(self.path, "r", encoding="utf-8") as handle:
                 data = json.load(handle)
@@ -1269,6 +1330,7 @@ class PrinterStore:
             combos = data.get("combos", {})
             if isinstance(combos, dict):
                 self.combos = {key: value for key, value in combos.items() if isinstance(value, dict) and value.get("printer")}
+            self.cleanup = clean_rule(data.get("cleanup"))
         except (OSError, ValueError, AttributeError):
             self.printers = []
 
@@ -1282,7 +1344,7 @@ class PrinterStore:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 if hasattr(os, "fchmod"):
                     os.fchmod(handle.fileno(), 0o600)   # also tightens a leftover temp file
-                json.dump({"version": 1, "printers": self.printers, "combos": self.combos}, handle, indent=2)
+                json.dump({"version": 1, "printers": self.printers, "combos": self.combos, "cleanup": self.cleanup}, handle, indent=2)
             os.replace(temp, self.path)
 
     def get(self, printer_id):
@@ -1324,11 +1386,64 @@ class PrinterStore:
         return sorted({host_of(p.get("address", "")).split(":")[0] for p in self.printers if p.get("address")})
 
 
-class BedLog:
-    """Which printers have a finished print still on the bed. Kept in a small file so it survives
-    restarting OrcaSlicer and is the same in every OrcaSlicer window.
+# --------------------------------------------------------------------------------------
+# Cleaning old G-code off the printers
+# --------------------------------------------------------------------------------------
 
-    Per printer id: True = clear the bed first, False = the user said it is clear, absent = never seen."""
+DEFAULT_CLEANUP = {"mode": "age", "days": 30, "keep": 50, "auto": False}
+
+
+def clean_rule(rule):
+    """A cleanup rule with every field present and within sane limits."""
+    rule = rule if isinstance(rule, dict) else {}
+    out = dict(DEFAULT_CLEANUP)
+    if rule.get("mode") in ("age", "count"):
+        out["mode"] = rule["mode"]
+    for key, low, high in (("days", 1, 3650), ("keep", 1, 5000)):
+        try:
+            out[key] = max(low, min(high, int(rule.get(key, out[key]))))
+        except (TypeError, ValueError):
+            pass
+    out["auto"] = bool(rule.get("auto", False))
+    return out
+
+
+def rule_text(rule):
+    rule = clean_rule(rule)
+    if rule["mode"] == "count":
+        return "keep the newest %d files" % rule["keep"]
+    return "keep files newer than %d day%s" % (rule["days"], "" if rule["days"] == 1 else "s")
+
+
+def files_to_clean(files, rule, protect=(), now=None):
+    """The stored files a rule removes, oldest first.
+
+    Never chosen: a protected name (the file being printed), and in age mode a file with no
+    date, because "unknown age" is not "old"."""
+    rule = clean_rule(rule)
+    now = time.time() if now is None else now
+    protected = {os.path.basename(str(name)) for name in protect if name}
+    newest_first = sorted(files, key=lambda item: item.get("modified") or 0, reverse=True)
+    if rule["mode"] == "count":
+        chosen = newest_first[rule["keep"]:]
+    else:
+        limit = now - rule["days"] * 86400
+        chosen = [item for item in newest_first if 0 < (item.get("modified") or 0) < limit]
+    chosen = [item for item in chosen if os.path.basename(item["name"]) not in protected]
+    return sorted(chosen, key=lambda item: item.get("modified") or 0)
+
+
+def storage_summary(files):
+    dated = [item["modified"] for item in files if item.get("modified")]
+    return {"count": len(files), "bytes": sum(item.get("size") or 0 for item in files), "oldest": min(dated) if dated else None}
+
+
+class BedLog:
+    """One small value per printer, kept in a file so it survives restarting OrcaSlicer and is the
+    same in every OrcaSlicer window. Used for two things, each in its own file:
+
+    beds: True = clear the bed first, False = the user said it is clear, absent = never seen.
+    cleanups: the time old files were last removed automatically."""
 
     def __init__(self, path):
         self.path, self._stamp, self._beds = path, None, {}
@@ -1348,7 +1463,7 @@ class BedLog:
             with open(self.path, "r", encoding="utf-8") as handle:
                 data = json.load(handle)
             if isinstance(data, dict):
-                self._beds = {str(key): bool(value) for key, value in data.items()}
+                self._beds = {str(key): value for key, value in data.items() if isinstance(value, (bool, int, float))}
         except (OSError, ValueError):
             pass
 
@@ -1358,7 +1473,7 @@ class BedLog:
 
     def set(self, printer_id, needs_clearing):
         self._load()
-        if self._beds.get(printer_id) is needs_clearing:
+        if printer_id in self._beds and self._beds[printer_id] == needs_clearing:
             return
         self._beds[printer_id] = needs_clearing
         self._write()
