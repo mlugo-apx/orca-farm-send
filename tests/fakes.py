@@ -1,4 +1,5 @@
 """In-process fake printers: a Moonraker HTTP server and an Elegoo CC2 (HTTP + MQTT broker)."""
+import base64
 import hashlib
 import json
 import re
@@ -10,8 +11,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 class FakeMoonraker:
-    def __init__(self, api_key=""):
+    def __init__(self, api_key="", snapmaker=False):
         self.files, self.started, self.state, self.api_key = {}, [], "standby", api_key
+        self.snapmaker, self.start_options = snapmaker, []
+        self.tools = {"filament_color_rgba": ["000000FF", "FFFFFFFF", "6F4C2FFF", "FEE5A5FF"], "filament_type": ["PETG"] * 4,
+                      "filament_exist": [True, True, True, False]}
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -32,8 +36,47 @@ class FakeMoonraker:
                     return False
                 return True
 
+            def _websocket(self):
+                """One JSON-RPC call over a websocket, the only transport Snapmaker's start method has."""
+                accept = base64.b64encode(hashlib.sha1((self.headers["Sec-WebSocket-Key"] +
+                                                        "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()).decode()
+                self.wfile.write(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                                  "Sec-WebSocket-Accept: %s\r\n\r\n" % accept).encode())
+                self.wfile.flush()
+                head = self.rfile.read(2)
+                length = head[1] & 0x7F
+                if length == 126:
+                    length = struct.unpack("!H", self.rfile.read(2))[0]
+                elif length == 127:
+                    length = struct.unpack("!Q", self.rfile.read(8))[0]
+                mask = self.rfile.read(4)
+                call = json.loads(bytes(b ^ mask[i % 4] for i, b in enumerate(self.rfile.read(length))).decode())
+
+                def push(body):
+                    raw = json.dumps(body).encode()
+                    size = bytes([len(raw)]) if len(raw) < 126 else bytes([126]) + struct.pack("!H", len(raw))
+                    self.wfile.write(b"\x81" + size + raw)
+                    self.wfile.flush()
+
+                push({"jsonrpc": "2.0", "method": "notify_proc_stat_update", "params": [{}]})   # unrelated chatter first
+                if call["method"] != "server.files.start_local_print":
+                    push({"jsonrpc": "2.0", "id": call["id"], "error": {"code": -32601, "message": "Method not found"}})
+                    return
+                params = call["params"]
+                if params["path"] not in outer.files:
+                    push({"jsonrpc": "2.0", "id": call["id"], "result": {"state": "error", "message": "File not found: " + params["path"]}})
+                    return
+                outer.start_options.append(params)
+                outer.started.append(params["path"])
+                outer.state = "printing"
+                push({"jsonrpc": "2.0", "id": call["id"], "result": {"state": "success", "message": "Print started"}})
+
             def do_GET(self):
                 if not self._auth():
+                    return
+                if self.path == "/websocket" and outer.snapmaker:
+                    self.close_connection = True
+                    self._websocket()
                     return
                 if self.path.startswith("/printer/info"):
                     self._json(200, {"result": {"state": "ready", "hostname": "fake", "software_version": "v0"}})
@@ -48,7 +91,8 @@ class FakeMoonraker:
                         "virtual_sdcard": {"progress": 0.25 if printing else 0},
                         "heater_bed": {"temperature": 60.0, "target": 60.0},
                         "extruder": {"temperature": 25.0, "target": 0.0},
-                        "extruder1": {"temperature": 220.0, "target": 220.0}}}})
+                        "extruder1": {"temperature": 220.0, "target": 220.0},
+                        **({"print_task_config": outer.tools} if outer.snapmaker else {})}}})
                 elif self.path.startswith("/server/files/list"):
                     self._json(200, {"result": [{"path": name} for name in outer.files]})
                 else:

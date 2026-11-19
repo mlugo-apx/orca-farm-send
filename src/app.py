@@ -217,6 +217,7 @@ class FarmApp:
             "display_name": self._job_base_name(job), "summary": " · ".join(bits),
             "printer_model": meta.get("printer_model", ""), "sliced_at": _clock(job["captured_at"]),
             "post_process": bool((meta.get("post_process") or "").strip()),
+            "filaments": list(meta.get("filaments") or []),
             "presets": " \u00b7 ".join(part for part in (meta.get("process_preset"), meta.get("filament_preset")) if part),
             "printers": [p["name"] for p in self.store.printers if model_matches(meta.get("printer_model"), p.get("model"))],
         }
@@ -438,8 +439,8 @@ class FarmApp:
         for printer, snapshot in work:
             self._spawn(self._send_worker, printer, snapshot, start, options)
 
-    def _set_send(self, printer_id, active, text, percent=None, ok=None):
-        entry = {"active": active, "text": text, "percent": percent, "ok": ok}
+    def _set_send(self, printer_id, active, text, percent=None, ok=None, started=False):
+        entry = {"active": active, "text": text, "percent": percent, "ok": ok, "started": started, "at": time.monotonic()}
         with self.lock:
             self.sends[printer_id] = entry
         self.post({"command": "send", "id": printer_id, "send": entry})
@@ -472,7 +473,7 @@ class FarmApp:
             if not can_start(status):
                 raise FarmError("Uploaded, but not started: the printer is %s." % status.get("state_text", status.get("state")).lower())
             client.start_print(remote, options)
-            self._set_send(printer_id, False, "Printing %s" % remote, ok=True)
+            self._set_send(printer_id, False, "Started %s" % remote, ok=True, started=True)
             self._notify("info", "Farm Send: %s started printing %s" % (name, remote))
         except FarmError as error:
             self._set_send(printer_id, False, str(error), ok=False)
@@ -528,4 +529,13 @@ class FarmApp:
             if self.store.get(printer_id) is None:
                 return
             self.status[printer_id] = status
+            # "Started <file>" is only true while that print runs. Once the printer is idle again
+            # (finished or cancelled) the line would be stale, so it is dropped.
+            sent = self.sends.get(printer_id)
+            stale = bool(sent and sent.get("started") and not sent.get("active") and status.get("state") == "idle"
+                         and time.monotonic() - sent.get("at", 0) > 30)
+            if stale:
+                del self.sends[printer_id]
+        if stale:
+            self.post({"command": "send", "id": printer_id, "send": None})
         self.post({"command": "status", "id": printer_id, "status": status})

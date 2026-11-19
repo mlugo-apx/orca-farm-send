@@ -32,9 +32,10 @@ else:
     from app import FarmApp  # noqa: E402
 from fakes import FakeCC2, FakeMoonraker  # noqa: E402
 
-U1_GCODE = "; HEADER_BLOCK_START\n; total layer number: 12\n; total filament used [g] = 3.50\n" \
+U1_GCODE = "; HEADER_BLOCK_START\n; total layer number: 12\n; filament used [g] = 0.00, 3.50\n; total filament used [g] = 3.50\n" \
            "; estimated printing time (normal mode) = 1h 2m 3s\n; HEADER_BLOCK_END\nG28\nG1 X1\n" \
-           "; CONFIG_BLOCK_START\n; filament_type = PETG;PETG\n; post_process = \n; printer_model = Snapmaker U1\n" \
+           "; CONFIG_BLOCK_START\n; filament_colour = #000000;#FFFFFF\n; filament_settings_id = \"PETG Black\";\"PETG White\"\n" \
+           "; filament_type = PETG;PETG\n; post_process = \n; printer_model = Snapmaker U1\n" \
            "; printer_settings_id = Snapmaker U1 (0.4 nozzle) - #1\n; CONFIG_BLOCK_END\n"
 CC2_GCODE = U1_GCODE.replace("Snapmaker U1 (0.4 nozzle) - #1", "CC1").replace("printer_model = Snapmaker U1", "printer_model = Elegoo Centauri Carbon 2")
 
@@ -64,6 +65,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(meta["filament_g"], 3.5)
         self.assertEqual(meta["layers"], 12)
         self.assertEqual(meta["post_process"], "")
+        self.assertEqual(meta["filaments"], [{"slot": 2, "grams": 3.5, "color": "#FFFFFF", "preset": "PETG White", "type": "PETG"}])
 
     def test_meta_large_file_reads_head_and_tail_only(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -177,6 +179,36 @@ class MoonrakerTests(unittest.TestCase):
     def test_start_missing_file_is_an_error(self):
         with self.assertRaises(core.FarmError):
             self.client.start_print("nope.gcode")
+
+    def test_generic_moonraker_falls_back_to_the_standard_start(self):
+        self.fake.files["a.gcode"] = b"x"
+        self.assertEqual(self.client.start_print("a.gcode", {"bed_leveling": True}), "standard")
+        self.assertEqual(self.client.status()["tools"], [])
+        self.assertFalse(self.client.status()["has_print_options"])
+
+    def test_snapmaker_start_carries_the_print_options(self):
+        fake = FakeMoonraker(snapmaker=True)
+        self.addCleanup(fake.close)
+        client = core.Moonraker(fake.address)
+        fake.files["a.gcode"] = b"x"
+        self.assertEqual(client.start_print("a.gcode"), "snapmaker")          # leveling is on unless turned off
+        fake.state = "standby"
+        client.start_print("a.gcode", {"bed_leveling": False, "flow_calibrate": True, "timelapse": True})
+        first, second = (call["options"] for call in fake.start_options)
+        self.assertEqual((first["bed_level"], first["flow_calibrate"], first["time_lapse_camera"]), (1, 0, 0))
+        self.assertEqual((second["bed_level"], second["flow_calibrate"], second["time_lapse_camera"]), (0, 1, 1))
+        self.assertEqual(fake.start_options[0]["type"], "gcode")
+        self.assertEqual(fake.started, ["a.gcode", "a.gcode"])
+        with self.assertRaises(core.FarmError) as caught:
+            client.start_print("missing.gcode")
+        self.assertIn("File not found", str(caught.exception))
+
+    def test_snapmaker_reports_what_each_toolhead_holds(self):
+        fake = FakeMoonraker(snapmaker=True)
+        self.addCleanup(fake.close)
+        tools = core.Moonraker(fake.address).status()["tools"]
+        self.assertEqual(tools[1], {"slot": 2, "color": "#FFFFFF", "type": "PETG", "loaded": True})
+        self.assertFalse(tools[3]["loaded"])
 
     def test_api_key(self):
         fake = FakeMoonraker(api_key="k")
@@ -333,6 +365,23 @@ class AppTests(unittest.TestCase):
         self.assertRegex(name, r"^widget_PETG_1h02m_\d{8}-\d{6}\.gcode$")
         self.assertEqual(self.u1.files[name].decode(), U1_GCODE)
         self.assertEqual(self.u1.started, [])
+
+    def test_plate_view_names_the_toolhead_and_colour(self):
+        self.slice()
+        self.assertEqual(self.app.snapshot()["jobs"][0]["filaments"][0]["slot"], 2)
+        self.assertEqual(self.app.snapshot()["jobs"][0]["filaments"][0]["color"], "#FFFFFF")
+
+    def test_started_line_is_dropped_once_the_printer_is_idle_again(self):
+        self.slice()
+        self.send([self.p_u1], start=True)
+        self.assertTrue(self.app.sends[self.p_u1["id"]]["started"])
+        self.app.poll(force=True)
+        time.sleep(0.5)
+        self.assertIn(self.p_u1["id"], self.app.sends)              # still printing: keep it
+        self.u1.state = "cancelled"
+        self.app.sends[self.p_u1["id"]]["at"] -= 60
+        self.app.poll(force=True)
+        self.assertTrue(wait_for(lambda: self.p_u1["id"] not in self.app.sends))
 
     def test_upload_and_print(self):
         self.slice()

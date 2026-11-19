@@ -1,5 +1,6 @@
 """Farm Send core: printer protocols and job logic. Pure standard library, no OrcaSlicer imports,
 so it can be tested outside the slicer against real printers."""
+import base64
 import hashlib
 import http.client
 import json
@@ -107,7 +108,35 @@ def parse_gcode_meta(path, head_bytes=256 * 1024, tail_bytes=768 * 1024):
             else:
                 meta[field] = value.split(";")[0].strip().strip('"') if field != "printer_model" else value
     meta["time_s"] = _parse_duration(meta.get("time_text"))
+    meta["filaments"] = _filaments_used(text)
     return meta
+
+
+def _config_list(text, key):
+    match = re.search(r"^; %s = (.*)$" % re.escape(key), text, re.M)
+    if not match:
+        return []
+    return [item.strip().strip('"') for item in match.group(1).strip().split(";")]
+
+
+def _filaments_used(text):
+    """Which filament slots the G-code actually extrudes with: [{slot, grams, color, preset, type}].
+
+    Slot 1 is the printer's first toolhead. A plate assigned to the wrong slot prints in the wrong
+    colour, and nothing else in the slice summary shows it."""
+    match = re.search(r"^; filament used \[g\] = (.*)$", text, re.M)
+    if not match:
+        return []
+    grams = [float(value) if re.match(r"^-?\d+(\.\d+)?$", value.strip()) else 0.0 for value in match.group(1).split(",")]
+    colors, presets, types = (_config_list(text, key) for key in ("filament_colour", "filament_settings_id", "filament_type"))
+    used = []
+    for index, amount in enumerate(grams):
+        if amount > 0:
+            used.append({"slot": index + 1, "grams": round(amount, 2),
+                         "color": colors[index] if index < len(colors) else "",
+                         "preset": presets[index] if index < len(presets) else "",
+                         "type": types[index] if index < len(types) else ""})
+    return used
 
 
 def normalize_model(name):
@@ -237,6 +266,109 @@ def http_json(url, method="GET", data=None, headers=None, timeout=6):
         return value if isinstance(value, dict) else {}
     except ValueError:
         raise FarmError("Printer sent an unreadable reply (HTTP %d)" % status)
+
+
+# --------------------------------------------------------------------------------------
+# Minimal websocket JSON-RPC call (RFC 6455, text frames): some Moonraker methods are not
+# offered over HTTP at all
+# --------------------------------------------------------------------------------------
+
+class RpcError(Exception):
+    def __init__(self, code, message):
+        Exception.__init__(self, message)
+        self.code = code
+
+
+def websocket_rpc(address, method, params, timeout=20, path="/websocket"):
+    """Open a websocket, make one JSON-RPC call, return its result, close."""
+    host, _, port = address.partition(":")
+    request_id = 4242
+    try:
+        sock = socket.create_connection((host, int(port or 80)), timeout=timeout)
+    except PermissionError:
+        raise
+    except (socket.timeout, TimeoutError):
+        raise FarmError("Cannot reach printer: timed out")
+    except OSError as error:
+        raise FarmError("Cannot reach printer: %s" % (error.strerror or error))
+    try:
+        key = base64.b64encode(os.urandom(16)).decode("ascii")
+        sock.sendall(("GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                      "Sec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n" % (path, host, key)).encode("ascii"))
+        deadline = time.monotonic() + timeout
+        buffer = b""
+
+        def fill(count):
+            nonlocal buffer
+            while len(buffer) < count:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise socket.timeout()
+                sock.settimeout(remaining)
+                chunk = sock.recv(65536)
+                if not chunk:
+                    raise FarmError("Printer closed the connection")
+                buffer += chunk
+
+        while b"\r\n\r\n" not in buffer:
+            fill(len(buffer) + 1)
+        head, _, buffer = buffer.partition(b"\r\n\r\n")
+        if b" 101 " not in head.split(b"\r\n")[0] + b" ":
+            raise RpcError(-32601, "Printer does not offer a websocket API")
+        payload = json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}).encode("utf-8")
+        mask = os.urandom(4)
+        size = len(payload)
+        if size < 126:
+            frame = bytes([0x81, 0x80 | size])
+        elif size < 65536:
+            frame = bytes([0x81, 0x80 | 126]) + struct.pack("!H", size)
+        else:
+            frame = bytes([0x81, 0x80 | 127]) + struct.pack("!Q", size)
+        sock.sendall(frame + mask + bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload)))
+        message = b""
+        while True:
+            fill(2)
+            final, opcode, length = buffer[0] & 0x80, buffer[0] & 0x0F, buffer[1] & 0x7F
+            offset = 2
+            if length == 126:
+                fill(4)
+                length, offset = struct.unpack("!H", buffer[2:4])[0], 4
+            elif length == 127:
+                fill(10)
+                length, offset = struct.unpack("!Q", buffer[2:10])[0], 10
+            fill(offset + length)
+            data, buffer = buffer[offset:offset + length], buffer[offset + length:]
+            if opcode == 8:
+                raise FarmError("Printer closed the connection")
+            if opcode not in (0, 1):
+                continue        # ping/pong/binary: nothing this one-shot call needs
+            message += data
+            if not final:
+                continue
+            try:
+                reply = json.loads(message.decode("utf-8", errors="replace"))
+            except ValueError:
+                reply = None
+            message = b""
+            if not isinstance(reply, dict) or reply.get("id") != request_id:
+                continue        # status notifications the printer pushes to every client
+            if "error" in reply:
+                error = reply["error"] if isinstance(reply["error"], dict) else {}
+                raise RpcError(error.get("code", -1), str(error.get("message", "printer error")))
+            return reply.get("result")
+    except PermissionError:
+        raise
+    except (socket.timeout, TimeoutError):
+        raise FarmError("Printer did not answer in time")
+    except (FarmError, RpcError):
+        raise
+    except OSError as error:
+        raise FarmError("Lost connection to printer: %s" % (error.strerror or error))
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
 
 
 # --------------------------------------------------------------------------------------
@@ -726,7 +858,7 @@ class Moonraker:
 
     def status(self):
         reply = self._get("/printer/objects/query?print_stats&virtual_sdcard&heater_bed&display_status&toolhead&extruder"
-                          "&extruder1&extruder2&extruder3")
+                          "&extruder1&extruder2&extruder3&print_task_config")
         return normalize_moonraker_status(reply.get("result", {}).get("status", {}), self._klippy_state)
 
     def _klippy_state(self):
@@ -801,7 +933,30 @@ class Moonraker:
             return filename
 
     def start_print(self, filename, options=None):
-        self._post("/printer/print/start?filename=%s" % urllib.parse.quote(filename), timeout=30)
+        """Start a file already on the printer.
+
+        Snapmaker firmware decides bed leveling, flow calibration and time-lapse from options that
+        travel WITH the start request (server.files.start_local_print, websocket only). A plain
+        Moonraker start carries none, and the printer then silently skips auto bed leveling. So the
+        Snapmaker call is tried first; a printer that does not know it gets the standard start."""
+        options = options or {}
+        params = {"type": "gcode", "path": filename, "options": {
+            "map_table": [[index, index] for index in range(4)],
+            "bed_level": 1 if options.get("bed_leveling", True) else 0,
+            "flow_calibrate": 1 if options.get("flow_calibrate", False) else 0,
+            "time_lapse_camera": 1 if options.get("timelapse", False) else 0,
+        }}
+        try:
+            result = websocket_rpc(self.address, "server.files.start_local_print", params, timeout=30)
+        except RpcError as error:
+            text = str(error).lower()
+            if error.code == -32601 or "not found" in text or "unknown method" in text:
+                self._post("/printer/print/start?filename=%s" % urllib.parse.quote(filename), timeout=30)
+                return "standard"
+            raise FarmError("Printer refused to start the print: %s" % error)
+        if isinstance(result, dict) and str(result.get("state", "")).lower() not in ("success", "ok", ""):
+            raise FarmError("Printer refused to start the print: %s" % (result.get("message") or result.get("state")))
+        return "snapmaker"
 
 
 def normalize_moonraker_status(status, klippy_info=None):
@@ -825,6 +980,8 @@ def normalize_moonraker_status(status, klippy_info=None):
     tools = [tool for tool in tools if tool]
     if tools:
         out["nozzle"] = max(tools, key=lambda tool: (tool["target"], tool["current"]))
+    out["tools"] = _moonraker_tools(status.get("print_task_config"))
+    out["has_print_options"] = isinstance(status.get("print_task_config"), dict)
     if state in ("printing", "paused"):
         progress = sdcard.get("progress")
         if isinstance(progress, (int, float)):
@@ -833,6 +990,23 @@ def normalize_moonraker_status(status, klippy_info=None):
             if isinstance(elapsed, (int, float)) and progress > 0.01:
                 out["remaining_s"] = int(elapsed / progress - elapsed)
     return out
+
+
+def _moonraker_tools(config):
+    """What a Snapmaker reports as loaded in each toolhead: [{slot, color, type, loaded}]."""
+    if not isinstance(config, dict):
+        return []
+    colors = config.get("filament_color_rgba") or []
+    types = config.get("filament_type") or []
+    exists = config.get("filament_exist") or []
+    tools = []
+    for index in range(max(len(colors), len(types))):
+        raw = str(colors[index]) if index < len(colors) else ""
+        tools.append({"slot": index + 1,
+                      "color": ("#" + raw[:6]) if re.match(r"^[0-9A-Fa-f]{6}", raw) else "",
+                      "type": str(types[index]) if index < len(types) else "",
+                      "loaded": bool(exists[index]) if index < len(exists) else True})
+    return tools
 
 
 # --------------------------------------------------------------------------------------
