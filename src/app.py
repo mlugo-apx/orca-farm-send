@@ -312,6 +312,7 @@ class FarmApp:
                 "combos": self._combo_views(),
                 "types": self._type_views(),
                 "library": self._library_views(),
+                "folders": self.library_folders(),
                 "orders": self._order_views(),
                 "order_plates": self._open_plates(),
                 "toolhead_names": list(self.orders.toolhead_names),
@@ -670,9 +671,84 @@ class FarmApp:
                 path = os.path.join(self.library_dir, name[:-5] + ".gcode")
                 if isinstance(entry, dict) and entry.get("id") == name[:-5] and os.path.isfile(path):
                     entries.append(dict(entry, path=path))
-            entries.sort(key=lambda entry: (str(entry.get("item", "")).lower(), entry.get("parts") or 0))
+            entries.sort(key=lambda entry: (str(entry.get("folder", "")).lower(), str(entry.get("item", "")).lower(),
+                                            entry.get("parts") or 0))
             self._library_cache = entries
         return self._library_cache
+
+    FOLDERS_FILE = "folders.json"   # folders the user made, so an empty one is still there
+    FOLDER_SEP = " / "              # a folder inside a folder is a path: "Clips / Vertical"
+    FOLDER_DEPTH = 4
+
+    @classmethod
+    def folder_path(cls, value):
+        """A folder path as typed, tidied: parts trimmed, empty parts dropped, depth and length capped."""
+        parts = [" ".join(part.split())[:40] for part in str(value or "").split("/")]
+        return cls.FOLDER_SEP.join([part for part in parts if part][:cls.FOLDER_DEPTH])
+
+    @classmethod
+    def _under(cls, path, folder):
+        """path is folder itself or somewhere inside it."""
+        return path == folder or path.startswith(folder + cls.FOLDER_SEP)
+
+    def library_folders(self):
+        """Every folder, sorted: the ones made by hand plus any a kept plate names."""
+        names = set()
+        try:
+            with open(os.path.join(self.library_dir, self.FOLDERS_FILE), "r", encoding="utf-8") as handle:
+                names = {str(n) for n in json.load(handle) if isinstance(n, str) and n}
+        except (OSError, ValueError, TypeError):
+            pass
+        names |= {e["folder"] for e in self.library() if e.get("folder")}
+        for name in list(names):            # a folder's parents exist too
+            parts = name.split(self.FOLDER_SEP)
+            names |= {self.FOLDER_SEP.join(parts[:depth]) for depth in range(1, len(parts))}
+        return sorted(names, key=str.lower)
+
+    def _save_folders(self, names):
+        os.makedirs(self.library_dir, exist_ok=True)
+        write_private(os.path.join(self.library_dir, self.FOLDERS_FILE), json.dumps(sorted(set(names), key=str.lower)))
+        self._library_cache = None
+
+    def _move_folder(self, old, new):
+        """Everything in folder old, at any depth, goes to the same place under new ("" = top level)."""
+        moved = lambda path: (new + path[len(old):]).lstrip(" /") if new else path[len(old):].lstrip(" /")
+        for entry in self.library():
+            if self._under(entry.get("folder", ""), old):
+                saved = {k: v for k, v in entry.items() if k != "path"}
+                saved["folder"] = self.folder_path(moved(entry["folder"]))
+                write_private(os.path.join(self.library_dir, entry["id"] + ".json"), json.dumps(saved, indent=1))
+        self._library_cache = None
+        return moved
+
+    def _cmd_library_folder(self, message):
+        """action add / rename / remove. name and new are full paths. Removing a folder keeps what is
+        in it: its plates and its subfolders move up into the folder that held it."""
+        name, new, action = self.folder_path(message.get("name")), self.folder_path(message.get("new")), message.get("action")
+        folders = self.library_folders()
+        try:
+            if action == "add":
+                if not name:
+                    raise FarmError("Give the folder a name")
+                self._save_folders(folders + [name])
+            elif action in ("rename", "remove") and name in folders:
+                if action == "rename":
+                    if not new:
+                        raise FarmError("Give the folder a name")
+                    if self._under(new, name) and new != name:
+                        raise FarmError("A folder cannot be moved into itself")
+                else:
+                    new = self.FOLDER_SEP.join(name.split(self.FOLDER_SEP)[:-1])      # its parent, or the top level
+                moved = self._move_folder(name, new)
+                kept = [f for f in folders if not self._under(f, name)]
+                inside = [self.folder_path(moved(f)) for f in folders if self._under(f, name) and (action == "rename" or f != name)]
+                self._save_folders([f for f in kept + inside if f])
+            self.post({"command": "library_result", "ok": True, "text": ""})
+        except FarmError as error:
+            self.post({"command": "library_result", "ok": False, "text": str(error)})
+        except OSError as error:
+            self.post({"command": "library_result", "ok": False, "text": "Could not save: %s" % (error.strerror or error)})
+        self.post_state()
 
     def _library_views(self):
         views = []
@@ -685,6 +761,7 @@ class FarmApp:
             if entry.get("layers"):
                 bits.append("%d layers" % entry["layers"])
             views.append({"id": entry["id"], "item": entry.get("item", ""), "parts": entry.get("parts") or 0,
+                          "folder": entry.get("folder", ""),
                           "key": entry.get("key", ""), "printer_model": entry.get("printer_model", ""),
                           "summary": " \u00b7 ".join(bits), "filaments": list(entry.get("filaments") or []),
                           "presets": entry.get("presets", ""), "saved_at": entry.get("saved_at") or 0,
@@ -692,20 +769,45 @@ class FarmApp:
                                        if model_matches(entry.get("printer_model"), p.get("model"))]})
         return views
 
-    def _cmd_library_save(self, message):
-        """Keep the plate sliced just now, under an item name and with the number of parts on it."""
+    @staticmethod
+    def _library_fields(message):
+        """Item name, parts count and folder as typed, tidied. Raises FarmError when unusable."""
         item = " ".join(str(message.get("item") or "").split())[:80]
+        folder = FarmApp.folder_path(message.get("folder"))
         try:
             parts = int(message.get("parts"))
         except (TypeError, ValueError):
             parts = 0
+        if not item:
+            raise FarmError("Give the item a name")
+        if not 1 <= parts <= 9999:
+            raise FarmError("Enter how many parts are on this plate")
+        return item, parts, folder
+
+    def _cmd_library_edit(self, message):
+        """Rename a kept plate, correct its parts count, or move it to another folder."""
+        entry = next((e for e in self.library() if e["id"] == message.get("id")), None)
+        try:
+            if entry is None:
+                raise FarmError("That library plate no longer exists.")
+            item, parts, folder = self._library_fields(message)
+            saved = {k: v for k, v in entry.items() if k != "path"}
+            saved.update(item=item, parts=parts, folder=folder)
+            write_private(os.path.join(self.library_dir, entry["id"] + ".json"), json.dumps(saved, indent=1))
+            self._library_cache = None
+            self.post({"command": "library_result", "ok": True, "text": "Updated %s x%d." % (item, parts)})
+        except FarmError as error:
+            self.post({"command": "library_result", "ok": False, "text": str(error)})
+        except OSError as error:
+            self.post({"command": "library_result", "ok": False, "text": "Could not save: %s" % (error.strerror or error)})
+        self.post_state()
+
+    def _cmd_library_save(self, message):
+        """Keep the plate sliced just now, under an item name and with the number of parts on it."""
         with self.lock:
             job = next((j for j in self.jobs if j["id"] == message.get("job_id") and j["ready"]), None)
         try:
-            if not item:
-                raise FarmError("Give the item a name")
-            if not 1 <= parts <= 9999:
-                raise FarmError("Enter how many parts are on this plate")
+            item, parts, folder = self._library_fields(message)
             if job is None:
                 raise FarmError("That plate is no longer here. Slice it again.")
             if job.get("stale"):
@@ -716,7 +818,7 @@ class FarmApp:
             self._copy_file(job["path"], target + ".part")
             os.replace(target + ".part", target)
             meta = job["meta"]
-            entry = {"id": entry_id, "item": item, "parts": parts, "key": job.get("key", ""),
+            entry = {"id": entry_id, "item": item, "parts": parts, "folder": folder, "key": job.get("key", ""),
                      "printer_model": meta.get("printer_model", ""), "time_s": meta.get("time_s"),
                      "filament_g": meta.get("filament_g"), "layers": meta.get("layers"),
                      "filaments": list(meta.get("filaments") or []), "nozzle_diameter": meta.get("nozzle_diameter"),

@@ -643,6 +643,63 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(len(other.snapshot()["library"]), 1)         # a plate kept in one window shows in the other
         self.assertIsNotNone(other.store.get(added["id"]))
 
+    def test_folders_and_editing_a_kept_plate(self):
+        path = write(self.tmp.name, ".1.0.gcode", U1_GCODE)
+        self.app.on_slice_started(); self.app.on_gcode_exported(path, "")
+        job = self.app.jobs[0]
+        self.assertTrue(wait_for(lambda: job["ready"]))
+        self.app.handle({"command": "library_save", "job_id": job["id"], "item": "Rail clip", "parts": 24, "folder": "  Fence   clips "})
+        (view,) = self.app.snapshot()["library"]
+        self.assertEqual(view["folder"], "Fence clips")
+        self.app.handle({"command": "library_edit", "id": view["id"], "item": "Rail clip v2", "parts": 20, "folder": "Deck"})
+        (view,) = FarmApp(self.folder.name, lambda message: None).snapshot()["library"]      # written to disk
+        self.assertEqual((view["item"], view["parts"], view["folder"], view["printer_model"]), ("Rail clip v2", 20, "Deck", "Snapmaker U1"))
+        self.app.handle({"command": "library_edit", "id": view["id"], "item": "", "parts": 20, "folder": "Deck"})
+        self.assertFalse([post for post in self.posts if post.get("command") == "library_result"][-1]["ok"])
+        self.assertEqual(self.app.snapshot()["library"][0]["item"], "Rail clip v2")            # a bad edit changes nothing
+        with open(self.app.library()[0]["path"]) as handle:
+            self.assertEqual(handle.read(), U1_GCODE)                                           # the G-code is never touched
+
+    def test_folders_can_be_made_renamed_and_removed(self):
+        folder = lambda **m: self.app.handle(dict({"command": "library_folder"}, **m))
+        folder(action="add", name=" Fence  clips ")
+        self.assertEqual(self.app.snapshot()["folders"], ["Fence clips"])                        # an empty folder stays
+        self._slice_and_save()
+        entry_id = self.app.library()[0]["id"]
+        self.app.handle({"command": "library_edit", "id": entry_id, "item": "Rail clip", "parts": 24, "folder": "Fence clips"})
+        folder(action="rename", name="Fence clips", new="Clips")
+        self.assertEqual(self.app.snapshot()["folders"], ["Clips"])
+        self.assertEqual(self.app.snapshot()["library"][0]["folder"], "Clips")                   # its plate moved with it
+        self.assertEqual(FarmApp(self.folder.name, lambda message: None).snapshot()["folders"], ["Clips"])
+        folder(action="add", name="")
+        self.assertFalse([post for post in self.posts if post.get("command") == "library_result"][-1]["ok"])
+        folder(action="remove", name="Clips")
+        snap = self.app.snapshot()
+        self.assertEqual((snap["folders"], len(snap["library"]), snap["library"][0]["folder"]), ([], 1, ""))   # plate kept
+        self.assertTrue(os.path.isfile(self.app.library()[0]["path"]))
+
+    def test_folders_inside_folders(self):
+        folder = lambda **m: self.app.handle(dict({"command": "library_folder"}, **m))
+        folders = lambda: self.app.snapshot()["folders"]
+        folder(action="add", name="Clips/ Vertical /Left")
+        self.assertEqual(folders(), ["Clips", "Clips / Vertical", "Clips / Vertical / Left"])    # parents come with it
+        self._slice_and_save()
+        plate = lambda: self.app.snapshot()["library"][0]
+        self.app.handle({"command": "library_edit", "id": plate()["id"], "item": "Rail clip", "parts": 24, "folder": "Clips / Vertical / Left"})
+        folder(action="rename", name="Clips / Vertical", new="Clips / Upright")                  # carries what is inside
+        self.assertEqual(folders(), ["Clips", "Clips / Upright", "Clips / Upright / Left"])
+        self.assertEqual(plate()["folder"], "Clips / Upright / Left")
+        folder(action="rename", name="Clips", new="Clips / Upright / Deeper")                    # not into itself
+        self.assertIn("into itself", [post for post in self.posts if post.get("command") == "library_result"][-1]["text"])
+        folder(action="remove", name="Clips / Upright")                                          # contents move up one level
+        self.assertEqual(folders(), ["Clips", "Clips / Left"])
+        self.assertEqual(plate()["folder"], "Clips / Left")
+        folder(action="remove", name="Clips")
+        self.assertEqual((folders(), plate()["folder"]), (["Left"], "Left"))
+        self.assertEqual(FarmApp(self.folder.name, lambda message: None).snapshot()["folders"], ["Left"])
+        self.assertEqual(FarmApp.folder_path("a/b/c/d/e/f"), "a / b / c / d")                    # depth is capped
+        self.assertTrue(os.path.isfile(self.app.library()[0]["path"]))
+
     def test_toolhead_map_table(self):
         self.assertEqual(core.toolhead_map_table(None), [[0, 0], [1, 1], [2, 2], [3, 3]])
         self.assertEqual(core.toolhead_map_table({2: 1}), [[0, 0], [1, 0], [2, 2], [3, 3]])

@@ -51,9 +51,10 @@ The plugin cannot press Slice for you.
 
 **Library**
 
-For parts you print again and again. On a sliced plate's row click **save to library**, name the item and enter how many parts are on the plate.
+For parts you print again and again. On a sliced plate's row click **Save to library**, name the item and enter how many parts are on the plate.
 The plate is kept on this computer, in the plugin's own data folder, and survives closing the project and restarting OrcaSlicer.
-In the Plates box, **Library** lists what you kept, with search. **Send** shows the printers of the right type with their state, and the total parts for the printers you tick, then uploads and starts them. No project, no slicing.
+You can also put it in a folder. **New folder** in the Library view makes one at the top, and the plus on a folder makes one inside it, up to four levels. The pencil and bin on a folder rename or remove it; removing a folder keeps what is in it and moves it up one level. The pencil on a library row renames the item, corrects the count or moves it to another folder.
+In the Plates box, **Library** lists what you kept, grouped by folder, with search. **Send** shows the printers of the right type with their state, and the total parts for the printers you tick, then uploads and starts them. No project, no slicing.
 
 A kept plate is the G-code exactly as sliced: printer type, nozzle, material and temperatures do not change. To change any of those, slice again and save a new plate.
 On Snapmaker U1s a one-filament plate can be printed from any toolhead, so one kept plate covers every color: choose the toolhead in the send dialog, which lists what each printer's toolheads hold.
@@ -61,14 +62,9 @@ The same toolhead number is used on every printer you tick, so this assumes your
 A start is refused when that toolhead reports no filament or holds a different material. Color itself is not checked.
 Verified on a U1 up to the point where the printer heats the chosen toolhead; a complete print through a remapped toolhead has not been run yet.
 
-**Orders**
+**Toolhead names**
 
-For "I need 96 of these". In the Plates box open **Orders**, click **New order**, pick a library item and enter the quantity. Optionally pick the toolhead for Snapmaker printers and add a note.
-**Print next** proposes a kept plate for each printer that is free right now: idle, bed cleared, and no uncounted plate on it. Per printer it takes the largest plate that does not overshoot what is left, or the smallest one when all would, so a few extras are possible. Untick what you do not want, then **Start prints**.
-Keep plates of more than one size for an item (a full plate and a small one) and the proposal uses both.
-When a plate finishes, **Bed cleared** on that printer asks how many parts came out good. Only good parts count, so a failed plate puts its parts back on the to-start count.
-The order line shows good, printing and still to start, and is remembered across restarts. Remove an order when it is complete.
-**toolhead names** lets you label the four toolhead positions (Black, White and so on) if you keep them the same on every printer. These are labels only: the plugin checks that the toolhead has filament of the right material, not its color.
+**toolhead names** in the Library view lets you label the four toolhead positions (Black, White and so on) if you keep them the same on every printer. These are labels only: the plugin checks that the toolhead has filament of the right material, not its color.
 
 **Stored files and cleanup**
 

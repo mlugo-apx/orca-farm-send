@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.2
+
+- **Library folders, with folders inside folders.** **New folder** makes one at the top; the plus on a folder makes one inside it (up to four levels). The pencil and bin rename or remove a folder. Renaming carries everything inside along. Removing a folder keeps what is in it: its plates and subfolders move up one level. Pick a folder when you save a plate, or move a plate later with its pencil. Folders open and close one by one or with expand all / collapse all, a folder shows how many plates are inside it at any depth, and a search looks in every folder.
+- **Edit a kept plate.** The pencil on a library row renames the item, corrects the parts count or moves it to another folder. The G-code is not touched.
+- "Save to library" is now a button on the sliced plate's row.
+- **Orders are switched off for now.** The tab planned whole plates only; splitting a small order into a few parts per printer needs a different approach, so the tab is hidden until that exists. Nothing else depends on it. "toolhead names" moved to the Library view.
+
 ## 0.2.1
 
 - Fixes 0.2.0, where a sliced or kept plate no longer showed its filament color: the plugin read the wrong setting name from the G-code. Use 0.2.1 instead of 0.2.0.

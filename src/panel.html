@@ -65,7 +65,7 @@
 (function () {
   var state = { printers: [], jobs: [], job_for: {}, status: {}, sends: {}, slicing: false,
                 combos: [], types: [], current: null, combo_note: { text: "" }, can_switch: false,
-                library: [], orders: [], order_plates: {}, toolhead_names: ["", "", "", ""], storage: {}, cleanup: { mode: "age", days: 30, keep: 50, auto: false, text: "" } };
+                library: [], folders: [], orders: [], order_plates: {}, toolhead_names: ["", "", "", ""], storage: {}, cleanup: { mode: "age", days: 30, keep: 50, auto: false, text: "" } };
   var selected = {};
   var expanded = {};   // busy printers shown as a full card instead of one line
   var $ = function (id) { return document.getElementById(id); };
@@ -142,6 +142,7 @@
   // Icons are drawn here, not taken from a font, so they look the same on every system.
   var ICONS = {
     refresh: "<path d='M13 8a5 5 0 1 1-1.5-3.6'/><path d='M13 2.5v3h-3'/>",
+    plus: "<path d='M8 3.5v9'/><path d='M3.5 8h9'/>",
     edit: "<path d='M2.5 13.5l.6-2.9 7.6-7.6 2.3 2.3-7.6 7.6z'/><path d='M9.4 4.3l2.3 2.3'/>",
     up: "<path d='M3.5 10l4.5-4.5 4.5 4.5'/>",
     down: "<path d='M3.5 6l4.5 4.5 4.5-4.5'/>",
@@ -293,12 +294,15 @@
       (job.presets ? "<div class='muted small file' title='" + esc(job.presets) + "'>" + esc(job.presets) + "</div>" : "") +
       (job.stale ? "<div class='warn small'>Plate changed since this slice. Slice again if this type should get the change.</div>" : "") +
       (job.post_process ? "<div class='warn small'>Post-processing scripts are not applied.</div>" : "") +
-      (job.stale ? "" : "<button type='button' class='linkish' style='padding:0' data-lib-save='" + esc(job.id) +
-                       "' title='Keep this plate so it can be sent again later without slicing'>save to library</button>");
+      (job.stale ? "" : "<div style='margin-top:6px'><button type='button' class='quiet' data-lib-save='" + esc(job.id) +
+                       "' title='Keep this plate so it can be sent again later without slicing'>Save to library</button></div>");
   }
 
   // ---- library: plates kept for reprinting ---------------------------------------------------
-  var plateView = "now", libQuery = "", libNote = null;
+  var plateView = "now", libQuery = "", libNote = null, libLastFolder = "";
+  // Orders are switched off for now: whole-plate planning did not match how orders are split
+  // (a few parts per printer). The code stays; set this to true to show the tab again.
+  var ORDERS_ENABLED = false;
   function libraryListHtml() {
     var words = libQuery.toLowerCase().split(/\s+/).filter(Boolean);
     var entries = state.library.filter(function (e) {
@@ -307,18 +311,99 @@
     });
     if (!state.library.length) return "<div class='muted small' style='margin-top:6px'>Nothing kept yet. Slice a plate, then click \u201csave to library\u201d on its row.</div>";
     if (!entries.length) return "<div class='muted small' style='margin-top:6px'>No item matches.</div>";
-    return entries.map(function (e) {
+    var row = function (e) {
       var saved = e.saved_at ? new Date(e.saved_at * 1000).toLocaleDateString([], { month: "short", day: "numeric" }) : "";
       return "<div class='type'><div class='row spread' style='gap:8px'>" +
         "<div class='file'><b>" + esc(e.item) + "</b> <span class='muted'>x" + esc(e.parts) + "</span></div>" +
         "<div class='row' style='flex:none'><button type='button' class='quiet' data-lib-send='" + esc(e.id) + "'" +
-          (e.printers.length ? "" : " disabled") + ">Send</button>" + iconButton("trash", "data-lib-del", e.id, "Remove from the library") + "</div></div>" +
+          (e.printers.length ? "" : " disabled") + ">Send</button>" + iconButton("edit", "data-lib-edit", e.id, "Rename, change the count or move to a folder") +
+          iconButton("trash", "data-lib-del", e.id, "Remove from the library") + "</div></div>" +
         "<div class='muted small file'>" + esc(e.printer_model || "unknown printer") + " \u00b7 " + esc(e.summary) + (saved ? " \u00b7 kept " + esc(saved) : "") + "</div>" +
         filamentLines(e) +
         (e.presets ? "<div class='muted small file' title='" + esc(e.presets) + "'>" + esc(e.presets) + "</div>" : "") +
         (e.printers.length ? "" : "<div class='warn small'>No printer of this type is set up.</div>") + "</div>";
-    }).join("");
+    };
+    // Grouped by folder; plates in no folder come first. A search opens every folder it finds something in.
+    // A tree by folder path ("Clips / Vertical"). Plates in no folder come first, untitled.
+    var by = {}, shown = {};
+    entries.forEach(function (e) { var f = e.folder || ""; (by[f] = by[f] || []).push(e); });
+    var paths = words.length ? [] : state.folders.slice();          // a search shows only folders with a match
+    Object.keys(by).forEach(function (f) {
+      var parts = f ? f.split(SEP) : [];
+      for (var d = 1; d <= parts.length; d++) { var up = parts.slice(0, d).join(SEP); if (paths.indexOf(up) < 0) paths.push(up); }
+    });
+    if (!paths.length) return (by[""] || []).map(row).join("");
+    var inside = function (f) { return entries.filter(function (e) { return e.folder === f || (e.folder || "").indexOf(f + SEP) === 0; }).length; };
+    var kids = function (parent) {
+      return paths.filter(function (f) { var cut = f.lastIndexOf(SEP); return (cut < 0 ? "" : f.slice(0, cut)) === parent; })
+                  .sort(function (a, b) { return a.toLowerCase() < b.toLowerCase() ? -1 : 1; });
+    };
+    var node = function (f) {
+      var open = words.length > 0 || !libClosed[f], leaf = f.slice(f.lastIndexOf(SEP) < 0 ? 0 : f.lastIndexOf(SEP) + SEP.length);
+      var depth = f.split(SEP).length, body = kids(f).map(node).join("") + (by[f] || []).map(row).join("");
+      return "<div class='type'><div class='row spread' style='gap:6px'>" +
+        "<button type='button' class='linkish file' style='padding:0;text-decoration:none;font-weight:600;color:inherit;text-align:left;min-width:0' data-lib-folder='" + esc(f) + "' title='" + esc(f) + "'>" +
+        (open ? "\u25be " : "\u25b8 ") + esc(leaf) + " <span class='muted' style='font-weight:400;pointer-events:none'>(" + inside(f) + ")</span></button>" +
+        "<div class='row' style='flex:none'>" + (depth < 4 ? iconButton("plus", "data-folder-new", f, "New folder inside this one") : "") +
+          iconButton("edit", "data-folder-rename", f, "Rename this folder") +
+          iconButton("trash", "data-folder-remove", f, "Remove this folder; what is in it is kept") + "</div></div>" +
+        (open ? "<div style='margin:6px 0 0 9px'>" + (body || "<div class='muted small'>Empty. Move a plate here with its pencil, or pick this folder when you save one.</div>") + "</div>" : "") + "</div>";
+    };
+    return (by[""] || []).map(row).join("") + kids("").map(node).join("");
   }
+  var SEP = " / ";
+  function libraryTools() {
+    var link = function (attr, label, title) {
+      return "<button type='button' class='linkish' style='white-space:nowrap' " + attr + (title ? " title='" + title + "'" : "") + ">" + label + "</button>";
+    };
+    return "<div class='row spread' style='margin-top:7px'><button type='button' class='quiet' style='white-space:nowrap' data-folder-new=''>New folder</button>" +
+      link("data-tool-names='1'", "toolhead names", "Name what each toolhead position holds, e.g. Black") + "</div>" +
+      (state.folders.length ? "<div class='row' style='gap:10px;margin-top:5px;justify-content:flex-end'>" +
+        link("data-folders-all='open'", "expand all") + link("data-folders-all='closed'", "collapse all") + "</div>" : "");
+  }
+  // old: full path of the folder to rename, or "" for a new one made inside parent ("" = top level).
+  function folderDialog(old, parent) {
+    var cut = old.lastIndexOf(SEP), home = old ? (cut < 0 ? "" : old.slice(0, cut)) : (parent || "");
+    showDialog("<h4>" + (old ? "Rename folder" : "New folder") + "</h4>" +
+      (home ? "<p class='small muted' style='margin:0'>Inside " + esc(home) + "</p>" : "") +
+      "<label class='field'>Folder name<input id='f-name' maxlength='40' value='" + esc(old ? old.slice(cut < 0 ? 0 : cut + SEP.length) : "") + "'></label>" +
+      "<p class='small' id='l-result' style='min-height:16px;margin:8px 0 0'></p>" +
+      "<div class='dialog-actions'><button type='button' class='quiet' id='dlg-cancel'>Cancel</button><button type='button' id='dlg-ok'>" + (old ? "Rename" : "Create") + "</button></div>");
+    $("dlg-cancel").onclick = hideDialog;
+    $("dlg-ok").onclick = function () {
+      var leaf = $("f-name").value.replace(/\//g, " ").trim();        // "/" separates levels, so not inside a name
+      if (!leaf) { $("f-name").focus(); return; }
+      var full = (home ? home + SEP : "") + leaf;
+      send("library_folder", old ? { action: "rename", name: old, new: full } : { action: "add", name: full });
+    };
+    $("f-name").focus();
+  }
+  var libClosed = {};
+  function folderField(current) {
+    var names = state.folders.slice();
+    if (current && names.indexOf(current) < 0) names.push(current);
+    return "<label class='field'>Folder<select id='l-folder'><option value=''>No folder</option>" + names.map(function (n) {
+      return "<option value='" + esc(n) + "'" + (n === current ? " selected" : "") + ">" + esc(n) + "</option>"; }).join("") + "</select></label>" +
+      (names.length ? "" : "<div class='small muted' style='margin-top:3px'>Make folders with New folder in the Library view.</div>");
+  }
+  function wireFolderPicks() {}
+  function editLibrary(id) {
+    var e = state.library.filter(function (x) { return x.id === id; })[0];
+    if (!e) return;
+    showDialog("<h4>Edit library plate</h4>" +
+      "<label class='field'>Item name<input id='l-item' value='" + esc(e.item) + "'></label>" +
+      "<label class='field'>Parts on this plate<input id='l-parts' type='number' min='1' max='9999' value='" + esc(e.parts) + "'></label>" +
+      folderField(e.folder) +
+      "<p class='small muted' style='margin:8px 0 0'>An open order finds its plates by item name, so renaming an item detaches it from that order.</p>" +
+      "<p class='small' id='l-result' style='min-height:16px;margin:8px 0 0'></p>" +
+      "<div class='dialog-actions'><button type='button' class='quiet' id='dlg-cancel'>Cancel</button><button type='button' id='dlg-ok'>Save</button></div>");
+    wireFolderPicks();
+    $("dlg-cancel").onclick = hideDialog;
+    $("dlg-ok").onclick = function () {
+      send("library_edit", { id: id, item: $("l-item").value, parts: $("l-parts").value, folder: $("l-folder").value });
+    };
+  }
+
   // ---- orders: a quantity of one item, worked off plate by plate -------------------------------
   function toolLabel(n) { var name = state.toolhead_names[n - 1]; return n + (name ? " \u2014 " + name : ""); }
   function ordersHtml() {
@@ -444,13 +529,16 @@
         esc(job.printer_model) + ", with these settings.</p>" +
       "<label class='field'>Item name<input id='l-item' value='" + esc(job.display_name) + "'></label>" +
       "<label class='field'>Parts on this plate<input id='l-parts' type='number' min='1' max='9999' placeholder='count them, e.g. 24'></label>" +
+      folderField(libLastFolder) +
       "<p class='small' id='l-result' style='min-height:16px;margin:8px 0 0'></p>" +
       "<div class='dialog-actions'><button type='button' class='quiet' id='dlg-cancel'>Cancel</button><button type='button' id='dlg-ok'>Save</button></div>");
     $("dlg-cancel").onclick = hideDialog;
     $("dlg-ok").onclick = function () {
       $("l-result").className = "small muted"; $("l-result").textContent = "Saving...";
-      send("library_save", { job_id: jobId, item: $("l-item").value, parts: $("l-parts").value });
+      libLastFolder = $("l-folder").value;
+      send("library_save", { job_id: jobId, item: $("l-item").value, parts: $("l-parts").value, folder: libLastFolder });
     };
+    wireFolderPicks();
     $("l-parts").focus();
   }
   function toolsHtml(printer) {
@@ -512,11 +600,13 @@
     };
     var html = "<div class='row spread'><span class='card-title'>Plates</span><span class='row' style='gap:4px'>" +
                tab("now", "Sliced now") + tab("library", "Library (" + state.library.length + ")") +
-               tab("orders", "Orders (" + state.orders.length + ")") + "</span></div>";
+               (ORDERS_ENABLED ? tab("orders", "Orders (" + state.orders.length + ")") : "") + "</span></div>";
     if (libNote) html += "<div class='small " + (libNote.ok ? "ok" : "err") + "' style='margin-top:4px'>" + esc(libNote.text) + "</div>";
+    if (plateView === "orders" && !ORDERS_ENABLED) plateView = "library";
     if (plateView === "orders") { $("job").innerHTML = html + ordersHtml(); return; }
     if (plateView === "library") {
-      html += "<input id='lib-search' type='search' placeholder='Search items' value='" + esc(libQuery) + "' style='width:100%;box-sizing:border-box;margin-top:7px'>" +
+      html += libraryTools() +
+              "<input id='lib-search' type='search' placeholder='Search items' value='" + esc(libQuery) + "' style='width:100%;box-sizing:border-box;margin-top:7px'>" +
               "<div id='lib-list' style='margin-top:7px'>" + libraryListHtml() + "</div>";
       $("job").innerHTML = html;
       $("lib-search").oninput = function () { libQuery = this.value; $("lib-list").innerHTML = libraryListHtml(); };
@@ -590,6 +680,25 @@
       $("dlg-ok").onclick = function () { send("order_delete", { id: d.orderDel }); hideDialog(); };
     }
     else if (d.libSave) saveToLibrary(d.libSave);
+    else if (d.libEdit) editLibrary(d.libEdit);
+    else if (d.folderNew !== undefined) folderDialog("", d.folderNew);
+    else if (d.folderRename) folderDialog(d.folderRename);
+    else if (d.foldersAll) {
+      libClosed = {};
+      if (d.foldersAll === "closed") { libClosed[""] = true; state.folders.forEach(function (f) { libClosed[f] = true; }); }
+      $("lib-list").innerHTML = libraryListHtml();
+    }
+    else if (d.folderRemove) {
+      var held = state.library.filter(function (x) { return x.folder === d.folderRemove || (x.folder || "").indexOf(d.folderRemove + SEP) === 0; }).length;
+      var subs = state.folders.filter(function (f) { return f.indexOf(d.folderRemove + SEP) === 0; }).length;
+      showDialog("<h4>Remove the folder \u201c" + esc(d.folderRemove) + "\u201d?</h4>" +
+        "<p class='small muted'>" + (held || subs ? "What is in it is kept and moves up one level: " + held + " plate" + (held === 1 ? "" : "s") +
+          (subs ? " and " + subs + " folder" + (subs === 1 ? "" : "s") : "") + "." : "It is empty.") + " No G-code is deleted.</p>" +
+        "<div class='dialog-actions'><button type='button' class='quiet' id='dlg-cancel'>Cancel</button><button type='button' class='danger' id='dlg-ok'>Remove folder</button></div>");
+      $("dlg-cancel").onclick = hideDialog;
+      $("dlg-ok").onclick = function () { send("library_folder", { action: "remove", name: d.folderRemove }); hideDialog(); };
+    }
+    else if (d.libFolder !== undefined) { libClosed[d.libFolder] = !libClosed[d.libFolder]; $("lib-list").innerHTML = libraryListHtml(); }
     else if (d.libSend) sendFromLibrary(d.libSend);
     else if (d.libDel) {
       var entry = state.library.filter(function (x) { return x.id === d.libDel; })[0];
@@ -848,7 +957,7 @@
   orca.onMessage(function (message) {
     if (!message) return;
     if (message.command === "state") {
-      ["printers", "jobs", "job_for", "slicing", "combos", "types", "library", "orders", "order_plates", "toolhead_names", "current", "combo_note", "can_switch", "storage", "cleanup"].forEach(function (key) { if (key in message) state[key] = message[key]; });
+      ["printers", "jobs", "job_for", "slicing", "combos", "types", "library", "folders", "orders", "order_plates", "toolhead_names", "current", "combo_note", "can_switch", "storage", "cleanup"].forEach(function (key) { if (key in message) state[key] = message[key]; });
       if (message.status) state.status = message.status;
       if (message.sends) state.sends = message.sends;
       render();
@@ -858,7 +967,7 @@
     } else if (message.command === "order_plan") {
       showPlan(message);
     } else if (message.command === "library_result") {
-      if (message.ok) { hideDialog(); libNote = { ok: true, text: message.text }; plateView = "library"; renderJob(); }
+      if (message.ok) { hideDialog(); libNote = message.text ? { ok: true, text: message.text } : null; plateView = "library"; renderJob(); }
       else if ($("l-result")) { $("l-result").className = "small err"; $("l-result").textContent = message.text; }
     } else if (message.command === "storage") {
       if (counting > 0) counting -= 1;
