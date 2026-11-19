@@ -2,17 +2,19 @@
 shell supplies post()/notify() and forwards panel messages and slicer events."""
 # BUNDLE-STRIP-BEGIN
 import os
+import json
 import queue
 import threading
 import time
 import uuid
 
-from core import (CC2_MANY_FILES, nozzle_mismatch, STORE_FILE, KIND_CC2, WATCHED_STATES, BedLog, FarmError, bed_needs_clearing, files_to_clean, rule_text,
+from core import (file_stamp, OrderBook, plan_order, CC2_MANY_FILES, nozzle_mismatch, toolhead_problem, write_private, file_md5, STORE_FILE, KIND_CC2, WATCHED_STATES, BedLog, FarmError, bed_needs_clearing, files_to_clean, rule_text,
                   storage_summary, PrinterStore, can_start, job_filename, make_client, model_key, model_matches,
                   parse_gcode_meta, preset_to_printer, presets_to_printers, set_shared_dir, status_event, strip_model_suffix, validate_printer)
 # BUNDLE-STRIP-END
 
 SLICE_DIR = "slices"
+LIBRARY_DIR = "library"   # kept plates: <id>.gcode plus <id>.json describing it
 STATUS_MIN_INTERVAL = 3.0
 STATUS_MIN_INTERVAL_CC2 = 8.0   # each CC2 poll is a full MQTT connect + register; be gentle
 STORAGE_INTERVAL = 600.0        # how often each printer's stored files are counted
@@ -83,6 +85,7 @@ class FarmApp:
         self.store = PrinterStore(os.path.join(storage_dir, STORE_FILE))
         set_shared_dir(storage_dir)   # every OrcaSlicer window shares one client slot per CC2
         self.beds = BedLog(os.path.join(storage_dir, "farm_send_beds.json"))
+        self.orders = OrderBook(os.path.join(storage_dir, "farm_send_orders.json"))
         self.cleaned = BedLog(os.path.join(storage_dir, "farm_send_cleaned.json"))   # last automatic cleanup per printer
         self.storage = {}         # printer id -> {count, bytes, oldest, removable, many, error}
         self._storage_at = {}
@@ -101,6 +104,8 @@ class FarmApp:
         # the second printer type would destroy the plate sliced for the first.
         self.jobs = []
         self.slice_dir = os.path.join(storage_dir, SLICE_DIR)
+        self.library_dir = os.path.join(storage_dir, LIBRARY_DIR)
+        self._library_cache, self._library_stamp = None, None
         self._clear_slice_dir()
         self.slicing = False
         self.status = {}          # printer id -> normalized status
@@ -285,6 +290,12 @@ class FarmApp:
 
     def snapshot(self):
         with self.lock:
+            # Another OrcaSlicer window may have saved printers, orders or library plates since.
+            self.store.sync()
+            self.orders.sync()
+            stamp = file_stamp(self.library_dir)
+            if stamp != self._library_stamp:
+                self._library_stamp, self._library_cache = stamp, None
             job_for = {}
             for printer in self.store.printers:
                 match = self._job_for(printer)
@@ -300,6 +311,10 @@ class FarmApp:
                 "sends": dict(self.sends),
                 "combos": self._combo_views(),
                 "types": self._type_views(),
+                "library": self._library_views(),
+                "orders": self._order_views(),
+                "order_plates": self._open_plates(),
+                "toolhead_names": list(self.orders.toolhead_names),
                 "storage": dict(self.storage),
                 "cleanup": dict(self.store.cleanup, text=rule_text(self.store.cleanup)),
                 "current": dict(self.current) if self.current else None,
@@ -379,11 +394,19 @@ class FarmApp:
             if self.store.get(printer_id) is None:
                 return
             self.beds.set(printer_id, False)
+            counted = None
+            if message.get("good") is not None:     # this bed held a plate of an order: how many came out good
+                try:
+                    counted = self.orders.count(printer_id, int(message.get("good")))
+                except (TypeError, ValueError):
+                    pass
             status = self.status.get(printer_id)
             if status is not None:
                 status = self.status[printer_id] = dict(status, needs_clearing=False)
         if status is not None:
             self.post({"command": "status", "id": printer_id, "status": status})
+        if counted is not None:
+            self.post_state()
 
     def _cmd_refresh(self, message):
         """Refresh button: ask now instead of waiting for the next timed poll. One printer, or all."""
@@ -603,6 +626,10 @@ class FarmApp:
             if how == "standard":
                 # Only Snapmaker firmware takes start options. Say so instead of implying they applied.
                 note = ". This printer does not accept start options, so bed leveling and time-lapse follow its own settings"
+            if snapshot.get("order"):
+                # Recorded only once the printer accepted the start, so a failed send never counts.
+                self.orders.add_plate(snapshot["order"]["id"], printer_id, name, snapshot["order"]["parts"], remote)
+                self.post_state()
             self._set_send(printer_id, False, "Started %s%s" % (remote, note), ok=True, started=True)
             self._notify("info", "Farm Send: %s started printing %s" % (name, remote))
         except FarmError as error:
@@ -621,6 +648,242 @@ class FarmApp:
             self._cancel.pop(printer_id, None)
             self.poll(force=True, only=printer_id)
             self.check_storage(force=True, only=printer_id)
+
+    # ---- library: plates kept for reprinting -------------------------------------------------------
+    def library(self):
+        """Every kept plate, read from the folder. Each plate is a G-code file with a small JSON file
+        next to it; there is no index to drift out of step. A plate whose G-code is missing is skipped."""
+        if self._library_cache is None:
+            entries = []
+            try:
+                names = sorted(os.listdir(self.library_dir))
+            except OSError:
+                names = []
+            for name in names:
+                if not name.endswith(".json"):
+                    continue
+                try:
+                    with open(os.path.join(self.library_dir, name), "r", encoding="utf-8") as handle:
+                        entry = json.load(handle)
+                except (OSError, ValueError):
+                    continue
+                path = os.path.join(self.library_dir, name[:-5] + ".gcode")
+                if isinstance(entry, dict) and entry.get("id") == name[:-5] and os.path.isfile(path):
+                    entries.append(dict(entry, path=path))
+            entries.sort(key=lambda entry: (str(entry.get("item", "")).lower(), entry.get("parts") or 0))
+            self._library_cache = entries
+        return self._library_cache
+
+    def _library_views(self):
+        views = []
+        for entry in self.library():
+            bits = []
+            if entry.get("time_s") is not None:
+                bits.append(_short_duration(entry["time_s"]))
+            if entry.get("filament_g") is not None:
+                bits.append("%.1f g" % entry["filament_g"])
+            if entry.get("layers"):
+                bits.append("%d layers" % entry["layers"])
+            views.append({"id": entry["id"], "item": entry.get("item", ""), "parts": entry.get("parts") or 0,
+                          "key": entry.get("key", ""), "printer_model": entry.get("printer_model", ""),
+                          "summary": " \u00b7 ".join(bits), "filaments": list(entry.get("filaments") or []),
+                          "presets": entry.get("presets", ""), "saved_at": entry.get("saved_at") or 0,
+                          "printers": [p["id"] for p in self.store.printers
+                                       if model_matches(entry.get("printer_model"), p.get("model"))]})
+        return views
+
+    def _cmd_library_save(self, message):
+        """Keep the plate sliced just now, under an item name and with the number of parts on it."""
+        item = " ".join(str(message.get("item") or "").split())[:80]
+        try:
+            parts = int(message.get("parts"))
+        except (TypeError, ValueError):
+            parts = 0
+        with self.lock:
+            job = next((j for j in self.jobs if j["id"] == message.get("job_id") and j["ready"]), None)
+        try:
+            if not item:
+                raise FarmError("Give the item a name")
+            if not 1 <= parts <= 9999:
+                raise FarmError("Enter how many parts are on this plate")
+            if job is None:
+                raise FarmError("That plate is no longer here. Slice it again.")
+            if job.get("stale"):
+                raise FarmError("The plate changed after this slice. Slice again, then save.")
+            os.makedirs(self.library_dir, exist_ok=True)
+            entry_id = "%s-%s" % (time.strftime("%Y%m%d-%H%M%S"), job["id"][:6])
+            target = os.path.join(self.library_dir, entry_id + ".gcode")
+            self._copy_file(job["path"], target + ".part")
+            os.replace(target + ".part", target)
+            meta = job["meta"]
+            entry = {"id": entry_id, "item": item, "parts": parts, "key": job.get("key", ""),
+                     "printer_model": meta.get("printer_model", ""), "time_s": meta.get("time_s"),
+                     "filament_g": meta.get("filament_g"), "layers": meta.get("layers"),
+                     "filaments": list(meta.get("filaments") or []), "nozzle_diameter": meta.get("nozzle_diameter"),
+                     "presets": " \u00b7 ".join(x for x in (meta.get("process_preset"), meta.get("filament_preset")) if x),
+                     "saved_at": time.time(), "size": os.path.getsize(target), "md5": file_md5(target)}
+            # The description is written last: a plate only counts as kept once it is complete.
+            write_private(os.path.join(self.library_dir, entry_id + ".json"), json.dumps(entry, indent=1))
+            self._library_cache = None
+            self.post({"command": "library_result", "ok": True, "text": "Saved %s x%d to the library." % (item, parts)})
+        except FarmError as error:
+            self.post({"command": "library_result", "ok": False, "text": str(error)})
+        except OSError as error:
+            self.post({"command": "library_result", "ok": False, "text": "Could not save: %s" % (error.strerror or error)})
+        self.post_state()
+
+    def _cmd_library_delete(self, message):
+        entry = next((e for e in self.library() if e["id"] == message.get("id")), None)
+        if entry is not None:
+            for name in (entry["id"] + ".json", entry["id"] + ".gcode"):   # description first: never half an entry
+                try:
+                    os.remove(os.path.join(self.library_dir, name))
+                except OSError:
+                    pass
+            self._library_cache = None
+        self.post_state()
+
+    def _cmd_library_send(self, message):
+        """Send a kept plate to the listed printers. toolhead: print a one-filament plate from this
+        toolhead instead of the one it was sliced for (Snapmaker only)."""
+        entry = next((e for e in self.library() if e["id"] == message.get("id")), None)
+        self._library_start(entry, message.get("printer_ids") or [], bool(message.get("start")),
+                            dict(message.get("options") or {}), message.get("toolhead"))
+
+    def _library_start(self, entry, printer_ids, start, options, toolhead=None, order_id=None):
+        work = []
+        with self.lock:
+            name = None
+            for printer_id in printer_ids:
+                printer = self.store.get(printer_id)
+                if printer is None or self.sends.get(printer_id, {}).get("active"):
+                    continue
+                problem = ""
+                if entry is None:
+                    problem = "That library plate no longer exists."
+                elif not model_matches(entry.get("printer_model"), printer.get("model")):
+                    problem = "Blocked: this plate was sliced for %s." % (entry.get("printer_model") or "another printer")
+                elif nozzle_mismatch(entry.get("nozzle_diameter"), printer.get("nozzle")):
+                    problem = "Blocked: %s." % nozzle_mismatch(entry.get("nozzle_diameter"), printer.get("nozzle"))
+                elif start and self.beds.get(printer_id) and self.status.get(printer_id, {}).get("state") == "idle":
+                    problem = "Not started: clear the bed, then click Bed cleared."
+                mine = dict(options)
+                if not problem and start:
+                    used = entry.get("filaments") or []
+                    tools = (self.status.get(printer_id) or {}).get("tools") or []
+                    if toolhead and printer.get("kind") != KIND_CC2:
+                        if len(used) != 1:
+                            problem = "Not started: only a one-filament plate can be moved to another toolhead."
+                        else:
+                            mine["toolhead_map"] = {used[0]["slot"]: int(toolhead)}
+                            problem = toolhead_problem(tools, int(toolhead), used[0].get("type"))
+                    else:
+                        for filament in used:   # printing as sliced: every toolhead it uses must be usable
+                            problem = problem or toolhead_problem(tools, filament.get("slot"), filament.get("type"))
+                    if problem and not problem.startswith("Not started"):
+                        problem = "Not started: %s." % problem
+                if problem:
+                    self._set_send(printer_id, False, problem, ok=False)
+                    continue
+                if name is None:
+                    label = "%s_x%d" % (entry.get("item") or "plate", entry.get("parts") or 0)
+                    if entry.get("time_s"):
+                        label += "_" + _short_duration(entry["time_s"])
+                    name = job_filename(label)
+                self._cancel[printer_id] = threading.Event()
+                self._set_send(printer_id, True, "Preparing...", percent=0)
+                snapshot = {"path": entry["path"], "name": name}
+                if order_id and start:
+                    snapshot["order"] = {"id": order_id, "parts": entry.get("parts") or 0}
+                work.append((dict(printer), snapshot, mine))
+        for printer, snapshot, mine in work:
+            self._spawn(self._send_worker, printer, snapshot, start, mine)
+
+    # ---- orders: a quantity of one item, worked off plate by plate ---------------------------------
+    def _order_views(self):
+        items = {str(e.get("item", "")).lower() for e in self.library()}
+        views = []
+        for order in self.orders.orders:
+            good, printing, remaining = OrderBook.totals(order)
+            views.append({"id": order["id"], "item": order["item"], "quantity": order["quantity"],
+                          "toolhead": order.get("toolhead"), "note": order.get("note", ""),
+                          "good": good, "printing": printing, "remaining": remaining,
+                          "in_library": order["item"].lower() in items,
+                          "plates": [{k: plate.get(k) for k in ("printer_id", "printer_name", "parts", "state", "good")}
+                                     for plate in order["plates"]]})
+        return views
+
+    def _open_plates(self):
+        found = {}
+        for order in self.orders.orders:
+            for plate in order["plates"]:
+                if plate.get("state") == "printing":
+                    found[plate["printer_id"]] = {"order_id": order["id"], "item": order["item"], "parts": plate.get("parts") or 0}
+        return found
+
+    def _cmd_order_save(self, message):
+        item = " ".join(str(message.get("item") or "").split())[:80]
+        try:
+            quantity = int(message.get("quantity"))
+        except (TypeError, ValueError):
+            quantity = 0
+        try:
+            toolhead = int(message.get("toolhead"))
+        except (TypeError, ValueError):
+            toolhead = None
+        if item and 1 <= quantity <= 99999:
+            self.orders.add(item, quantity, toolhead if toolhead in (1, 2, 3, 4) else None,
+                            " ".join(str(message.get("note") or "").split())[:60])
+        self.post_state()
+
+    def _cmd_order_delete(self, message):
+        self.orders.delete(message.get("id"))
+        self.post_state()
+
+    def _cmd_save_toolhead_names(self, message):
+        names = message.get("names")
+        if isinstance(names, list):
+            self.orders.sync()
+            self.orders.toolhead_names = ([" ".join(str(n).split())[:20] for n in names] + [""] * 4)[:4]
+            self.orders.save()
+        self.post_state()
+
+    def _free_printers(self):
+        busy = self._open_plates()
+        return [p for p in self.store.printers
+                if self.status.get(p["id"], {}).get("state") == "idle" and not self.beds.get(p["id"])
+                and not self.sends.get(p["id"], {}).get("active") and p["id"] not in busy]
+
+    def _cmd_order_plan(self, message):
+        """Propose the next plates for an order across the printers that are free right now."""
+        order = self.orders.get(message.get("id"))
+        if order is None:
+            return
+        entries = [e for e in self.library() if str(e.get("item", "")).lower() == order["item"].lower()]
+        with self.lock:
+            free = self._free_printers()
+        remaining = OrderBook.totals(order)[2]
+        self.post({"command": "order_plan", "id": order["id"], "remaining": remaining,
+                   "plan": plan_order(remaining, free, entries),
+                   "usable": [p["id"] for p in free if plan_order(1, [p], entries)]})
+
+    def _cmd_order_send(self, message):
+        """Start the confirmed plates of a plan. Each pick is {printer_id, entry_id}."""
+        order = self.orders.get(message.get("id"))
+        if order is None:
+            return
+        entries = {e["id"]: e for e in self.library() if str(e.get("item", "")).lower() == order["item"].lower()}
+        with self.lock:
+            free = {p["id"] for p in self._free_printers()}
+        for pick in message.get("picks") or []:
+            entry = entries.get(pick.get("entry_id"))
+            if entry is None or pick.get("printer_id") not in free:
+                if self.store.get(pick.get("printer_id")):
+                    self._set_send(pick["printer_id"], False, "Not started: the printer is no longer free. Plan the order again.", ok=False)
+                continue
+            free.discard(pick["printer_id"])
+            self._library_start(entry, [pick["printer_id"]], True, dict(message.get("options") or {}),
+                                order.get("toolhead"), order_id=order["id"])
 
     # ---- stored files and cleanup ------------------------------------------------------------------
     def check_storage(self, force=False, only=None):

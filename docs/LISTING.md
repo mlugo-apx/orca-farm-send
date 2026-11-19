@@ -4,7 +4,7 @@
 |---|---|
 | File | `dist/farm_send_any.py` |
 | Name | Farm Send |
-| Version | 0.1.4 |
+| Version | 0.2.0 |
 | Type | Script |
 | Min. OrcaSlicer version | 2.5.0 (the only choice the form offers) |
 | Icon | `docs/icon.png` (square; the hub stores it at 320 x 320) |
@@ -24,6 +24,8 @@ Farm Send is a docked panel for small print farms. Slice a plate once per printe
 - A "Bed cleared" step so a new print is never started onto a finished one.
 - Stored-file counts per printer and cleanup of old G-code by age or count.
 - G-code sliced for one printer model is never sent to another.
+- A library of kept plates: send a part you print often without opening the project or slicing again. On the Snapmaker U1, pick the toolhead when you send, so one kept plate covers every color.
+- Orders: enter a quantity, and the panel proposes plates for the free printers and keeps count of good parts.
 
 Early release. Developed and tested on Linux with two Centauri Carbon 2s and three Snapmaker U1s (firmware 2.1.2). Windows and macOS are untested; reports welcome. It talks only to the printer addresses you save: no cloud, no telemetry.
 

@@ -465,6 +465,191 @@ class WorkerPoolTests(unittest.TestCase):
         self.assertTrue(wait_for(lambda: done == ["x"]))
 
 
+class LibraryTests(unittest.TestCase):
+    """Plates kept for reprinting: save from a slice, send later without slicing, pick the toolhead."""
+
+    def setUp(self):
+        self.folder = tempfile.TemporaryDirectory(); self.addCleanup(self.folder.cleanup)
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.u1, self.cc2 = FakeMoonraker(snapmaker=True), FakeCC2()
+        for fake in (self.u1, self.cc2):
+            self.addCleanup(fake.close)
+        self.posts = []
+        self.app = FarmApp(self.folder.name, self.posts.append, default_name=lambda: "rail clip.stl")
+        self.p_u1 = self.app.store.upsert({"name": "U1 #1", "kind": core.KIND_MOONRAKER, "address": self.u1.address,
+                                           "model": "Snapmaker U1", "nozzle": 0.4})
+        self.p_cc2 = self.app.store.upsert({"name": "CC1", "kind": core.KIND_CC2, "address": self.cc2.address,
+                                            "model": "Centauri Carbon 2", "access_code": "abc123", "mqtt_port": self.cc2.mqtt_port})
+
+    def _slice_and_save(self, item="Rail clip", parts=24):
+        path = write(self.tmp.name, ".1.0.gcode", U1_GCODE)
+        self.app.on_slice_started(); self.app.on_gcode_exported(path, "")
+        job = self.app.jobs[0]
+        self.assertTrue(wait_for(lambda: job["ready"] or job["error"]))
+        self.app.handle({"command": "library_save", "job_id": job["id"], "item": item, "parts": parts})
+        return [post for post in self.posts if post.get("command") == "library_result"][-1]
+
+    def _send(self, entry_id, printers, start=True, **extra):
+        self.app.handle(dict({"command": "library_send", "id": entry_id, "printer_ids": [p["id"] for p in printers], "start": start}, **extra))
+        self.assertTrue(wait_for(lambda: all(not self.app.sends.get(p["id"], {"active": True})["active"] for p in printers)))
+        return [self.app.sends[p["id"]] for p in printers]
+
+    def _status(self, printer):
+        seen = lambda: len([post for post in self.posts if post.get("command") == "status" and post.get("id") == printer["id"]])
+        before = seen()
+        self.app.poll(force=True, only=printer["id"])
+        self.assertTrue(wait_for(lambda: seen() > before))            # a fresh read, not the one already held
+
+    def test_save_survives_the_project_closing_and_a_restart(self):
+        self.assertTrue(self._slice_and_save()["ok"])
+        (view,) = self.app.snapshot()["library"]
+        self.assertEqual((view["item"], view["parts"], view["printer_model"]), ("Rail clip", 24, "Snapmaker U1"))
+        self.assertEqual(view["printers"], [self.p_u1["id"]])
+        self.assertEqual([f["slot"] for f in view["filaments"]], [2])
+        self.app.project_closed()                                   # the slice copy goes, the kept plate stays
+        other = FarmApp(self.folder.name, lambda message: None)
+        (entry,) = other.library()
+        with open(entry["path"]) as handle:
+            self.assertEqual(handle.read(), U1_GCODE)
+        self.assertEqual(entry["md5"], core.file_md5(entry["path"]))
+
+    def test_save_needs_a_name_a_count_and_a_fresh_slice(self):
+        self.assertFalse(self._slice_and_save(item="  ")["ok"])
+        self.assertFalse(self._slice_and_save(parts=0)["ok"])
+        self.assertFalse(self._slice_and_save(parts="many")["ok"])
+        self.assertEqual(self.app.library(), [])
+        self.app.handle({"command": "library_save", "job_id": "nope", "item": "X", "parts": 1})
+        self.assertIn("no longer here", self.posts[-2]["text"] if self.posts[-1].get("command") == "state" else self.posts[-1]["text"])
+
+    def test_send_as_sliced_and_from_another_toolhead(self):
+        self._slice_and_save()
+        entry_id = self.app.library()[0]["id"]
+        self.app.project_closed()
+        self._status(self.p_u1)
+        (sent,) = self._send(entry_id, [self.p_u1])
+        self.assertTrue(sent["ok"], sent)
+        self.assertEqual(self.u1.start_options[-1]["options"]["map_table"], [[0, 0], [1, 1], [2, 2], [3, 3]])
+        self.assertIn("Rail_clip_x24", self.u1.started[-1])
+        self.u1.state = "standby"; self.app.beds.set(self.p_u1["id"], False); self._status(self.p_u1)
+        (sent,) = self._send(entry_id, [self.p_u1], toolhead=1)      # the file is for toolhead 2; print it from 1
+        self.assertTrue(sent["ok"], sent)
+        self.assertEqual(self.u1.start_options[-1]["options"]["map_table"], [[0, 0], [1, 0], [2, 2], [3, 3]])
+
+    def test_send_is_refused_for_an_empty_toolhead_wrong_material_or_wrong_printer(self):
+        self._slice_and_save()
+        entry_id = self.app.library()[0]["id"]
+        self._status(self.p_u1); self._status(self.p_cc2)
+        started = len(self.u1.started)
+        (empty,) = self._send(entry_id, [self.p_u1], toolhead=4)     # the fake reports toolhead 4 empty
+        self.assertIn("toolhead 4 reports no filament", empty["text"])
+        self.u1.tools["filament_type"][0] = "PLA"
+        self._status(self.p_u1)
+        (material,) = self._send(entry_id, [self.p_u1], toolhead=1)
+        self.assertIn("holds PLA", material["text"])
+        (wrong,) = self._send(entry_id, [self.p_cc2])
+        self.assertIn("sliced for Snapmaker U1", wrong["text"])
+        self.assertEqual(len(self.u1.started), started)
+        self.assertEqual(self.cc2.started, [])
+        (upload,) = self._send(entry_id, [self.p_u1], start=False)   # uploading without printing is still fine
+        self.assertTrue(upload["ok"], upload)
+
+    def test_remap_is_refused_on_a_printer_that_cannot_do_it(self):
+        plain = FakeMoonraker()                                       # an ordinary Klipper printer
+        self.addCleanup(plain.close)
+        printer = self.app.store.upsert({"name": "Other", "kind": core.KIND_MOONRAKER, "address": plain.address, "model": "Snapmaker U1"})
+        self._slice_and_save()
+        self._status(printer)
+        (sent,) = self._send(self.app.library()[0]["id"], [printer], toolhead=1)
+        self.assertFalse(sent["ok"])
+        self.assertIn("cannot print from a different toolhead", sent["text"])
+        self.assertEqual(plain.started, [])
+
+    def test_delete_removes_both_files_and_a_half_entry_is_ignored(self):
+        self._slice_and_save()
+        entry = self.app.library()[0]
+        os.remove(entry["path"])                                      # G-code gone: not listed
+        self.app._library_cache = None
+        self.assertEqual(self.app.library(), [])
+        self._slice_and_save(item="Second")
+        entry = self.app.library()[0]
+        self.app.handle({"command": "library_delete", "id": entry["id"]})
+        self.assertEqual(self.app.library(), [])
+        self.assertFalse(os.path.exists(entry["path"]))
+
+    def test_plan_picks_plates_per_printer_and_allows_a_few_extras(self):
+        big, small = {"id": "b", "parts": 24, "printer_model": "Snapmaker U1"}, {"id": "s", "parts": 6, "printer_model": "Snapmaker U1"}
+        cc = {"id": "c", "parts": 12, "printer_model": "Centauri Carbon 2"}
+        u1 = lambda n: {"id": "u%d" % n, "model": "Snapmaker U1"}
+        plan = core.plan_order(30, [u1(1), u1(2), u1(3)], [big, small, cc])
+        self.assertEqual([(x["printer_id"], x["entry_id"]) for x in plan], [("u1", "b"), ("u2", "s")])
+        self.assertEqual([x["entry_id"] for x in core.plan_order(4, [u1(1)], [big, small])], ["s"])       # smallest overshoot
+        self.assertEqual([x["entry_id"] for x in core.plan_order(40, [{"id": "c1", "model": "Centauri Carbon 2"}, u1(1)], [big, cc])], ["c", "b"])
+        self.assertEqual(core.plan_order(10, [{"id": "k", "model": "Kobra"}], [big]), [])
+        self.assertEqual(core.plan_order(0, [u1(1)], [big]), [])
+
+    def test_order_is_worked_off_and_remembered(self):
+        self._slice_and_save()                                        # Rail clip x24 for the U1
+        self._status(self.p_u1)
+        self.app.handle({"command": "order_save", "item": "Rail clip", "quantity": 40, "toolhead": 1, "note": "black"})
+        (order,) = self.app.snapshot()["orders"]
+        self.assertEqual((order["remaining"], order["in_library"], order["toolhead"]), (40, True, 1))
+        self.app.handle({"command": "order_plan", "id": order["id"]})
+        plan = [post for post in self.posts if post.get("command") == "order_plan"][-1]
+        self.assertEqual([(x["printer_id"], x["parts"]) for x in plan["plan"]], [(self.p_u1["id"], 24)])
+        self.app.handle({"command": "order_send", "id": order["id"], "picks": plan["plan"], "options": {}})
+        self.assertTrue(wait_for(lambda: self.app.snapshot()["orders"][0]["printing"] == 24))
+        self.assertEqual(self.u1.start_options[-1]["options"]["map_table"][1], [1, 0])          # the order's toolhead
+        self.assertEqual(self.app.snapshot()["orders"][0]["remaining"], 16)
+        self.assertEqual(self.app.snapshot()["order_plates"][self.p_u1["id"]]["parts"], 24)
+        self.app.handle({"command": "order_plan", "id": order["id"]})                            # that printer is taken now
+        self.assertEqual([post for post in self.posts if post.get("command") == "order_plan"][-1]["plan"], [])
+        self.app.handle({"command": "bed_cleared", "id": self.p_u1["id"], "good": 22})          # two came out bad
+        order = self.app.snapshot()["orders"][0]
+        self.assertEqual((order["good"], order["printing"], order["remaining"]), (22, 0, 18))
+        again = FarmApp(self.folder.name, lambda message: None).snapshot()["orders"][0]          # survives a restart
+        self.assertEqual((again["good"], again["remaining"], again["note"]), (22, 18, "black"))
+        self.app.handle({"command": "order_delete", "id": order["id"]})
+        self.assertEqual(self.app.snapshot()["orders"], [])
+
+    def test_a_failed_start_does_not_count_toward_the_order(self):
+        self._slice_and_save()
+        self._status(self.p_u1)
+        self.app.handle({"command": "order_save", "item": "Rail clip", "quantity": 24, "toolhead": 4})   # toolhead 4 is empty
+        order = self.app.snapshot()["orders"][0]
+        self.app.handle({"command": "order_send", "id": order["id"], "options": {},
+                         "picks": [{"printer_id": self.p_u1["id"], "entry_id": self.app.library()[0]["id"]}]})
+        self.assertTrue(wait_for(lambda: self.app.sends.get(self.p_u1["id"], {}).get("ok") is False))
+        self.assertEqual(self.app.snapshot()["orders"][0]["printing"], 0)
+        self.assertEqual(self.u1.started, [])
+
+    def test_order_input_is_checked_and_toolhead_names_are_kept(self):
+        for bad in ({"item": "", "quantity": 5}, {"item": "X", "quantity": 0}, {"item": "X", "quantity": "lots"}):
+            self.app.handle(dict({"command": "order_save"}, **bad))
+        self.assertEqual(self.app.snapshot()["orders"], [])
+        self.app.handle({"command": "save_toolhead_names", "names": ["Black", "White", "Gray"]})
+        self.assertEqual(FarmApp(self.folder.name, lambda message: None).snapshot()["toolhead_names"], ["Black", "White", "Gray", ""])
+
+    def test_two_windows_do_not_overwrite_each_other(self):
+        other = FarmApp(self.folder.name, lambda message: None)       # a second OrcaSlicer window, opened earlier
+        added = self.app.store.upsert({"name": "U1 #9", "kind": core.KIND_MOONRAKER, "address": "192.0.2.9", "model": "Snapmaker U1"})
+        other.store.set_cleanup({"mode": "count", "keep": 7})         # it saves a different setting
+        names = lambda store: sorted(p["name"] for p in store.printers)
+        self.assertIn("U1 #9", names(other.store))                    # ... without dropping the new printer
+        self.app.handle({"command": "order_save", "item": "A", "quantity": 3})
+        other.handle({"command": "order_save", "item": "B", "quantity": 4})
+        self.assertEqual(sorted(o["item"] for o in self.app.snapshot()["orders"]), ["A", "B"])
+        self.assertEqual(self.app.store.cleanup["keep"], 7)
+        self._slice_and_save()
+        self.assertEqual(len(other.snapshot()["library"]), 1)         # a plate kept in one window shows in the other
+        self.assertIsNotNone(other.store.get(added["id"]))
+
+    def test_toolhead_map_table(self):
+        self.assertEqual(core.toolhead_map_table(None), [[0, 0], [1, 1], [2, 2], [3, 3]])
+        self.assertEqual(core.toolhead_map_table({2: 1}), [[0, 0], [1, 0], [2, 2], [3, 3]])
+        self.assertEqual(core.toolhead_map_table({"3": "4", 9: 1, "x": 2}), [[0, 0], [1, 1], [2, 3], [3, 3]])
+        self.assertEqual(core.toolhead_problem([], 2, "PETG"), "")   # nothing reported: nothing to check
+
+
 class SharedSlotTests(unittest.TestCase):
     """Every OrcaSlicer window of one user shares a single client slot per Centauri Carbon 2."""
 

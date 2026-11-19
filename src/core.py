@@ -132,12 +132,12 @@ def _filaments_used(text):
     """Which filament slots the G-code actually extrudes with: [{slot, grams, color, preset, type}].
 
     Slot 1 is the printer's first toolhead. A plate assigned to the wrong slot prints in the wrong
-    colour, and nothing else in the slice summary shows it."""
+    color, and nothing else in the slice summary shows it."""
     match = re.search(r"^; filament used \[g\] = (.*)$", text, re.M)
     if not match:
         return []
     grams = [float(value) if re.match(r"^-?\d+(\.\d+)?$", value.strip()) else 0.0 for value in match.group(1).split(",")]
-    colors, presets, types = (_config_list(text, key) for key in ("filament_colour", "filament_settings_id", "filament_type"))
+    colors, presets, types = (_config_list(text, key) for key in ("filament_color", "filament_settings_id", "filament_type"))
     used = []
     for index, amount in enumerate(grams):
         if amount > 0:
@@ -1202,8 +1202,10 @@ class Moonraker:
         Moonraker start carries none, and the printer then silently skips auto bed leveling. So the
         Snapmaker call is tried first; a printer that does not know it gets the standard start."""
         options = options or {}
+        table = toolhead_map_table(options.get("toolhead_map"))
+        remapped = any(slot != tool for slot, tool in table)
         params = {"type": "gcode", "path": filename, "options": {
-            "map_table": [[index, index] for index in range(4)],
+            "map_table": table,
             "bed_level": 1 if options.get("bed_leveling", True) else 0,
             "flow_calibrate": 1 if options.get("flow_calibrate", False) else 0,
             "time_lapse_camera": 1 if options.get("timelapse", False) else 0,
@@ -1213,6 +1215,9 @@ class Moonraker:
         except RpcError as error:
             text = str(error).lower()
             if error.code == -32601 or "not found" in text or "unknown method" in text:
+                if remapped:
+                    # A plain start cannot carry the mapping: it would print from the sliced toolhead.
+                    raise FarmError("Not started: this printer cannot print from a different toolhead than the file was sliced for.")
                 self._post("/printer/print/start?filename=%s" % urllib.parse.quote(filename), timeout=30)
                 return "standard"
             raise FarmError("Printer refused to start the print: %s" % error)
@@ -1326,6 +1331,42 @@ def validate_printer(printer):
     }
 
 
+def toolhead_map_table(mapping, count=4):
+    """Snapmaker map_table rows [slicer slot index, physical toolhead index], both from 0.
+
+    mapping is {slicer slot: toolhead}, both counted from 1 as the panel shows them; slots not
+    named print from their own toolhead. Verified on a U1: the printer reports the table back in
+    print_task_config.extruder_map_table and heats the mapped toolhead."""
+    table = [[index, index] for index in range(count)]
+    for slot, tool in (mapping or {}).items():
+        try:
+            slot, tool = int(slot), int(tool)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= slot <= count and 1 <= tool <= count:
+            table[slot - 1] = [slot - 1, tool - 1]
+    return table
+
+
+def toolhead_problem(tools, tool, material):
+    """Why a plate cannot print from this toolhead, judged from what the printer reports, or "".
+
+    tools: the printer's toolhead report [{slot, color, type, loaded}]; empty when the printer
+    reports none, in which case nothing can be checked."""
+    if not tools:
+        return ""
+    match = [entry for entry in tools if entry.get("slot") == tool]
+    if not match:
+        return "the printer has no toolhead %s" % tool
+    if not match[0].get("loaded"):
+        return "toolhead %s reports no filament" % tool
+    loaded = str(match[0].get("type") or "").strip().upper()
+    wanted = str(material or "").strip().upper()
+    if loaded and wanted and loaded != wanted:
+        return "toolhead %s holds %s and the plate was sliced for %s" % (tool, loaded, wanted)
+    return ""
+
+
 def first_number(value):
     """0.4 from 0.4, "0.4", "0.4,0.4,0.4,0.4", ["0.4", "0.4"] or "0.4;0.4". None when there is none."""
     if isinstance(value, (list, tuple)):
@@ -1354,15 +1395,26 @@ class PrinterStore:
         self.printers = []
         self.combos = {}
         self.cleanup = dict(DEFAULT_CLEANUP)
+        self._stamp = None
         self.load()
 
+    def sync(self):
+        """Pick up what another OrcaSlicer window saved. Called before every change, so a change made
+        here is applied on top of the other window's and neither is lost. True when it reloaded."""
+        if file_stamp(self.path) == self._stamp:
+            return False
+        self.load()
+        return True
+
     def set_cleanup(self, rule):
+        self.sync()
         self.cleanup = clean_rule(rule)
         self.save()
 
     def load(self):
         self.combos = {}
         self.cleanup = dict(DEFAULT_CLEANUP)
+        self._stamp = file_stamp(self.path)
         try:
             with open(self.path, "r", encoding="utf-8") as handle:
                 data = json.load(handle)
@@ -1382,6 +1434,7 @@ class PrinterStore:
             write_private(temp, json.dumps({"version": 1, "printers": self.printers, "combos": self.combos,
                                             "cleanup": self.cleanup}, indent=2))
             os.replace(temp, self.path)
+            self._stamp = file_stamp(self.path)
 
     def get(self, printer_id):
         for printer in self.printers:
@@ -1391,6 +1444,7 @@ class PrinterStore:
 
     def upsert(self, printer):
         printer = validate_printer(printer)
+        self.sync()
         for index, existing in enumerate(self.printers):
             if existing["id"] == printer["id"]:
                 self.printers[index] = printer
@@ -1401,6 +1455,7 @@ class PrinterStore:
         return printer
 
     def remove(self, printer_id):
+        self.sync()
         self.printers = [p for p in self.printers if p["id"] != printer_id]
         self.save()
 
@@ -1409,12 +1464,14 @@ class PrinterStore:
         key = model_key(model)
         if not key or not printer:
             raise FarmError("Select a printer preset in OrcaSlicer first")
+        self.sync()
         self.combos[key] = {"label": model.strip(), "printer": printer, "process": process or "",
                             "filaments": [name for name in (filaments or []) if name]}
         self.save()
         return key
 
     def remove_combo(self, key):
+        self.sync()
         if self.combos.pop(key, None) is not None:
             self.save()
 
@@ -1472,6 +1529,125 @@ def files_to_clean(files, rule, protect=(), now=None):
 def storage_summary(files):
     dated = [item["modified"] for item in files if item.get("modified")]
     return {"count": len(files), "bytes": sum(item.get("size") or 0 for item in files), "oldest": min(dated) if dated else None}
+
+
+def file_stamp(path):
+    """Changes whenever the file is rewritten; None when it does not exist."""
+    try:
+        info = os.stat(path)
+        return (info.st_mtime_ns, info.st_size)
+    except OSError:
+        return None
+
+
+def plan_order(remaining, printers, entries):
+    """Which kept plate to start on which free printer to work off `remaining` parts.
+
+    printers: free printers in the order to fill them. entries: the kept plates of the item.
+    Per printer, among the plates sliced for it: the largest that does not overshoot, or, when all
+    overshoot, the smallest (a few extras are fine). Stops once the remainder is covered."""
+    plan = []
+    for printer in printers:
+        if remaining <= 0:
+            break
+        fits = [e for e in entries if model_matches(e.get("printer_model"), printer.get("model"))
+                and not nozzle_mismatch(e.get("nozzle_diameter"), printer.get("nozzle")) and (e.get("parts") or 0) > 0]
+        if not fits:
+            continue
+        under = [e for e in fits if e["parts"] <= remaining]
+        pick = max(under, key=lambda e: e["parts"]) if under else min(fits, key=lambda e: e["parts"])
+        plan.append({"printer_id": printer["id"], "entry_id": pick["id"], "parts": pick["parts"]})
+        remaining -= pick["parts"]
+    return plan
+
+
+class OrderBook:
+    """Orders being worked off, kept in a file so an unfinished order survives a restart.
+
+    An order: item, quantity wanted, optional toolhead and note, and the plates started for it.
+    A plate is "printing" from its start until the user clears that bed and says how many parts
+    were good; only then does it count toward the order."""
+
+    def __init__(self, path):
+        self.path, self._lock, self._stamp = path, threading.Lock(), None
+        self.load()
+
+    def sync(self):
+        """As PrinterStore.sync: reload when another window rewrote the file."""
+        if file_stamp(self.path) == self._stamp:
+            return False
+        self.load()
+        return True
+
+    def load(self):
+        self.orders, self.toolhead_names = [], ["", "", "", ""]
+        self._stamp = file_stamp(self.path)
+        try:
+            with open(self.path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            self.orders = [o for o in data.get("orders", []) if isinstance(o, dict) and o.get("id")]
+            names = data.get("toolhead_names")
+            if isinstance(names, list):
+                self.toolhead_names = ([str(n)[:20] for n in names] + [""] * 4)[:4]
+        except (OSError, ValueError, AttributeError):
+            pass
+
+    def save(self):
+        with self._lock:
+            write_private(self.path + ".tmp", json.dumps({"version": 1, "orders": self.orders,
+                                                         "toolhead_names": self.toolhead_names}, indent=1))
+            os.replace(self.path + ".tmp", self.path)
+            self._stamp = file_stamp(self.path)
+
+    def get(self, order_id):
+        return next((o for o in self.orders if o["id"] == order_id), None)
+
+    def add(self, item, quantity, toolhead=None, note=""):
+        self.sync()
+        order = {"id": uuid.uuid4().hex[:10], "item": item, "quantity": quantity, "toolhead": toolhead,
+                 "note": note, "created": time.time(), "plates": []}
+        self.orders.append(order)
+        self.save()
+        return order
+
+    def delete(self, order_id):
+        self.sync()
+        self.orders = [o for o in self.orders if o["id"] != order_id]
+        self.save()
+
+    def open_plate(self, printer_id):
+        """(order, plate) still on this printer and not yet counted, or (None, None)."""
+        for order in self.orders:
+            for plate in order["plates"]:
+                if plate.get("printer_id") == printer_id and plate.get("state") == "printing":
+                    return order, plate
+        return None, None
+
+    def add_plate(self, order_id, printer_id, printer_name, parts, filename):
+        self.sync()
+        _, earlier = self.open_plate(printer_id)
+        if earlier is not None:            # the bed was reused without a count: it yields nothing
+            earlier.update(state="counted", good=0)
+        order = self.get(order_id)
+        if order is not None:
+            order["plates"].append({"printer_id": printer_id, "printer_name": printer_name, "parts": parts,
+                                    "filename": filename, "sent_at": time.time(), "state": "printing", "good": None})
+        self.save()
+
+    def count(self, printer_id, good):
+        self.sync()
+        order, plate = self.open_plate(printer_id)
+        if plate is None:
+            return None
+        plate.update(state="counted", good=max(0, min(int(good), 99999)))
+        self.save()
+        return order
+
+    @staticmethod
+    def totals(order):
+        good = sum(p.get("good") or 0 for p in order["plates"] if p.get("state") == "counted")
+        printing = sum(p.get("parts") or 0 for p in order["plates"] if p.get("state") == "printing")
+        return good, printing, max(0, order["quantity"] - good - printing)
 
 
 class BedLog:

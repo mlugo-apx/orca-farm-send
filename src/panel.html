@@ -65,7 +65,7 @@
 (function () {
   var state = { printers: [], jobs: [], job_for: {}, status: {}, sends: {}, slicing: false,
                 combos: [], types: [], current: null, combo_note: { text: "" }, can_switch: false,
-                storage: {}, cleanup: { mode: "age", days: 30, keep: 50, auto: false, text: "" } };
+                library: [], orders: [], order_plates: {}, toolhead_names: ["", "", "", ""], storage: {}, cleanup: { mode: "age", days: 30, keep: 50, auto: false, text: "" } };
   var selected = {};
   var expanded = {};   // busy printers shown as a full card instead of one line
   var $ = function (id) { return document.getElementById(id); };
@@ -144,7 +144,8 @@
     refresh: "<path d='M13 8a5 5 0 1 1-1.5-3.6'/><path d='M13 2.5v3h-3'/>",
     edit: "<path d='M2.5 13.5l.6-2.9 7.6-7.6 2.3 2.3-7.6 7.6z'/><path d='M9.4 4.3l2.3 2.3'/>",
     up: "<path d='M3.5 10l4.5-4.5 4.5 4.5'/>",
-    down: "<path d='M3.5 6l4.5 4.5 4.5-4.5'/>"
+    down: "<path d='M3.5 6l4.5 4.5 4.5-4.5'/>",
+    trash: "<path d='M3 4.5h10'/><path d='M6.5 4.5V3h3v1.5'/><path d='M4.5 4.5l.6 8.5h5.8l.6-8.5'/>"
   };
   function svg(name) {
     return "<svg viewBox='0 0 16 16' fill='none' stroke='currentColor' stroke-width='1.6' stroke-linecap='round' " +
@@ -291,11 +292,236 @@
       filamentLines(job) +
       (job.presets ? "<div class='muted small file' title='" + esc(job.presets) + "'>" + esc(job.presets) + "</div>" : "") +
       (job.stale ? "<div class='warn small'>Plate changed since this slice. Slice again if this type should get the change.</div>" : "") +
-      (job.post_process ? "<div class='warn small'>Post-processing scripts are not applied.</div>" : "");
+      (job.post_process ? "<div class='warn small'>Post-processing scripts are not applied.</div>" : "") +
+      (job.stale ? "" : "<button type='button' class='linkish' style='padding:0' data-lib-save='" + esc(job.id) +
+                       "' title='Keep this plate so it can be sent again later without slicing'>save to library</button>");
+  }
+
+  // ---- library: plates kept for reprinting ---------------------------------------------------
+  var plateView = "now", libQuery = "", libNote = null;
+  function libraryListHtml() {
+    var words = libQuery.toLowerCase().split(/\s+/).filter(Boolean);
+    var entries = state.library.filter(function (e) {
+      var text = (e.item + " " + e.printer_model + " x" + e.parts).toLowerCase();
+      return words.every(function (w) { return text.indexOf(w) >= 0; });
+    });
+    if (!state.library.length) return "<div class='muted small' style='margin-top:6px'>Nothing kept yet. Slice a plate, then click \u201csave to library\u201d on its row.</div>";
+    if (!entries.length) return "<div class='muted small' style='margin-top:6px'>No item matches.</div>";
+    return entries.map(function (e) {
+      var saved = e.saved_at ? new Date(e.saved_at * 1000).toLocaleDateString([], { month: "short", day: "numeric" }) : "";
+      return "<div class='type'><div class='row spread' style='gap:8px'>" +
+        "<div class='file'><b>" + esc(e.item) + "</b> <span class='muted'>x" + esc(e.parts) + "</span></div>" +
+        "<div class='row' style='flex:none'><button type='button' class='quiet' data-lib-send='" + esc(e.id) + "'" +
+          (e.printers.length ? "" : " disabled") + ">Send</button>" + iconButton("trash", "data-lib-del", e.id, "Remove from the library") + "</div></div>" +
+        "<div class='muted small file'>" + esc(e.printer_model || "unknown printer") + " \u00b7 " + esc(e.summary) + (saved ? " \u00b7 kept " + esc(saved) : "") + "</div>" +
+        filamentLines(e) +
+        (e.presets ? "<div class='muted small file' title='" + esc(e.presets) + "'>" + esc(e.presets) + "</div>" : "") +
+        (e.printers.length ? "" : "<div class='warn small'>No printer of this type is set up.</div>") + "</div>";
+    }).join("");
+  }
+  // ---- orders: a quantity of one item, worked off plate by plate -------------------------------
+  function toolLabel(n) { var name = state.toolhead_names[n - 1]; return n + (name ? " \u2014 " + name : ""); }
+  function ordersHtml() {
+    var html = "<div class='row spread' style='margin-top:7px'><button type='button' class='quiet' data-order-new='1'" +
+      (state.library.length ? "" : " disabled") + ">New order</button>" +
+      "<button type='button' class='linkish' data-tool-names='1' title='Name what each toolhead position holds, e.g. Black'>toolhead names</button></div>";
+    if (!state.library.length) return html + "<div class='muted small' style='margin-top:6px'>Orders print plates from the library. Save a plate there first.</div>";
+    if (!state.orders.length) return html + "<div class='muted small' style='margin-top:6px'>No open orders. An order is a quantity of one library item; the panel proposes plates for the free printers and keeps count.</div>";
+    return html + state.orders.map(function (o) {
+      var done = o.remaining === 0 && o.printing === 0;
+      var bits = [o.good + " good"];
+      if (o.printing) bits.push(o.printing + " printing");
+      bits.push(done ? "complete" : o.remaining + " to start");
+      var where = o.plates.filter(function (p) { return p.state === "printing"; }).map(function (p) { return p.printer_name + " x" + p.parts; }).join(", ");
+      return "<div class='type'><div class='row spread' style='gap:8px'>" +
+        "<div class='file'><b>" + esc(o.item) + "</b> <span class='muted'>" + esc(o.quantity) + " wanted</span></div>" +
+        "<div class='row' style='flex:none'><button type='button' class='quiet' data-order-plan='" + esc(o.id) + "'" +
+          (o.remaining && o.in_library ? "" : " disabled") + ">Print next</button>" + iconButton("trash", "data-order-del", o.id, done ? "Close this order" : "Delete this order") + "</div></div>" +
+        "<div class='small " + (done ? "ok" : "muted") + "'>" + esc(bits.join(" \u00b7 ")) + "</div>" +
+        ((o.toolhead || o.note) ? "<div class='small muted file'>" + esc((o.toolhead ? "Toolhead " + toolLabel(o.toolhead) : "") + (o.toolhead && o.note ? " \u00b7 " : "") + o.note) + "</div>" : "") +
+        (where ? "<div class='small muted file'>On " + esc(where) + ". Counted when you click Bed cleared.</div>" : "") +
+        (o.in_library ? "" : "<div class='warn small'>This item is no longer in the library.</div>") + "</div>";
+    }).join("");
+  }
+  function newOrder() {
+    var items = [];
+    state.library.forEach(function (e) { if (items.indexOf(e.item) < 0) items.push(e.item); });
+    showDialog("<h4>New order</h4>" +
+      "<label class='field'>Item<select id='o-item'>" + items.map(function (i) { return "<option>" + esc(i) + "</option>"; }).join("") + "</select></label>" +
+      "<label class='field'>Quantity wanted<input id='o-qty' type='number' min='1' max='99999'></label>" +
+      "<label class='field'>Toolhead on Snapmaker printers<select id='o-tool'><option value=''>as sliced</option>" +
+        [1, 2, 3, 4].map(function (n) { return "<option value='" + n + "'>" + esc(toolLabel(n)) + "</option>"; }).join("") + "</select></label>" +
+      "<label class='field'>Note (optional)<input id='o-note' maxlength='60' placeholder='e.g. white, order 1234'></label>" +
+      "<p class='small muted' style='margin:8px 0 0'>The toolhead applies to one-filament plates. Other printers print from whatever is loaded.</p>" +
+      "<div class='dialog-actions'><button type='button' class='quiet' id='dlg-cancel'>Cancel</button><button type='button' id='dlg-ok'>Create</button></div>");
+    $("dlg-cancel").onclick = hideDialog;
+    $("dlg-ok").onclick = function () {
+      if (!(parseInt($("o-qty").value, 10) > 0)) { $("o-qty").focus(); return; }
+      send("order_save", { item: $("o-item").value, quantity: $("o-qty").value, toolhead: $("o-tool").value, note: $("o-note").value });
+      hideDialog();
+    };
+    $("o-qty").focus();
+  }
+  function toolheadNames() {
+    showDialog("<h4>Toolhead names</h4><p class='small muted' style='margin:0'>What each toolhead position holds on your printers, if you keep them the same. Shown wherever a toolhead is picked. Only a label: nothing is checked against it.</p>" +
+      [1, 2, 3, 4].map(function (n) { return "<label class='field'>Toolhead " + n + "<input id='tn-" + n + "' maxlength='20' value='" + esc(state.toolhead_names[n - 1] || "") + "'></label>"; }).join("") +
+      "<div class='dialog-actions'><button type='button' class='quiet' id='dlg-cancel'>Cancel</button><button type='button' id='dlg-ok'>Save</button></div>");
+    $("dlg-cancel").onclick = hideDialog;
+    $("dlg-ok").onclick = function () {
+      send("save_toolhead_names", { names: [1, 2, 3, 4].map(function (n) { return $("tn-" + n).value; }) });
+      hideDialog();
+    };
+  }
+  function showPlan(message) {
+    var o = state.orders.filter(function (x) { return x.id === message.id; })[0];
+    if (!o) return;
+    var entry = function (id) { return state.library.filter(function (e) { return e.id === id; })[0] || {}; };
+    var name = function (id) { return (state.printers.filter(function (p) { return p.id === id; })[0] || {}).name || "printer"; };
+    var kind = function (id) { return (state.printers.filter(function (p) { return p.id === id; })[0] || {}).kind; };
+    if (!message.plan.length) {
+      showDialog("<h4>" + esc(o.item) + ": nothing to start</h4><p class='small muted'>" +
+        (message.remaining ? "No free printer can take this item right now. A printer is free when it is idle, its bed is cleared and it has no uncounted plate." : "Every part of this order is printed or printing.") +
+        "</p><div class='dialog-actions'><button type='button' id='dlg-cancel'>OK</button></div>");
+      $("dlg-cancel").onclick = hideDialog;
+      return;
+    }
+    var anyU1 = message.plan.some(function (x) { return kind(x.printer_id) === "moonraker"; });
+    var anyOther = message.plan.some(function (x) { return kind(x.printer_id) !== "moonraker"; });
+    showDialog("<h4>" + esc(o.item) + ": " + esc(message.remaining) + " to start</h4>" +
+      message.plan.map(function (x, i) {
+        var e = entry(x.entry_id), p = state.printers.filter(function (q) { return q.id === x.printer_id; })[0] || {};
+        return "<div class='check' style='align-items:flex-start;margin-top:7px'><input type='checkbox' checked data-pick='" + i + "' id='pk-" + i + "' style='margin-top:2px'>" +
+          "<label for='pk-" + i + "' style='min-width:0'>" + esc(name(x.printer_id)) + " <span class='muted small'>x" + esc(x.parts) + " \u00b7 " + esc(e.summary || "") + "</span>" + toolsHtml(p) + "</label></div>";
+      }).join("") +
+      (anyU1 && o.toolhead ? "<p class='small' style='margin:10px 0 0'>Snapmaker printers print from toolhead " + esc(toolLabel(o.toolhead)) + ".</p>" : "") +
+      (anyOther ? "<p class='small warn' style='margin:6px 0 0'>Other printers print from whatever is loaded. Check the color yourself.</p>" : "") +
+      "<div class='check' style='margin-top:10px'><input type='checkbox' id='opt-level' checked><label for='opt-level'>Bed leveling before print</label></div>" +
+      (anyU1 ? "<div class='check'><input type='checkbox' id='opt-flow'><label for='opt-flow'>Flow calibration (Snapmaker)</label></div>" : "") +
+      "<div class='check'><input type='checkbox' id='opt-lapse'><label for='opt-lapse'>Time-lapse</label></div>" +
+      "<p class='small' id='l-total' style='margin:10px 0 0'></p>" +
+      "<p class='small muted' style='margin:4px 0 0'>Each print starts immediately. Make sure each bed is clear.</p>" +
+      "<div class='dialog-actions'><button type='button' class='quiet' id='dlg-cancel'>Cancel</button><button type='button' class='danger' id='dlg-ok'>Start prints</button></div>");
+    function picks() {
+      return Array.prototype.filter.call($("dialog").querySelectorAll("input[data-pick]"), function (b) { return b.checked; })
+        .map(function (b) { return message.plan[parseInt(b.dataset.pick, 10)]; });
+    }
+    function total() {
+      var chosen = picks(), parts = chosen.reduce(function (sum, x) { return sum + x.parts; }, 0), left = message.remaining - parts;
+      $("l-total").textContent = chosen.length ? parts + " parts on " + chosen.length + " printer" + (chosen.length === 1 ? "" : "s") + ". " +
+        (left > 0 ? left + " still to start after this." : left < 0 ? (-left) + " extra." : "That covers the order.") : "Tick at least one printer.";
+      $("dlg-ok").disabled = !chosen.length;
+    }
+    $("dialog").onchange = total; total();
+    $("dlg-cancel").onclick = hideDialog;
+    $("dlg-ok").onclick = function () {
+      send("order_send", { id: o.id, picks: picks(), options: { bed_leveling: $("opt-level").checked,
+        flow_calibrate: $("opt-flow") ? $("opt-flow").checked : false, timelapse: $("opt-lapse").checked } });
+      hideDialog();
+    };
+  }
+  function bedCleared(printerId) {
+    var plate = state.order_plates[printerId];
+    if (!plate) { send("bed_cleared", { id: printerId }); return; }
+    var failed = (state.status[printerId] || {}).last_result !== "complete";
+    showDialog("<h4>Bed cleared: how many good parts?</h4><p class='small muted' style='margin:0'>This plate was " + esc(plate.item) + " x" + esc(plate.parts) +
+      ", printed for an order. Only good parts count toward it.</p>" +
+      "<label class='field'>Good parts<input id='b-good' type='number' min='0' max='" + esc(plate.parts) + "' value='" + (failed ? 0 : esc(plate.parts)) + "'></label>" +
+      "<div class='dialog-actions'><button type='button' class='quiet' id='dlg-cancel'>Cancel</button><button type='button' id='dlg-ok'>Bed is clear</button></div>");
+    $("dlg-cancel").onclick = hideDialog;
+    $("dlg-ok").onclick = function () {
+      var good = parseInt($("b-good").value, 10);
+      if (!(good >= 0)) { $("b-good").focus(); return; }
+      send("bed_cleared", { id: printerId, good: Math.min(good, plate.parts) });
+      hideDialog();
+    };
+    $("b-good").select();
+  }
+  function saveToLibrary(jobId) {
+    var job = state.jobs.filter(function (j) { return j.id === jobId; })[0];
+    if (!job) return;
+    showDialog("<h4>Save to library</h4>" +
+      "<p class='small muted' style='margin:0'>Keeps this sliced plate so you can send it again later without slicing. It is kept as sliced: for " +
+        esc(job.printer_model) + ", with these settings.</p>" +
+      "<label class='field'>Item name<input id='l-item' value='" + esc(job.display_name) + "'></label>" +
+      "<label class='field'>Parts on this plate<input id='l-parts' type='number' min='1' max='9999' placeholder='count them, e.g. 24'></label>" +
+      "<p class='small' id='l-result' style='min-height:16px;margin:8px 0 0'></p>" +
+      "<div class='dialog-actions'><button type='button' class='quiet' id='dlg-cancel'>Cancel</button><button type='button' id='dlg-ok'>Save</button></div>");
+    $("dlg-cancel").onclick = hideDialog;
+    $("dlg-ok").onclick = function () {
+      $("l-result").className = "small muted"; $("l-result").textContent = "Saving...";
+      send("library_save", { job_id: jobId, item: $("l-item").value, parts: $("l-parts").value });
+    };
+    $("l-parts").focus();
+  }
+  function toolsHtml(printer) {
+    var tools = (state.status[printer.id] || {}).tools || [];
+    if (!tools.length) return "";
+    return "<div class='small muted'>" + tools.map(function (t) {
+      return t.slot + " " + (t.loaded ? swatch(t.color) + esc(t.type || "") : "empty");
+    }).join(" \u00b7 ") + "</div>";
+  }
+  function sendFromLibrary(id) {
+    var e = state.library.filter(function (x) { return x.id === id; })[0];
+    if (!e) return;
+    var printers = state.printers.filter(function (p) { return e.printers.indexOf(p.id) >= 0; });
+    var anyU1 = printers.some(function (p) { return p.kind === "moonraker"; });
+    var single = e.filaments.length === 1, sliced = single ? e.filaments[0].slot : 0;
+    var rows = printers.map(function (p) {
+      var st = state.status[p.id] || {}, free = st.state === "idle" && !st.needs_clearing;
+      return "<div class='check' style='align-items:flex-start;margin-top:7px'><input type='checkbox' data-lp='" + esc(p.id) + "' id='lp-" + esc(p.id) + "'" +
+        (free ? " checked" : "") + " style='margin-top:2px'><label for='lp-" + esc(p.id) + "' style='min-width:0'>" + esc(p.name) +
+        " <span class='muted small'>" + esc(st.needs_clearing ? "clear the bed first" : (st.state_text || st.state || "checking")) + "</span>" + toolsHtml(p) + "</label></div>";
+    }).join("");
+    var pick = "";
+    if (single && anyU1) {
+      pick = "<label class='field'>Print from toolhead (Snapmaker)<select id='l-tool'><option value=''>" + sliced + " \u2014 as sliced</option>" +
+        [1, 2, 3, 4].filter(function (n) { return n !== sliced; }).map(function (n) { return "<option value='" + n + "'>" + esc(toolLabel(n)) + "</option>"; }).join("") +
+        "</select></label><p class='small muted' style='margin:4px 0 0'>The color is whatever that toolhead holds; each printer's toolheads are listed above. Material and temperatures stay as sliced.</p>";
+    }
+    showDialog("<h4>Send " + esc(e.item) + " x" + esc(e.parts) + "</h4>" +
+      "<div class='muted small'>" + esc(e.summary) + " \u00b7 for " + esc(e.printer_model) + "</div>" + filamentLines(e) + rows + pick +
+      "<div class='check' style='margin-top:10px'><input type='checkbox' id='opt-level' checked><label for='opt-level'>Bed leveling before print</label></div>" +
+      (anyU1 ? "<div class='check'><input type='checkbox' id='opt-flow'><label for='opt-flow'>Flow calibration (Snapmaker)</label></div>" : "") +
+      "<div class='check'><input type='checkbox' id='opt-lapse'><label for='opt-lapse'>Time-lapse</label></div>" +
+      "<p class='small' id='l-total' style='margin:10px 0 0'></p>" +
+      "<p class='small muted' style='margin:4px 0 0'>Each print starts immediately. Make sure each bed is clear.</p>" +
+      "<div class='dialog-actions'><button type='button' class='quiet' id='dlg-cancel'>Cancel</button>" +
+      "<button type='button' class='quiet' id='dlg-upload'>Upload only</button><button type='button' class='danger' id='dlg-ok'>Start print</button></div>");
+    function picked() {
+      return Array.prototype.filter.call($("dialog").querySelectorAll("input[data-lp]"), function (b) { return b.checked; }).map(function (b) { return b.dataset.lp; });
+    }
+    function total() {
+      var n = picked().length;
+      $("l-total").textContent = n ? n + " printer" + (n === 1 ? "" : "s") + " \u00d7 " + e.parts + " = " + (n * e.parts) + " parts" : "Tick at least one printer.";
+      $("dlg-ok").disabled = $("dlg-upload").disabled = !n;
+    }
+    function go(start) {
+      send("library_send", { id: id, printer_ids: picked(), start: start, toolhead: $("l-tool") && $("l-tool").value ? parseInt($("l-tool").value, 10) : null,
+        options: { bed_leveling: $("opt-level").checked, flow_calibrate: $("opt-flow") ? $("opt-flow").checked : false, timelapse: $("opt-lapse").checked } });
+      hideDialog();
+    }
+    $("dialog").onchange = total; total();
+    $("dlg-cancel").onclick = hideDialog;
+    $("dlg-upload").onclick = function () { go(false); };
+    $("dlg-ok").onclick = function () { go(true); };
   }
   function renderJob() {
     var note = state.combo_note || {}, busy = !!note.busy;
-    var html = "<div class='card-title'>Plates</div>";
+    var tab = function (name, label) {
+      return "<button type='button' class='" + (plateView === name ? "" : "quiet") + "' style='padding:2px 8px;font-size:12px' data-view='" + name + "'>" + label + "</button>";
+    };
+    var html = "<div class='row spread'><span class='card-title'>Plates</span><span class='row' style='gap:4px'>" +
+               tab("now", "Sliced now") + tab("library", "Library (" + state.library.length + ")") +
+               tab("orders", "Orders (" + state.orders.length + ")") + "</span></div>";
+    if (libNote) html += "<div class='small " + (libNote.ok ? "ok" : "err") + "' style='margin-top:4px'>" + esc(libNote.text) + "</div>";
+    if (plateView === "orders") { $("job").innerHTML = html + ordersHtml(); return; }
+    if (plateView === "library") {
+      html += "<input id='lib-search' type='search' placeholder='Search items' value='" + esc(libQuery) + "' style='width:100%;box-sizing:border-box;margin-top:7px'>" +
+              "<div id='lib-list' style='margin-top:7px'>" + libraryListHtml() + "</div>";
+      $("job").innerHTML = html;
+      $("lib-search").oninput = function () { libQuery = this.value; $("lib-list").innerHTML = libraryListHtml(); };
+      return;
+    }
     if (state.slicing) html += "<div class='muted small' style='margin-top:4px'>Slicing...</div>";
     state.jobs.forEach(function (job) {   // a slice still being read, or one that could not be used
       if (!job.ready) html += "<div class='small " + (job.error ? "err" : "muted") + "' style='margin-top:4px'>" +
@@ -351,7 +577,29 @@
 
   $("job").addEventListener("click", function (event) {
     var d = event.target.dataset || {};
-    if (d.comboLoad) send("load_combo", { key: d.comboLoad });
+    if (d.view) { plateView = d.view; libNote = null; renderJob(); }
+    else if (d.orderNew) newOrder();
+    else if (d.toolNames) toolheadNames();
+    else if (d.orderPlan) send("order_plan", { id: d.orderPlan });
+    else if (d.orderDel) {
+      var gone = state.orders.filter(function (x) { return x.id === d.orderDel; })[0];
+      showDialog("<h4>Remove the order for " + esc(gone ? gone.quantity + " " + gone.item : "this item") + "?</h4>" +
+        "<p class='small muted'>Its count is forgotten. Prints already running are not stopped.</p>" +
+        "<div class='dialog-actions'><button type='button' class='quiet' id='dlg-cancel'>Cancel</button><button type='button' class='danger' id='dlg-ok'>Remove</button></div>");
+      $("dlg-cancel").onclick = hideDialog;
+      $("dlg-ok").onclick = function () { send("order_delete", { id: d.orderDel }); hideDialog(); };
+    }
+    else if (d.libSave) saveToLibrary(d.libSave);
+    else if (d.libSend) sendFromLibrary(d.libSend);
+    else if (d.libDel) {
+      var entry = state.library.filter(function (x) { return x.id === d.libDel; })[0];
+      showDialog("<h4>Remove " + esc(entry ? entry.item + " x" + entry.parts : "this plate") + " from the library?</h4>" +
+        "<p class='small muted'>The kept G-code is deleted from this computer. Files already on the printers stay.</p>" +
+        "<div class='dialog-actions'><button type='button' class='quiet' id='dlg-cancel'>Cancel</button><button type='button' class='danger' id='dlg-ok'>Remove</button></div>");
+      $("dlg-cancel").onclick = hideDialog;
+      $("dlg-ok").onclick = function () { send("library_delete", { id: d.libDel }); hideDialog(); };
+    }
+    else if (d.comboLoad) send("load_combo", { key: d.comboLoad });
     else if (d.typePresets) presetsDialog(d.typePresets);
   });
 
@@ -586,7 +834,7 @@
     if (d.upload) confirmSend([byId(d.upload)], false);
     else if (d.start) confirmSend([byId(d.start)], true);
     else if (d.refresh) refresh([d.refresh]);
-    else if (d.cleared) send("bed_cleared", { id: d.cleared });
+    else if (d.cleared) bedCleared(d.cleared);
     else if (d.collapse) { delete expanded[d.collapse]; renderPrinters(); }
     else if (d.expand) { expanded[d.expand] = true; renderPrinters(); }
     else if (d.edit) editPrinter(byId(d.edit));
@@ -600,13 +848,18 @@
   orca.onMessage(function (message) {
     if (!message) return;
     if (message.command === "state") {
-      ["printers", "jobs", "job_for", "slicing", "combos", "types", "current", "combo_note", "can_switch", "storage", "cleanup"].forEach(function (key) { if (key in message) state[key] = message[key]; });
+      ["printers", "jobs", "job_for", "slicing", "combos", "types", "library", "orders", "order_plates", "toolhead_names", "current", "combo_note", "can_switch", "storage", "cleanup"].forEach(function (key) { if (key in message) state[key] = message[key]; });
       if (message.status) state.status = message.status;
       if (message.sends) state.sends = message.sends;
       render();
     } else if (message.command === "status") {
       delete refreshing[message.id];
       state.status[message.id] = message.status; renderMulti(); renderPrinters(); renderStorage();
+    } else if (message.command === "order_plan") {
+      showPlan(message);
+    } else if (message.command === "library_result") {
+      if (message.ok) { hideDialog(); libNote = { ok: true, text: message.text }; plateView = "library"; renderJob(); }
+      else if ($("l-result")) { $("l-result").className = "small err"; $("l-result").textContent = message.text; }
     } else if (message.command === "storage") {
       if (counting > 0) counting -= 1;
       state.storage[message.id] = message.storage; renderStorage(); renderPrinters();

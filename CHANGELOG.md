@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.0
+
+- **Library.** Click "save to library" on a sliced plate, give it an item name and the number of parts on it, and it is kept on this computer. The Plates box has a Library view with search; Send uploads a kept plate to the printers you tick and starts them, without opening the project or slicing again.
+- **Pick the toolhead at send time (Snapmaker U1).** A one-filament plate can be printed from any toolhead, so one kept file covers every color. The send dialog lists what each printer's toolheads hold. A send is refused when the chosen toolhead reports no filament or holds a different material than the plate was sliced for. Material and temperatures stay as sliced.
+- The usual guards apply to library sends: printer type, nozzle size and the bed-cleared step.
+- **Orders.** An order is a quantity of one library item, with an optional toolhead and note. **Print next** proposes kept plates for the printers that are free right now (largest plate that does not overshoot, a few extras allowed) and starts the ones you tick. The order shows good, printing and still-to-start counts and survives a restart.
+- **Good parts at Bed cleared.** When the plate on a bed belonged to an order, Bed cleared asks how many parts came out good. Only those count; a plate that failed defaults to 0.
+- **Toolhead names.** Optional labels for the four toolhead positions (for example Black, White), shown wherever a toolhead is picked. Labels only: color is not checked.
+- Two OrcaSlicer windows no longer overwrite each other's saved printers, presets, cleanup rule or orders: each change is applied on top of what the other window saved.
+
 ## 0.1.4
 
 - A plate sliced for one nozzle size is no longer sent to a printer set up with another. The printer's nozzle size is taken from its printer preset when you click Import; click Import once to record it for printers you already added.

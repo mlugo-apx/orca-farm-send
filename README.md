@@ -20,7 +20,7 @@ Farm Send uses OrcaSlicer's Python plugin system (OrcaSlicer 2.5.1 or newer), wh
 |---|---|
 | Developed and tested on | Linux, OrcaSlicer 2.5.1 |
 | Windows, macOS | **Not tested.** Reports welcome |
-| Centauri Carbon 2 | Tested on two printers, single-filament jobs. Multi-colour jobs through the multi-colour unit are not tested |
+| Centauri Carbon 2 | Tested on two printers, single-filament jobs. Multi-color jobs through the multi-color unit are not tested |
 | Snapmaker U1 | Tested on three printers, firmware 2.1.2. Slicer filament slot N prints on toolhead N |
 
 The printer protocols were worked out from the vendors' own clients, not from published specifications. A firmware update can break them.
@@ -48,6 +48,27 @@ Select the printer, process and filament presets you use for one printer type, c
 **Use presets** on the row then switches all three OrcaSlicer selections back in one click. Then slice.
 If a preset has unsaved edits, OrcaSlicer shows its normal save or discard dialog first.
 The plugin cannot press Slice for you.
+
+**Library**
+
+For parts you print again and again. On a sliced plate's row click **save to library**, name the item and enter how many parts are on the plate.
+The plate is kept on this computer, in the plugin's own data folder, and survives closing the project and restarting OrcaSlicer.
+In the Plates box, **Library** lists what you kept, with search. **Send** shows the printers of the right type with their state, and the total parts for the printers you tick, then uploads and starts them. No project, no slicing.
+
+A kept plate is the G-code exactly as sliced: printer type, nozzle, material and temperatures do not change. To change any of those, slice again and save a new plate.
+On Snapmaker U1s a one-filament plate can be printed from any toolhead, so one kept plate covers every color: choose the toolhead in the send dialog, which lists what each printer's toolheads hold.
+The same toolhead number is used on every printer you tick, so this assumes your printers keep the same color in the same position.
+A start is refused when that toolhead reports no filament or holds a different material. Color itself is not checked.
+Verified on a U1 up to the point where the printer heats the chosen toolhead; a complete print through a remapped toolhead has not been run yet.
+
+**Orders**
+
+For "I need 96 of these". In the Plates box open **Orders**, click **New order**, pick a library item and enter the quantity. Optionally pick the toolhead for Snapmaker printers and add a note.
+**Print next** proposes a kept plate for each printer that is free right now: idle, bed cleared, and no uncounted plate on it. Per printer it takes the largest plate that does not overshoot what is left, or the smallest one when all would, so a few extras are possible. Untick what you do not want, then **Start prints**.
+Keep plates of more than one size for an item (a full plate and a small one) and the proposal uses both.
+When a plate finishes, **Bed cleared** on that printer asks how many parts came out good. Only good parts count, so a failed plate puts its parts back on the to-start count.
+The order line shows good, printing and still to start, and is remembered across restarts. Remove an order when it is complete.
+**toolhead names** lets you label the four toolhead positions (Black, White and so on) if you keep them the same on every printer. These are labels only: the plugin checks that the toolhead has filament of the right material, not its color.
 
 **Stored files and cleanup**
 
@@ -104,7 +125,7 @@ python3 tests/hardware_check.py --upload "U1 #2"   # 1 KB upload, list, delete. 
 - **CC2**: chunked HTTP `PUT /upload` with an MD5 header, then MQTT on port 1883 (register, status `1002`, start `1020`). One client id per printer is reused, because the printer has only a few client slots and holds each for about a minute. Every OrcaSlicer window of one user shares that id and takes turns through a lock file in the plugin storage folder, so several windows together use one slot.
 - **Snapmaker U1**: `/server/files/upload` with `print=false`, then `server.files.start_local_print` over the websocket with `bed_level`, `flow_calibrate` and `time_lapse_camera` options. That method does not exist over HTTP. A plain Moonraker start carries no options, and the U1 then skips auto bed leveling. Stock OrcaSlicer's U1 start G-code tries `SET_PRINT_AUTO_BED_LEVELING`, which firmware 2.1.2 rejects as unknown.
 - **Other Moonraker printers**: fall back to `/printer/print/start`.
-- The plate box and the confirmation show the toolhead, colour and grams the G-code uses, and what the printer reports as loaded in that toolhead.
+- The plate box and the confirmation show the toolhead, color and grams the G-code uses, and what the printer reports as loaded in that toolhead.
 
 ## What has been verified, and how
 
