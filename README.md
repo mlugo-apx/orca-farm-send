@@ -1,6 +1,8 @@
 # Farm Send for OrcaSlicer
 
 A docked panel that sends the plate you just sliced to your printers, with live status.
+
+Each printer card shows state, progress, time left with the expected finish time, temperatures and when it was last checked. Status updates on its own every few seconds; **Refresh** in the header asks every printer now, and **refresh** on a card asks that one.
 Built for OrcaSlicer 2.5.1's Python plugin system.
 
 - **Elegoo Centauri Carbon 2**: upload, and start the print. Stock OrcaSlicer can upload to a CC2 but cannot start it.
@@ -78,6 +80,7 @@ In-app checks ran in an OrcaSlicer instance on a hidden virtual display (Xvfb), 
 | Upload-and-print refused on a busy U1 | Real printer: file uploaded, not started |
 | Cross-model block | Real sliced G-code, refused before any network call |
 | One CC2 slot shared by all windows | Real CC1 and CC2: 8 processes at once, 96 requests, no errors, one client id per printer |
+| Refresh one printer and Refresh all, finish time, last-checked time | Clicked inside OrcaSlicer 2.5.1 against all five real printers |
 | Time left on a U1 | Real U1s: 4h55m shown 44 minutes into a 5h14m job (was 11 to 12 hours) |
 | CC2 slot leak fixed | Real CC2: 40 polls in 65 s, second client still connects |
 | Install, activate, panel, Import, live cards | Inside OrcaSlicer 2.5.1 |

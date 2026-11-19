@@ -37,10 +37,11 @@
 </style>
 
 <div class="row spread">
-  <h3>Farm Send</h3>
+  <h3 style="white-space:nowrap">Farm Send</h3>
   <div class="row">
+    <button type="button" class="quiet" id="btn-refresh" title="Ask every printer for its status now">Refresh</button>
     <button type="button" class="quiet" id="btn-import" title="Add printers from your OrcaSlicer printer presets">Import</button>
-    <button type="button" class="quiet" id="btn-add">Add printer</button>
+    <button type="button" class="quiet" id="btn-add" title="Add a printer by address">Add</button>
   </div>
 </div>
 
@@ -48,7 +49,7 @@
 <div class="box" id="job"></div>
 <div id="multi" class="box" style="display:none"></div>
 <div id="printers"></div>
-<p id="empty" class="muted" style="display:none">No printers yet. Use Import to pull them from your printer presets, or Add printer.</p>
+<p id="empty" class="muted" style="display:none">No printers yet. Use Import to pull them from your printer presets, or Add.</p>
 
 <div id="overlay"><div id="dialog"></div></div>
 
@@ -106,6 +107,28 @@
     });
     return notes.length ? "<div class='small'>" + notes.join(", ") + "</div>" : "";
   }
+  // ---- refresh and clock times --------------------------------------------------------------
+  var refreshing = {};   // printer id -> true from a Refresh click until that printer answers
+  function refresh(ids) {
+    ids.forEach(function (id) { refreshing[id] = true; });
+    renderPrinters();
+    send("refresh", ids.length === 1 ? { id: ids[0] } : {});
+    // A printer that never answers must not leave its card stuck on "Checking...".
+    setTimeout(function () { ids.forEach(function (id) { delete refreshing[id]; }); renderPrinters(); }, 40000);
+  }
+  function clock(date, seconds) {
+    var options = { hour: "numeric", minute: "2-digit" };
+    if (seconds) options.second = "2-digit";
+    return date.toLocaleTimeString([], options);
+  }
+  function finishAt(remaining) {
+    var now = new Date(), end = new Date(now.getTime() + remaining * 1000);
+    var days = Math.round((new Date(end.getFullYear(), end.getMonth(), end.getDate()) -
+                           new Date(now.getFullYear(), now.getMonth(), now.getDate())) / 86400000);
+    var day = days === 0 ? "" : days === 1 ? " tomorrow" : " " + end.toLocaleDateString([], { weekday: "short" });
+    return "done ~" + clock(end, false) + day;
+  }
+
   function send(command, extra) {
     var message = extra || {};
     message.command = command;
@@ -322,12 +345,15 @@
         lines += "<div class='file small' title='" + esc(status.filename) + "'>" + esc(status.filename) + "</div>" +
                  "<div class='bar'><i style='width:" + (pct || 0) + "%'></i></div>" +
                  "<div class='row spread small muted'><span>" + (pct == null ? "" : pct + "%") + "</span><span>" +
-                 (status.remaining_s == null ? "" : duration(status.remaining_s) + " left") + "</span></div>";
+                 (status.remaining_s == null ? "" : duration(status.remaining_s) + " left \u00b7 " +
+                   (status.state === "paused" ? "paused" : finishAt(status.remaining_s))) + "</span></div>";
       }
       var temps = [];
       if (status.nozzle) temps.push("Nozzle " + temp(status.nozzle));
       if (status.bed) temps.push("Bed " + temp(status.bed));
-      if (temps.length) lines += "<div class='small muted'>" + temps.join(" · ") + "</div>";
+      var checked = status.checked_at ? "checked " + clock(new Date(status.checked_at * 1000), true) : "";
+      if (temps.length || checked) lines += "<div class='row spread small muted' style='flex-wrap:wrap'><span>" + temps.join(" · ") +
+                                            "</span><span style='white-space:nowrap'>" + checked + "</span></div>";
       if (status.state === "offline" && status.detail) lines += "<div class='small muted'>" + esc(status.detail) + "</div>";
       var sendLine = "";
       if (sending) {
@@ -346,7 +372,8 @@
         "<div class='row spread'><div class='row' style='min-width:0'>" +
           "<input type='checkbox' data-pick='" + esc(p.id) + "'" + (selected[p.id] ? " checked" : "") + " title='Select for sending to several printers'>" +
           "<span class='dot " + esc(status.state) + "'></span><span class='card-title'>" + esc(p.name) + "</span></div>" +
-          "<div class='row'><span class='small muted'>" + esc(status.state_text || status.state) + "</span>" +
+          "<div class='row'><span class='small muted'>" + esc(refreshing[p.id] ? "Checking..." : (status.state_text || status.state)) + "</span>" +
+          "<button type='button' class='linkish' data-refresh='" + esc(p.id) + "' title='Ask this printer for its status now'>refresh</button>" +
           "<button type='button' class='linkish' data-edit='" + esc(p.id) + "'>edit</button></div></div>" +
         lines + sendLine +
         "<div class='actions'>" +
@@ -365,11 +392,13 @@
     var t = event.target, d = t.dataset || {};
     if (d.upload) confirmSend([byId(d.upload)], false);
     else if (d.start) confirmSend([byId(d.start)], true);
+    else if (d.refresh) refresh([d.refresh]);
     else if (d.edit) editPrinter(byId(d.edit));
     else if (d.cancel) send("cancel_send", { id: d.cancel });
     else if (d.pick) { selected[d.pick] = t.checked; renderMulti(); }
   });
   $("btn-add").onclick = function () { editPrinter(null); };
+  $("btn-refresh").onclick = function () { refresh(state.printers.map(function (p) { return p.id; })); };
   $("btn-import").onclick = function () { send("import_presets"); };
 
   orca.onMessage(function (message) {
@@ -380,6 +409,7 @@
       if (message.sends) state.sends = message.sends;
       render();
     } else if (message.command === "status") {
+      delete refreshing[message.id];
       state.status[message.id] = message.status; renderMulti(); renderPrinters();
     } else if (message.command === "send") {
       if (message.send) state.sends[message.id] = message.send; else delete state.sends[message.id];

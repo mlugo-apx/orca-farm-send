@@ -289,6 +289,11 @@ class FarmApp:
             self.post_state()
         self.poll()
 
+    def _cmd_refresh(self, message):
+        """Refresh button: ask now instead of waiting for the next timed poll. One printer, or all."""
+        printer_id = message.get("id")
+        self.poll(force=True, only=printer_id if isinstance(printer_id, str) and printer_id else None)
+
     def _set_combo_note(self, text, ok=True, busy=False):
         with self.lock:
             self.combo_note = {"text": text, "ok": ok, "busy": busy}
@@ -529,6 +534,7 @@ class FarmApp:
             self._status_at[printer_id] = time.monotonic()
             if self.store.get(printer_id) is None:
                 return
+            status["checked_at"] = time.time()   # wall clock, shown on the card
             self.status[printer_id] = status
             # "Started <file>" is only true while that print runs. Once the printer is idle again
             # (finished or cancelled) the line would be stale, so it is dropped.

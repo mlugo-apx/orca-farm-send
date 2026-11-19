@@ -448,6 +448,24 @@ class AppTests(unittest.TestCase):
         folder = os.path.join(self.folder.name, "slices")
         return sorted(os.listdir(folder)) if os.path.isdir(folder) else []
 
+    def _statuses(self):
+        return [post["id"] for post in self.posts if post.get("command") == "status"]
+
+    def test_refresh_one_printer_and_all(self):
+        self.app.handle({"command": "poll"})
+        self.assertTrue(wait_for(lambda: len(self._statuses()) == 3))
+        before = time.time()
+        self.app.handle({"command": "poll"})          # too soon: the timed poll asks nobody
+        time.sleep(0.3)
+        self.assertEqual(len(self._statuses()), 3)
+        self.app.handle({"command": "refresh", "id": self.p_cc2["id"]})   # the button asks now
+        self.assertTrue(wait_for(lambda: len(self._statuses()) == 4))
+        self.assertEqual(self._statuses()[-1], self.p_cc2["id"])
+        self.assertGreaterEqual(self.app.status[self.p_cc2["id"]]["checked_at"], before)
+        self.app.handle({"command": "refresh"})
+        self.assertTrue(wait_for(lambda: len(self._statuses()) == 7))
+        self.assertEqual(sorted(self._statuses()[4:]), sorted(p["id"] for p in (self.p_u1, self.p_u1b, self.p_cc2)))
+
     def test_capture_and_view(self):
         job = self.slice()
         snapshot = self.app.snapshot()
