@@ -417,12 +417,17 @@
       if (uploadWhy) hint = uploadWhy; else if (startWhy) hint = "Print: " + startWhy.charAt(0).toLowerCase() + startWhy.slice(1);
     }
     var stateText = refreshing[p.id] ? "Checking..." : (status.needs_clearing ? "Finished" : (status.state_text || status.state));
+    // An opened busy card closes the way it opened: click its name or state. A ticked card stays
+    // open, because the tick box only exists on the full card.
+    var fold = group === "busy" && !selected[p.id] && !(sending && sending.active)
+      ? " data-collapse='" + esc(p.id) + "' style='cursor:pointer' title='Collapse'" : "";
     return "<div class='box'>" +
       "<div class='row spread'><div class='row' style='min-width:0'>" +
         "<input type='checkbox' data-pick='" + esc(p.id) + "'" + (selected[p.id] ? " checked" : "") + " title='Select for sending to several printers'>" +
-        "<span class='dot " + esc(status.needs_clearing ? "paused" : status.state) + "'></span><span class='card-title'>" + esc(p.name) + "</span></div>" +
-        "<div class='row'><span class='small muted'>" + esc(stateText) + "</span>" +
-        (group === "busy" ? "<button type='button' class='linkish' data-collapse='" + esc(p.id) + "'>less</button>" : "") +
+        "<span class='dot " + esc(status.needs_clearing ? "paused" : status.state) + "'" + fold + "></span>" +
+        "<span class='card-title'" + fold + ">" + esc(p.name) + "</span></div>" +
+        "<div class='row'><span class='small muted'" + fold + ">" + esc(stateText) + "</span>" +
+        (fold ? "<button type='button' class='linkish' data-collapse='" + esc(p.id) + "'>collapse</button>" : "") +
         "<button type='button' class='linkish' data-refresh='" + esc(p.id) + "' title='Ask this printer for its status now'>refresh</button>" +
         "<button type='button' class='linkish' data-edit='" + esc(p.id) + "'>edit</button></div></div>" +
       lines + sendLine +
@@ -465,7 +470,7 @@
     else if (d.expand) { expanded[d.expand] = true; renderPrinters(); }
     else if (d.edit) editPrinter(byId(d.edit));
     else if (d.cancel) send("cancel_send", { id: d.cancel });
-    else if (d.pick) { selected[d.pick] = t.checked; renderMulti(); }
+    else if (d.pick) { selected[d.pick] = t.checked; renderMulti(); renderPrinters(); }
   });
   $("btn-add").onclick = function () { editPrinter(null); };
   $("btn-refresh").onclick = function () { refresh(state.printers.map(function (p) { return p.id; })); };
