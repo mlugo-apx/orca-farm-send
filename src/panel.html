@@ -1,0 +1,312 @@
+<style>
+  body { margin: 0; padding: 10px 12px 16px; font-size: 13px; line-height: 1.35; }
+  h3 { margin: 0; font-size: 14px; }
+  .row { display: flex; align-items: center; gap: 6px; }
+  .spread { justify-content: space-between; }
+  .muted { color: var(--orca-muted); }
+  .small { font-size: 12px; }
+  button { cursor: pointer; }
+  button.quiet { background: transparent; color: var(--orca-fg); border: 1px solid var(--orca-border); }
+  button.danger { background: #c0392b; border-color: #c0392b; color: #fff; }
+  button:disabled { opacity: .45; cursor: default; }
+  .box { border: 1px solid var(--orca-border); border-radius: 6px; padding: 8px 10px; margin-top: 8px; }
+  .job-name { font-weight: 600; word-break: break-all; }
+  .warn { color: #c77700; }
+  .err { color: #d0392b; }
+  .ok { color: #2a9d55; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #999; flex: none; }
+  .dot.idle { background: #2a9d55; } .dot.printing { background: #2f7de1; } .dot.paused { background: #c77700; }
+  .dot.error { background: #d0392b; } .dot.offline { background: #888; } .dot.busy { background: #c77700; }
+  .card-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bar { height: 5px; background: var(--orca-border); border-radius: 3px; overflow: hidden; margin: 5px 0 3px; }
+  .bar > i { display: block; height: 100%; background: var(--orca-accent); width: 0; }
+  .actions { display: flex; gap: 6px; margin-top: 7px; flex-wrap: wrap; }
+  .file { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .linkish { background: none; border: none; padding: 0 2px; color: var(--orca-muted); font-size: 12px; text-decoration: underline; }
+  label.field { display: block; margin-top: 8px; font-size: 12px; }
+  label.field input, label.field select { display: block; width: 100%; box-sizing: border-box; margin-top: 3px; }
+  #overlay { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: none; align-items: flex-start; justify-content: center; padding-top: 30px; }
+  #overlay.show { display: flex; }
+  #dialog { background: var(--orca-bg); color: var(--orca-fg); border: 1px solid var(--orca-border); border-radius: 8px;
+            padding: 14px; width: calc(100% - 44px); max-width: 360px; max-height: calc(100% - 60px); overflow: auto; }
+  #dialog h4 { margin: 0 0 8px; font-size: 14px; }
+  .dialog-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 14px; flex-wrap: wrap; }
+  .check { display: flex; gap: 6px; align-items: center; margin-top: 4px; }
+  .check input { margin: 0; }
+  ul.plain { margin: 6px 0 0; padding-left: 18px; }
+</style>
+
+<div class="row spread">
+  <h3>Farm Send</h3>
+  <div class="row">
+    <button type="button" class="quiet" id="btn-import" title="Add printers from your OrcaSlicer printer presets">Import</button>
+    <button type="button" class="quiet" id="btn-add">Add printer</button>
+  </div>
+</div>
+
+<div class="box" id="job"></div>
+<div id="multi" class="box" style="display:none"></div>
+<div id="printers"></div>
+<p id="empty" class="muted" style="display:none">No printers yet. Use Import to pull them from your printer presets, or Add printer.</p>
+
+<div id="overlay"><div id="dialog"></div></div>
+
+<script>
+(function () {
+  var state = { printers: [], job: null, jobs: [], status: {}, sends: {}, slicing: false };
+  var selected = {};
+  var $ = function (id) { return document.getElementById(id); };
+
+  function esc(value) {
+    var span = document.createElement("span");
+    span.textContent = value == null ? "" : String(value);
+    // Also safe inside quoted attributes: names and file names come from presets and printers.
+    return span.innerHTML.replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+  function duration(seconds) {
+    if (seconds == null) return "";
+    seconds = Math.max(0, Math.round(seconds));
+    var h = Math.floor(seconds / 3600), m = Math.floor((seconds % 3600) / 60);
+    return h > 0 ? h + "h " + (m < 10 ? "0" : "") + m + "m" : m + "m";
+  }
+  function temp(value) {
+    if (!value) return "";
+    return Math.round(value.current) + (value.target ? "/" + Math.round(value.target) : "") + "°";
+  }
+  function send(command, extra) {
+    var message = extra || {};
+    message.command = command;
+    orca.postMessage(message);
+  }
+
+  // ---- dialogs -----------------------------------------------------------------------------
+  function showDialog(html) { $("dialog").innerHTML = html; $("overlay").className = "show"; }
+  function hideDialog() { $("overlay").className = ""; $("dialog").innerHTML = ""; }
+  $("overlay").addEventListener("click", function (event) { if (event.target === $("overlay")) hideDialog(); });
+
+  function compatible(printer) {
+    return state.job && state.job.ready && state.job.matches && state.job.matches[printer.id];
+  }
+  function blockReason(printer, start) {
+    var job = state.job, status = state.status[printer.id];
+    if (state.slicing) return "Slicing in progress";
+    if (!job) return "Slice a plate first";
+    if (!job.ready) return job.error || "Reading the sliced G-code";
+    if (!compatible(printer)) return "Sliced for " + (job.printer_model || "an unknown printer") + ", not " + printer.model;
+    if (state.sends[printer.id] && state.sends[printer.id].active) return "Send in progress";
+    if (!status || status.state === "unknown") return "Checking printer";
+    if (status.state === "offline") return "Printer is offline";
+    if (start && status.state !== "idle") return "Printer is " + (status.state_text || status.state).toLowerCase();
+    return "";
+  }
+
+  function confirmSend(printers, start) {
+    var job = state.job;
+    var names = printers.map(function (p) { return "<li>" + esc(p.name) + " <span class='muted'>(" + esc(p.address) + ")</span></li>"; }).join("");
+    var notes = "";
+    if (job.stale) notes += "<p class='warn small'>The plate or a preset changed after this slice. Re-slice if the change matters.</p>";
+    if (job.post_process) notes += "<p class='warn small'>This process preset has post-processing scripts. Farm Send sends the G-code before those scripts run.</p>";
+    var options = "";
+    if (start && printers.some(function (p) { return p.kind === "elegoo_cc2"; })) {
+      options = "<div class='check'><input type='checkbox' id='opt-level' checked><label for='opt-level'>Bed leveling before print (CC2)</label></div>" +
+                "<div class='check'><input type='checkbox' id='opt-lapse'><label for='opt-lapse'>Time-lapse (CC2)</label></div>";
+    }
+    showDialog(
+      "<h4>" + (start ? "Start printing?" : "Upload file?") + "</h4>" +
+      "<div class='job-name small'>" + esc(job.display_name) + "</div>" +
+      "<div class='muted small'>" + esc(job.summary) + "</div>" +
+      "<p style='margin:10px 0 0'>" + (start ? "The print starts immediately on:" : "The file is uploaded, not printed, to:") + "</p>" +
+      "<ul class='plain'>" + names + "</ul>" + options + notes +
+      (start ? "<p class='small muted'>Make sure each bed is clear.</p>" : "") +
+      "<div class='dialog-actions'><button type='button' class='quiet' id='dlg-cancel'>Cancel</button>" +
+      "<button type='button' id='dlg-ok'" + (start ? " class='danger'" : "") + ">" + (start ? "Start print" : "Upload") + "</button></div>");
+    $("dlg-cancel").onclick = hideDialog;
+    $("dlg-ok").onclick = function () {
+      var options = { bed_leveling: $("opt-level") ? $("opt-level").checked : true, timelapse: $("opt-lapse") ? $("opt-lapse").checked : false };
+      send("send", { printer_ids: printers.map(function (p) { return p.id; }), start: start, job_id: job.id, options: options });
+      hideDialog();
+    };
+  }
+
+  function editPrinter(printer) {
+    var p = printer || { id: "", name: "", kind: "moonraker", address: "", model: "", access_code: "", api_key: "" };
+    showDialog(
+      "<h4>" + (printer ? "Edit printer" : "Add printer") + "</h4>" +
+      "<label class='field'>Name<input id='f-name' value='" + esc(p.name) + "' placeholder='U1 #3'></label>" +
+      "<label class='field'>Type<select id='f-kind'>" +
+        "<option value='moonraker'>Snapmaker U1 / Moonraker</option>" +
+        "<option value='elegoo_cc2'>Elegoo Centauri Carbon 2</option></select></label>" +
+      "<label class='field'>IP address or host name<input id='f-address' value='" + esc(p.address) + "' placeholder='192.168.0.62'></label>" +
+      "<label class='field' id='row-code'>Access code<input id='f-code' value='" + esc(p.access_code) + "' placeholder='shown on the printer screen'></label>" +
+      "<label class='field' id='row-key'>API key (leave empty if none)<input id='f-key' value='" + esc(p.api_key) + "'></label>" +
+      "<label class='field'>Printer model<input id='f-model' value='" + esc(p.model) + "' placeholder='filled in by Test connection'></label>" +
+      "<p class='small muted' style='margin:6px 0 0'>Only G-code sliced for this model can be sent here.</p>" +
+      "<p class='small' id='f-result' style='min-height:16px;margin:8px 0 0'></p>" +
+      "<div class='dialog-actions'>" +
+        (printer ? "<button type='button' class='quiet' id='dlg-delete' style='margin-right:auto'>Remove</button>" : "") +
+        "<button type='button' class='quiet' id='dlg-test'>Test connection</button>" +
+        "<button type='button' class='quiet' id='dlg-cancel'>Cancel</button>" +
+        "<button type='button' id='dlg-ok'>Save</button></div>");
+    $("f-kind").value = p.kind;
+    function sync() {
+      var cc2 = $("f-kind").value === "elegoo_cc2";
+      $("row-code").style.display = cc2 ? "block" : "none";
+      $("row-key").style.display = cc2 ? "none" : "block";
+    }
+    function collect() {
+      return { id: p.id, name: $("f-name").value, kind: $("f-kind").value, address: $("f-address").value,
+               model: $("f-model").value, access_code: $("f-code").value, api_key: $("f-key").value };
+    }
+    $("f-kind").onchange = sync; sync();
+    $("dlg-cancel").onclick = hideDialog;
+    $("dlg-test").onclick = function () {
+      $("f-result").className = "small muted"; $("f-result").textContent = "Testing...";
+      send("test_printer", { printer: collect() });
+    };
+    $("dlg-ok").onclick = function () {
+      $("f-result").className = "small muted"; $("f-result").textContent = "Saving...";
+      send("save_printer", { printer: collect() });
+    };
+    if (printer) $("dlg-delete").onclick = function () {
+      showDialog("<h4>Remove " + esc(p.name) + "?</h4><p class='small muted'>Only removes it from this panel.</p>" +
+        "<div class='dialog-actions'><button type='button' class='quiet' id='dlg-cancel'>Cancel</button>" +
+        "<button type='button' class='danger' id='dlg-ok'>Remove</button></div>");
+      $("dlg-cancel").onclick = hideDialog;
+      $("dlg-ok").onclick = function () { send("delete_printer", { id: p.id }); hideDialog(); };
+    };
+  }
+
+  // ---- rendering ---------------------------------------------------------------------------
+  function renderJob() {
+    var job = state.job, html;
+    if (state.slicing) {
+      html = "<div class='muted'>Slicing...</div>";
+    } else if (!job) {
+      html = "<div class='muted'>No sliced plate yet. Slice a plate and it appears here.</div>";
+    } else if (!job.ready) {
+      html = "<div class='" + (job.error ? "err" : "muted") + "'>" + esc(job.error || "Reading the sliced G-code...") + "</div>";
+    } else {
+      html = "<div class='job-name'>" + esc(job.display_name) + "</div>" +
+             "<div class='muted small'>" + esc(job.summary) + "</div>" +
+             "<div class='muted small'>For " + esc(job.printer_model || "unknown printer") + " · sliced " + esc(job.sliced_at) + "</div>" +
+             (job.stale ? "<div class='warn small'>Plate or preset changed since this slice.</div>" : "") +
+             (job.post_process ? "<div class='warn small'>Post-processing scripts are not applied.</div>" : "");
+      if (state.jobs.length > 1) {
+        html += "<label class='field'>Other sliced plates<select id='job-pick'>" + state.jobs.map(function (j) {
+          return "<option value='" + esc(j.id) + "'" + (j.id === job.id ? " selected" : "") + ">" + esc(j.display_name) + " (" + esc(j.sliced_at) + ")</option>";
+        }).join("") + "</select></label>";
+      }
+    }
+    $("job").innerHTML = html;
+    if ($("job-pick")) $("job-pick").onchange = function () { send("select_job", { job_id: this.value }); };
+  }
+
+  function renderMulti() {
+    var ids = Object.keys(selected).filter(function (id) { return selected[id]; });
+    var chosen = state.printers.filter(function (p) { return ids.indexOf(p.id) >= 0; });
+    if (chosen.length < 2) { $("multi").style.display = "none"; return; }
+    var uploadBlocked = chosen.some(function (p) { return blockReason(p, false); });
+    var startBlocked = chosen.some(function (p) { return blockReason(p, true); });
+    $("multi").style.display = "block";
+    $("multi").innerHTML = "<div class='row spread'><span>" + chosen.length + " printers selected</span>" +
+      "<button type='button' class='linkish' id='multi-clear'>clear</button></div>" +
+      "<div class='actions'><button type='button' class='quiet' id='multi-upload'" + (uploadBlocked ? " disabled" : "") + ">Upload to all</button>" +
+      "<button type='button' id='multi-start'" + (startBlocked ? " disabled" : "") + ">Upload and print on all</button></div>" +
+      (startBlocked && !uploadBlocked ? "<div class='muted small' style='margin-top:4px'>Print is available when every selected printer is idle.</div>" : "");
+    $("multi-clear").onclick = function () { selected = {}; render(); };
+    $("multi-upload").onclick = function () { confirmSend(chosen, false); };
+    $("multi-start").onclick = function () { confirmSend(chosen, true); };
+  }
+
+  function renderPrinters() {
+    $("empty").style.display = state.printers.length ? "none" : "block";
+    $("printers").innerHTML = state.printers.map(function (p) {
+      var status = state.status[p.id] || { state: "unknown", state_text: "Checking..." };
+      var sending = state.sends[p.id];
+      var uploadWhy = blockReason(p, false), startWhy = blockReason(p, true);
+      var lines = "";
+      if (status.state === "printing" || status.state === "paused") {
+        var pct = status.progress == null ? null : Math.round(status.progress);
+        lines += "<div class='file small' title='" + esc(status.filename) + "'>" + esc(status.filename) + "</div>" +
+                 "<div class='bar'><i style='width:" + (pct || 0) + "%'></i></div>" +
+                 "<div class='row spread small muted'><span>" + (pct == null ? "" : pct + "%") + "</span><span>" +
+                 (status.remaining_s == null ? "" : duration(status.remaining_s) + " left") + "</span></div>";
+      }
+      var temps = [];
+      if (status.nozzle) temps.push("Nozzle " + temp(status.nozzle));
+      if (status.bed) temps.push("Bed " + temp(status.bed));
+      if (temps.length) lines += "<div class='small muted'>" + temps.join(" · ") + "</div>";
+      if (status.state === "offline" && status.detail) lines += "<div class='small muted'>" + esc(status.detail) + "</div>";
+      var sendLine = "";
+      if (sending) {
+        if (sending.active) {
+          sendLine = "<div class='small'>" + esc(sending.text) + "</div><div class='bar'><i style='width:" + Math.round(sending.percent || 0) + "%'></i></div>" +
+                     "<button type='button' class='linkish' data-cancel='" + esc(p.id) + "'>cancel</button>";
+        } else {
+          sendLine = "<div class='small " + (sending.ok ? "ok" : "err") + "'>" + esc(sending.text) + "</div>";
+        }
+      }
+      var hint = "";
+      if (!sending || !sending.active) {
+        if (uploadWhy) hint = uploadWhy; else if (startWhy) hint = "Print: " + startWhy.charAt(0).toLowerCase() + startWhy.slice(1);
+      }
+      return "<div class='box'>" +
+        "<div class='row spread'><div class='row' style='min-width:0'>" +
+          "<input type='checkbox' data-pick='" + esc(p.id) + "'" + (selected[p.id] ? " checked" : "") + " title='Select for sending to several printers'>" +
+          "<span class='dot " + esc(status.state) + "'></span><span class='card-title'>" + esc(p.name) + "</span></div>" +
+          "<div class='row'><span class='small muted'>" + esc(status.state_text || status.state) + "</span>" +
+          "<button type='button' class='linkish' data-edit='" + esc(p.id) + "'>edit</button></div></div>" +
+        lines + sendLine +
+        "<div class='actions'>" +
+          "<button type='button' class='quiet' data-upload='" + esc(p.id) + "'" + (uploadWhy ? " disabled" : "") + ">Upload</button>" +
+          "<button type='button' data-start='" + esc(p.id) + "'" + (startWhy ? " disabled" : "") + ">Upload and print</button></div>" +
+        (hint ? "<div class='small muted' style='margin-top:4px'>" + esc(hint) + "</div>" : "") +
+        "</div>";
+    }).join("");
+  }
+
+  function render() { renderJob(); renderMulti(); renderPrinters(); }
+
+  function byId(id) { return state.printers.filter(function (p) { return p.id === id; })[0]; }
+
+  $("printers").addEventListener("click", function (event) {
+    var t = event.target, d = t.dataset || {};
+    if (d.upload) confirmSend([byId(d.upload)], false);
+    else if (d.start) confirmSend([byId(d.start)], true);
+    else if (d.edit) editPrinter(byId(d.edit));
+    else if (d.cancel) send("cancel_send", { id: d.cancel });
+    else if (d.pick) { selected[d.pick] = t.checked; renderMulti(); }
+  });
+  $("btn-add").onclick = function () { editPrinter(null); };
+  $("btn-import").onclick = function () { send("import_presets"); };
+
+  orca.onMessage(function (message) {
+    if (!message) return;
+    if (message.command === "state") {
+      ["printers", "job", "jobs", "slicing"].forEach(function (key) { if (key in message) state[key] = message[key]; });
+      if (message.status) state.status = message.status;
+      if (message.sends) state.sends = message.sends;
+      render();
+    } else if (message.command === "status") {
+      state.status[message.id] = message.status; renderMulti(); renderPrinters();
+    } else if (message.command === "send") {
+      state.sends[message.id] = message.send; renderMulti(); renderPrinters();
+    } else if (message.command === "form_result") {
+      var out = $("f-result");
+      if (message.saved) { hideDialog(); return; }
+      if (!out) return;
+      out.className = "small " + (message.ok ? "ok" : "err");
+      out.textContent = message.text;
+      if (message.model && $("f-model") && !$("f-model").value) $("f-model").value = message.model;
+    } else if (message.command === "import_result") {
+      var rows = (message.added || []).map(function (n) { return "<li>" + esc(n) + "</li>"; }).join("");
+      showDialog("<h4>Import from printer presets</h4><p>" + esc(message.text) + "</p>" + (rows ? "<ul class='plain'>" + rows + "</ul>" : "") +
+        "<div class='dialog-actions'><button type='button' id='dlg-ok'>OK</button></div>");
+      $("dlg-ok").onclick = hideDialog;
+    }
+  });
+
+  send("init");
+  setInterval(function () { send("poll"); }, 4000);
+})();
+</script>
