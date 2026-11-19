@@ -18,7 +18,6 @@ import http.client
 import json
 import os
 import re
-import shutil
 import socket
 import struct
 import tempfile
@@ -1087,6 +1086,17 @@ class FarmApp:
             pass
 
     @staticmethod
+    def _copy_file(source, target):
+        """Plain read-then-write copy.
+
+        shutil.copyfile is avoided on purpose: OrcaSlicer's plugin audit treats it as a read/write
+        request on BOTH paths and prompts for write access to its temp G-code. Opening the source
+        read-only needs just the read grant the plugin already declares."""
+        with open(source, "rb") as reader, open(target, "wb") as writer:
+            for block in iter(lambda: reader.read(1024 * 1024), b""):
+                writer.write(block)
+
+    @staticmethod
     def _remove_file(path):
         try:
             os.remove(path)
@@ -1135,7 +1145,7 @@ class FarmApp:
         try:
             os.makedirs(self.slice_dir, exist_ok=True)
             before = os.stat(job["source"])
-            shutil.copyfile(job["source"], copy + ".part")
+            self._copy_file(job["source"], copy + ".part")
             after = os.stat(job["source"])
             if (before.st_size, before.st_mtime) != (after.st_size, after.st_mtime) or os.path.getsize(copy + ".part") != after.st_size:
                 raise FarmError("The plate was sliced again while it was being read. The newer slice replaces it.")
@@ -1762,10 +1772,7 @@ PANEL_HTML = r"""<style>
 
   function renderCombos() {
     var current = state.current, note = state.combo_note || {}, busy = !!note.busy;
-    var html = "<div class='row spread'><span class='card-title'>Slice for</span>" +
-      "<button type='button' class='linkish' id='combo-save'" + (current && current.model ? "" : " disabled") +
-      " title='Remember the printer, process and filament presets selected in OrcaSlicer right now'>" +
-      "remember current" + (current && current.model ? " for " + esc(current.model) : "") + "</button></div>";
+    var html = "<div class='card-title'>Slice for</div>";
     if (!state.combos.length) {
       html += "<div class='muted small' style='margin-top:4px'>Select the printer, process and filament you use for one printer type, " +
               "then click remember. One click brings them back later.</div>";
@@ -1773,14 +1780,18 @@ PANEL_HTML = r"""<style>
     html += state.combos.map(function (c) {
       var detail = [c.process].concat(c.filaments.length ? [c.filaments[0] + (c.filaments.length > 1 ? " +" + (c.filaments.length - 1) : "")] : []);
       return "<div class='row spread' style='margin-top:7px;gap:8px'>" +
-        "<div style='min-width:0'><div class='file'><b>" + esc(c.label) + "</b>" +
-          (c.active ? " <span class='ok small'>selected</span>" : "") + "</div>" +
+        "<div style='min-width:0'><div class='file'><b>" + esc(c.label) + "</b></div>" +
         "<div class='file small muted' title='" + esc(c.printer + " | " + c.process + " | " + c.filaments.join(", ")) + "'>" + esc(detail.join(" · ")) + "</div>" +
         "<div class='file small muted'>" + (c.printers.length ? esc(c.printers.join(", ")) : "no printers of this type") + "</div></div>" +
         "<div class='row' style='flex:none'>" +
-        "<button type='button' class='quiet' data-combo-load='" + esc(c.key) + "'" + (busy || c.active || !state.can_switch ? " disabled" : "") + ">Use</button>" +
+        (c.active ? "<span class='ok small'>in use</span>"
+                  : "<button type='button' class='quiet' data-combo-load='" + esc(c.key) + "'" + (busy || !state.can_switch ? " disabled" : "") + ">Use</button>") +
         "<button type='button' class='linkish' data-combo-del='" + esc(c.key) + "' title='Forget these presets'>x</button></div></div>";
     }).join("");
+    html += "<div style='margin-top:7px'><button type='button' class='linkish' id='combo-save' style='padding:0;text-align:left'" +
+      (current && current.model ? "" : " disabled") +
+      " title='Remember the printer, process and filament presets selected in OrcaSlicer right now'>" +
+      "remember current presets" + (current && current.model ? " for " + esc(current.model) : "") + "</button></div>";
     if (note.text) html += "<div class='small " + (note.ok ? "muted" : "err") + "' style='margin-top:6px'>" + esc(note.text) + "</div>";
     $("combos").innerHTML = html;
     $("combo-save").onclick = function () { send("save_combo"); };

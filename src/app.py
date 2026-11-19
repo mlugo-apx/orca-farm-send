@@ -2,7 +2,6 @@
 shell supplies post()/notify() and forwards panel messages and slicer events."""
 # BUNDLE-STRIP-BEGIN
 import os
-import shutil
 import threading
 import time
 import uuid
@@ -68,6 +67,17 @@ class FarmApp:
             pass
 
     @staticmethod
+    def _copy_file(source, target):
+        """Plain read-then-write copy.
+
+        shutil.copyfile is avoided on purpose: OrcaSlicer's plugin audit treats it as a read/write
+        request on BOTH paths and prompts for write access to its temp G-code. Opening the source
+        read-only needs just the read grant the plugin already declares."""
+        with open(source, "rb") as reader, open(target, "wb") as writer:
+            for block in iter(lambda: reader.read(1024 * 1024), b""):
+                writer.write(block)
+
+    @staticmethod
     def _remove_file(path):
         try:
             os.remove(path)
@@ -116,7 +126,7 @@ class FarmApp:
         try:
             os.makedirs(self.slice_dir, exist_ok=True)
             before = os.stat(job["source"])
-            shutil.copyfile(job["source"], copy + ".part")
+            self._copy_file(job["source"], copy + ".part")
             after = os.stat(job["source"])
             if (before.st_size, before.st_mtime) != (after.st_size, after.st_mtime) or os.path.getsize(copy + ".part") != after.st_size:
                 raise FarmError("The plate was sliced again while it was being read. The newer slice replaces it.")

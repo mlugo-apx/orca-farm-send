@@ -67,6 +67,8 @@ python3 tests/hardware_check.py --upload "U1 #2"   # 1 KB upload, list, delete. 
 
 ## Verification status (2026-11-18, OrcaSlicer 2.5.1, all five printers mid-print)
 
+In-app checks ran in an OrcaSlicer instance on a hidden virtual display (Xvfb), started through the desktop launcher.
+
 | What | How it was verified |
 |---|---|
 | Status, all 5 printers | Real printers |
@@ -78,5 +80,7 @@ python3 tests/hardware_check.py --upload "U1 #2"   # 1 KB upload, list, delete. 
 | Slice capture event | Inside OrcaSlicer 2.5.1: event received with the temp path |
 | CC2 upload | Fake printer only. Both CC2s were printing |
 | Start print, CC2 and U1 | Fake printers only. No real print was started |
-| Reading the captured G-code inside OrcaSlicer | Not yet. Permission is now granted; needs one slice in the app |
-| Slice-for preset switching | Fake host only. Not yet clicked inside OrcaSlicer |
+| Slice capture, copy and plate display | Inside OrcaSlicer 2.5.1 |
+| Slice for U1, switch presets, slice for CC2, both plates kept | Inside OrcaSlicer 2.5.1 |
+| Slice-for "Use" switching printer, filament slots and process, both directions | Inside OrcaSlicer 2.5.1 |
+| Select all with a plate, grouped confirmation | Inside OrcaSlicer 2.5.1, cancelled before sending |
