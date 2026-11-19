@@ -519,6 +519,61 @@ class AppTests(unittest.TestCase):
                          ("error", "P reports a problem while printing (code 205)"))
         self.assertIsNone(core.status_event(dict(printing, errors=[205]), dict(printing, errors=[205]), "P"))
 
+    def test_bed_must_be_cleared_before_the_next_print(self):
+        self.slice()
+        (sent,) = self.send([self.p_u1], True)                 # first print: the bed is not flagged
+        self.assertTrue(sent["ok"], sent)
+        self.assertFalse(self._read(self.p_u1)["needs_clearing"])   # printing: nothing to clear yet
+        self.u1.state = "complete"
+        self.assertTrue(self._read(self.p_u1)["needs_clearing"])
+        started = list(self.u1.started)
+        (sent,) = self.send([self.p_u1], True)                 # a second print would land on the first
+        self.assertFalse(sent["ok"])
+        self.assertIn("clear the bed", sent["text"])
+        self.assertEqual(self.u1.started, started)
+        (sent,) = self.send([self.p_u1], False)                # uploading without printing is harmless
+        self.assertTrue(sent["ok"], sent)
+        self.app.handle({"command": "bed_cleared", "id": self.p_u1["id"]})
+        self.assertFalse(self.app.status[self.p_u1["id"]]["needs_clearing"])
+        self.assertFalse(self._read(self.p_u1)["needs_clearing"])   # still "complete": not flagged again
+        (sent,) = self.send([self.p_u1], True)
+        self.assertTrue(sent["ok"], sent)
+        self.assertEqual(len(self.u1.started), len(started) + 1)
+
+    def test_bed_flag_survives_a_restart_and_is_shared_between_windows(self):
+        self.u1.state = "printing"
+        self._read(self.p_u1)
+        self.u1.state = "complete"
+        other = FarmApp(self.folder.name, lambda message: None)          # a second window, or after a restart
+        self.assertTrue(other.beds.get(self.p_u1["id"]))
+        self.app.handle({"command": "bed_cleared", "id": self.p_u1["id"]})
+        self.assertFalse(other.beds.get(self.p_u1["id"]))                # cleared here, seen there
+        if os.name == "posix":
+            mode = os.stat(os.path.join(self.folder.name, "farm_send_beds.json")).st_mode & 0o777
+            self.assertEqual(mode, 0o600)
+
+    def test_bed_rule(self):
+        rule = core.bed_needs_clearing
+        self.assertTrue(rule(None, {"state": "printing"}))
+        self.assertTrue(rule(False, {"state": "paused"}))
+        self.assertIsNone(rule(True, {"state": "idle", "last_result": ""}))        # stays until the user clears it
+        self.assertIsNone(rule(False, {"state": "idle", "last_result": "complete"}))  # cleared: old result is not news
+        self.assertTrue(rule(None, {"state": "idle", "last_result": "complete"}))  # first seen with a finished print
+        self.assertFalse(rule(None, {"state": "idle", "last_result": ""}))
+        self.assertIsNone(rule(True, {"state": "offline"}))
+
+    def test_types_list_one_row_per_printer_type(self):
+        types = {row["label"]: row for row in self.app.snapshot()["types"]}
+        self.assertEqual(sorted(types), ["Centauri Carbon 2", "Snapmaker U1"])
+        self.assertEqual(types["Snapmaker U1"]["printers"], ["U1 #1", "U1 #2"])
+        self.assertIsNone(types["Snapmaker U1"]["combo"])
+        job = self.slice()
+        snapshot = self.app.snapshot()
+        (view,) = snapshot["jobs"]
+        u1 = [row for row in snapshot["types"] if row["label"] == "Snapmaker U1"][0]
+        self.assertEqual(view["key"], u1["key"])              # the panel matches plate to type by this
+        self.assertEqual(job["key"], u1["key"])
+
     def test_refresh_one_printer_and_all(self):
         self.app.handle({"command": "poll"})
         self.assertTrue(wait_for(lambda: len(self._statuses()) == 3))

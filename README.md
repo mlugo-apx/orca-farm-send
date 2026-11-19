@@ -13,21 +13,23 @@ Built for OrcaSlicer 2.5.1's Python plugin system.
 
 ## Use
 
-1. Slice the plate once for each printer type you want to print on. Every slice is kept in the panel, one per type, with time, grams, layers and the type it was sliced for.
-2. On a printer card click **Upload**, or **Upload and print**, and confirm. The printer gets the plate sliced for its type.
+The panel reads top to bottom in the order you work:
 
-To send everything at once, click **select all with a plate**, then **Upload and print on all**.
+1. **Plates** has one row per printer type. Each row shows the plate held for that type (time, grams, layers, toolhead and color), or "Not sliced yet". Slice once for each type you want to print on.
+2. The printer list is grouped: **Needs attention** (paused, error, offline, or a finished print still on the bed), **Available** (idle with a clear bed) and **Busy** (one line each; click a line for details).
+3. On a printer card click **Upload**, or **Upload and print**, and confirm. The printer gets the plate sliced for its type.
+
+To send everything at once, click **select all available**, then **Upload and print on all**.
 The U1s get the U1 plate and the CC2s get the CC2 plate, in one action.
 
 The plugin keeps its own copy of each slice, because OrcaSlicer overwrites its temp G-code on the next slice.
 Slicing again for a type replaces that type's plate only.
 You can re-arrange the bed between types: the "plate changed" warning only ever applies to the most recent slice. Copies are deleted when the project closes.
 
-**Slice for (presets per printer type)**
+**Presets per printer type**
 
-Select the printer, process and filament presets you use for one printer type, then click **remember current**.
-The panel keeps one entry per type, for example one for the Centauri Carbon 2 and one for the U1.
-**Use** switches all three OrcaSlicer selections back in one click. Then slice.
+Select the printer, process and filament presets you use for one printer type, click **presets** on that type's row, then **Remember current**.
+**Use presets** on the row then switches all three OrcaSlicer selections back in one click. Then slice.
 If a preset has unsaved edits, OrcaSlicer shows its normal save or discard dialog first.
 The plugin cannot press Slice for you.
 
@@ -38,6 +40,7 @@ The plugin cannot press Slice for you.
 - Every start asks for confirmation and names the printers.
 - Uploaded files are named `<object>_<filament>_<time>_<YYYYMMDD-HHMMSS>.gcode`, so nothing is overwritten.
 - A printer with no plate sliced for its type cannot be sent to.
+- After a print ends, the printer is held under Needs attention and cannot be started again until you click **Bed cleared** on its card. Uploading without printing is still allowed. This is remembered across restarts and shared between OrcaSlicer windows. It only knows about prints the panel saw, or a printer that reports a completed print when first seen, so still look at the bed.
 
 ## Install
 
@@ -84,6 +87,7 @@ In-app checks ran in an OrcaSlicer instance on a hidden virtual display (Xvfb), 
 | One CC2 slot shared by all windows | Real CC1 and CC2: 8 processes at once, 96 requests, no errors, one client id per printer |
 | Refresh one printer and Refresh all, finish time, last-checked time | Clicked inside OrcaSlicer 2.5.1 against all five real printers |
 | Notices for finished, cancelled, paused, error | Fake printers. Real CC2s confirmed to report 100% when idle after a completed print; no real print has ended with the panel open yet |
+| Plates per printer type, grouped printer list, expandable busy rows, presets dialog, Bed cleared | Clicked inside OrcaSlicer 2.5.1 against all five real printers |
 | Time left on a U1 | Real U1s: 4h55m shown 44 minutes into a 5h14m job (was 11 to 12 hours) |
 | CC2 slot leak fixed | Real CC2: 40 polls in 65 s, second client still connects |
 | Install, activate, panel, Import, live cards | Inside OrcaSlicer 2.5.1 |

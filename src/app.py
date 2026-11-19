@@ -6,7 +6,7 @@ import threading
 import time
 import uuid
 
-from core import (KIND_CC2, WATCHED_STATES, FarmError, PrinterStore, can_start, job_filename, make_client, model_key, model_matches,
+from core import (KIND_CC2, WATCHED_STATES, BedLog, FarmError, bed_needs_clearing, PrinterStore, can_start, job_filename, make_client, model_key, model_matches,
                   parse_gcode_meta, presets_to_printers, set_shared_dir, status_event, strip_model_suffix, validate_printer)
 # BUNDLE-STRIP-END
 
@@ -32,6 +32,7 @@ class FarmApp:
                  read_presets=None, apply_presets=None):
         self.store = PrinterStore(os.path.join(storage_dir, "farm_send_printers.json"))
         set_shared_dir(storage_dir)   # every OrcaSlicer window shares one client slot per CC2
+        self.beds = BedLog(os.path.join(storage_dir, "farm_send_beds.json"))
         self._post = post
         self._notify = notify or (lambda level, text: None)
         self.preset_dirs = list(preset_dirs)
@@ -216,7 +217,7 @@ class FarmApp:
         if meta.get("size"):
             bits.append("%.1f MB" % (meta["size"] / 1048576.0))
         return {
-            "id": job["id"], "ready": job["ready"], "error": job["error"], "stale": job["stale"],
+            "id": job["id"], "ready": job["ready"], "error": job["error"], "stale": job["stale"], "key": job.get("key", ""),
             "display_name": self._job_base_name(job), "summary": " · ".join(bits),
             "printer_model": meta.get("printer_model", ""), "sliced_at": _clock(job["captured_at"]),
             "post_process": bool((meta.get("post_process") or "").strip()),
@@ -241,6 +242,7 @@ class FarmApp:
                 "status": dict(self.status),
                 "sends": dict(self.sends),
                 "combos": self._combo_views(),
+                "types": self._type_views(),
                 "current": dict(self.current) if self.current else None,
                 "combo_note": dict(self.combo_note),
                 "can_switch": self._apply_presets is not None,
@@ -257,6 +259,26 @@ class FarmApp:
                           "active": bool(active),
                           "printers": [p["name"] for p in self.store.printers if model_key(p.get("model")) == key]})
         return views
+
+    def _type_views(self):
+        """One row per printer type the user works with: its printers, its remembered presets and
+        whether OrcaSlicer is set to that type right now. The panel adds the plate held for it."""
+        current_key = model_key((self.current or {}).get("model") or "")
+        combos = {view["key"]: view for view in self._combo_views()}
+        rows = {}
+        for printer in self.store.printers:
+            key = model_key(printer.get("model"))
+            if key:
+                rows.setdefault(key, {"key": key, "label": printer.get("model", ""), "printers": []})["printers"].append(printer["name"])
+        for key, combo in combos.items():
+            rows.setdefault(key, {"key": key, "label": combo["label"], "printers": []})["label"] = combo["label"]
+        for job in self.jobs:
+            if job["ready"] and job.get("key") and not job.get("settled"):
+                rows.setdefault(job["key"], {"key": job["key"], "label": job["meta"].get("printer_model", ""), "printers": []})
+        for key, row in rows.items():
+            row["combo"] = combos.get(key)
+            row["selected"] = bool(current_key) and current_key == key
+        return sorted(rows.values(), key=lambda row: row["label"].lower())
 
     def refresh_current(self):
         """Re-read OrcaSlicer's selected presets. UI thread only. Returns True when they changed."""
@@ -290,6 +312,19 @@ class FarmApp:
         if self.refresh_current():
             self.post_state()
         self.poll()
+
+    def _cmd_bed_cleared(self, message):
+        """The user took the finished print off this printer's bed."""
+        printer_id = message.get("id")
+        with self.lock:
+            if self.store.get(printer_id) is None:
+                return
+            self.beds.set(printer_id, False)
+            status = self.status.get(printer_id)
+            if status is not None:
+                status = self.status[printer_id] = dict(status, needs_clearing=False)
+        if status is not None:
+            self.post({"command": "status", "id": printer_id, "status": status})
 
     def _cmd_refresh(self, message):
         """Refresh button: ask now instead of waiting for the next timed poll. One printer, or all."""
@@ -381,6 +416,7 @@ class FarmApp:
             self.store.remove(printer_id)
             for table in (self.status, self._status_at, self.sends, self._watched, self.notices):
                 table.pop(printer_id, None)
+            self.beds.forget(printer_id)
         self.post_state()
 
     def _cmd_import_presets(self, message):
@@ -421,6 +457,9 @@ class FarmApp:
                 if printer is None:
                     continue
                 if self.sends.get(printer_id, {}).get("active"):
+                    continue
+                if start and self.beds.get(printer_id) and self.status.get(printer_id, {}).get("state") == "idle":
+                    self._set_send(printer_id, False, "Not started: clear the bed, then click Bed cleared.", ok=False)
                     continue
                 job = self._job_for(printer)
                 if job is None:
@@ -552,6 +591,10 @@ class FarmApp:
                     del self.notices[printer_id]
             if printer_id in self.notices:
                 status["notice"] = self.notices[printer_id]
+            change = bed_needs_clearing(self.beds.get(printer_id), status)
+            if change is not None:
+                self.beds.set(printer_id, change)
+            status["needs_clearing"] = status.get("state") == "idle" and bool(self.beds.get(printer_id))
             self.status[printer_id] = status
             # "Started <file>" is only true while that print runs. Once the printer is idle again
             # (finished or cancelled) the line would be stale, so it is dropped.

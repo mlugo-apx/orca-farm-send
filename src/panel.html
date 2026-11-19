@@ -22,6 +22,10 @@
   .bar > i { display: block; height: 100%; background: var(--orca-accent); width: 0; }
   .actions { display: flex; gap: 6px; margin-top: 7px; flex-wrap: wrap; }
   .file { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .group { margin: 14px 0 0; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--orca-muted); }
+  .group + .box { margin-top: 5px; }
+  .slim { padding: 6px 10px; cursor: pointer; }
+  .type + .type { margin-top: 9px; padding-top: 9px; border-top: 1px solid var(--orca-border); }
   .linkish { background: none; border: none; padding: 0 2px; color: var(--orca-muted); font-size: 12px; text-decoration: underline; }
   label.field { display: block; margin-top: 8px; font-size: 12px; }
   label.field input, label.field select { display: block; width: 100%; box-sizing: border-box; margin-top: 3px; }
@@ -45,7 +49,6 @@
   </div>
 </div>
 
-<div class="box" id="combos"></div>
 <div class="box" id="job"></div>
 <div id="multi" class="box" style="display:none"></div>
 <div id="printers"></div>
@@ -56,8 +59,9 @@
 <script>
 (function () {
   var state = { printers: [], jobs: [], job_for: {}, status: {}, sends: {}, slicing: false,
-                combos: [], current: null, combo_note: { text: "" }, can_switch: false };
+                combos: [], types: [], current: null, combo_note: { text: "" }, can_switch: false };
   var selected = {};
+  var expanded = {};   // busy printers shown as a full card instead of one line
   var $ = function (id) { return document.getElementById(id); };
 
   function esc(value) {
@@ -157,6 +161,7 @@
     if (!status || status.state === "unknown") return "Checking printer";
     if (status.state === "offline") return "Printer is offline";
     if (start && status.state !== "idle") return "Printer is " + (status.state_text || status.state).toLowerCase();
+    if (start && status.needs_clearing) return "Clear the bed, then click Bed cleared";
     return "";
   }
 
@@ -253,70 +258,89 @@
   }
 
   // ---- rendering ---------------------------------------------------------------------------
+  // Plates: one row per printer type, with the plate held for it or a way to slice one.
+  function plateFor(type) {
+    return state.jobs.filter(function (j) { return j.ready && j.key === type.key; })[0] || null;
+  }
+  function plateHtml(job) {
+    return "<div class='job-name'>" + esc(job.display_name) + "</div>" +
+      "<div class='muted small'>" + esc(job.summary) + " \u00b7 sliced " + esc(job.sliced_at) + "</div>" +
+      filamentLines(job) +
+      (job.presets ? "<div class='muted small file' title='" + esc(job.presets) + "'>" + esc(job.presets) + "</div>" : "") +
+      (job.stale ? "<div class='warn small'>Plate changed since this slice. Slice again if this type should get the change.</div>" : "") +
+      (job.post_process ? "<div class='warn small'>Post-processing scripts are not applied.</div>" : "");
+  }
   function renderJob() {
-    var html = "";
-    if (state.slicing) html += "<div class='muted'>Slicing...</div>";
-    if (!state.jobs.length && !state.slicing) {
-      html += "<div class='muted'>No sliced plate yet. Slice once for each printer type; every slice is kept here until you send.</div>";
+    var note = state.combo_note || {}, busy = !!note.busy;
+    var html = "<div class='card-title'>Plates</div>";
+    if (state.slicing) html += "<div class='muted small' style='margin-top:4px'>Slicing...</div>";
+    state.jobs.forEach(function (job) {   // a slice still being read, or one that could not be used
+      if (!job.ready) html += "<div class='small " + (job.error ? "err" : "muted") + "' style='margin-top:4px'>" +
+                              esc(job.error || "Reading the sliced G-code...") + "</div>";
+    });
+    if (!state.types.length) {
+      html += "<div class='muted small' style='margin-top:4px'>Add your printers, then slice once for each printer type. " +
+              "Every slice is kept here until you send it.</div>";
     }
-    html += state.jobs.map(function (job, index) {
-      var top = (index || state.slicing) ? " style='margin-top:8px;padding-top:8px;border-top:1px solid var(--orca-border)'" : "";
-      if (!job.ready) {
-        return "<div" + top + " class='" + (job.error ? "err" : "muted") + "'>" + esc(job.error || "Reading the sliced G-code...") + "</div>";
-      }
-      return "<div" + top + "><div class='job-name'>" + esc(job.display_name) + "</div>" +
-        "<div class='muted small'>" + esc(job.summary) + "</div>" +
-        "<div class='small'>For <b>" + esc(job.printer_model || "unknown printer") + "</b><span class='muted'> · sliced " + esc(job.sliced_at) +
-          (job.printers.length ? " · " + esc(job.printers.join(", ")) : " · no printer of this type") + "</span></div>" +
-        filamentLines(job) +
-        (job.presets ? "<div class='muted small file' title='" + esc(job.presets) + "'>" + esc(job.presets) + "</div>" : "") +
-        (job.stale ? "<div class='warn small'>Plate changed since this slice. Slice again if this type should get the change.</div>" : "") +
-        (job.post_process ? "<div class='warn small'>Post-processing scripts are not applied.</div>" : "") + "</div>";
-    }).join("");
+    html += "<div style='margin-top:7px'>" + state.types.map(function (type) {
+      var job = plateFor(type), combo = type.combo, action = "";
+      if (combo && combo.active) action = "<span class='ok small'>in use</span>";
+      else if (combo) action = "<button type='button' class='quiet' data-combo-load='" + esc(type.key) + "'" +
+                               (busy || !state.can_switch ? " disabled" : "") +
+                               " title='Switch OrcaSlicer to the printer, process and filament remembered for this type'>Use presets</button>";
+      else if (type.selected) action = "<span class='muted small'>selected</span>";
+      return "<div class='type'><div class='row spread' style='gap:8px'>" +
+        "<div class='file'><b>" + esc(type.label) + "</b></div><div class='row' style='flex:none'>" + action + "</div></div>" +
+        (job ? plateHtml(job) : "<div class='muted small'>Not sliced yet" +
+               (combo ? (combo.active ? ". Slice the plate." : "") : ". Select its presets in OrcaSlicer and slice.") + "</div>") +
+        "<div class='row spread small muted' style='gap:8px'><span class='file'>" +
+          (type.printers.length ? esc(type.printers.join(", ")) : "no printers of this type") + "</span>" +
+          "<button type='button' class='linkish' style='flex:none' data-type-presets='" + esc(type.key) + "'>presets</button></div></div>";
+    }).join("") + "</div>";
+    if (note.text) html += "<div class='small " + (note.ok ? "muted" : "err") + "' style='margin-top:6px'>" + esc(note.text) + "</div>";
     $("job").innerHTML = html;
   }
 
-  function renderCombos() {
-    var current = state.current, note = state.combo_note || {}, busy = !!note.busy;
-    var html = "<div class='card-title'>Slice for</div>";
-    if (!state.combos.length) {
-      html += "<div class='muted small' style='margin-top:4px'>Select the printer, process and filament you use for one printer type, " +
-              "then click remember. One click brings them back later.</div>";
-    }
-    html += state.combos.map(function (c) {
-      var detail = [c.process].concat(c.filaments.length ? [c.filaments[0] + (c.filaments.length > 1 ? " +" + (c.filaments.length - 1) : "")] : []);
-      return "<div class='row spread' style='margin-top:7px;gap:8px'>" +
-        "<div style='min-width:0'><div class='file'><b>" + esc(c.label) + "</b></div>" +
-        "<div class='file small muted' title='" + esc(c.printer + " | " + c.process + " | " + c.filaments.join(", ")) + "'>" + esc(detail.join(" · ")) + "</div>" +
-        "<div class='file small muted'>" + (c.printers.length ? esc(c.printers.join(", ")) : "no printers of this type") + "</div></div>" +
-        "<div class='row' style='flex:none'>" +
-        (c.active ? "<span class='ok small'>in use</span>"
-                  : "<button type='button' class='quiet' data-combo-load='" + esc(c.key) + "'" + (busy || !state.can_switch ? " disabled" : "") + ">Use</button>") +
-        "<button type='button' class='linkish' data-combo-del='" + esc(c.key) + "' title='Forget these presets'>x</button></div></div>";
-    }).join("");
-    html += "<div style='margin-top:7px'><button type='button' class='linkish' id='combo-save' style='padding:0;text-align:left'" +
-      (current && current.model ? "" : " disabled") +
-      " title='Remember the printer, process and filament presets selected in OrcaSlicer right now'>" +
-      "remember current presets" + (current && current.model ? " for " + esc(current.model) : "") + "</button></div>";
-    if (note.text) html += "<div class='small " + (note.ok ? "muted" : "err") + "' style='margin-top:6px'>" + esc(note.text) + "</div>";
-    $("combos").innerHTML = html;
-    $("combo-save").onclick = function () { send("save_combo"); };
+  // The presets remembered for one printer type: view, remember the current ones, forget.
+  function presetsDialog(key) {
+    var type = state.types.filter(function (t) { return t.key === key; })[0];
+    if (!type) return;
+    var combo = type.combo, current = state.current;
+    var saved = combo
+      ? "<div class='small'>Printer: " + esc(combo.printer) + "</div><div class='small'>Process: " + esc(combo.process) + "</div>" +
+        "<div class='small'>Filament: " + esc(combo.filaments.join(", ") || "none") + "</div>"
+      : "<div class='small muted'>Nothing remembered yet for this type.</div>";
+    var canSave = type.selected && current && current.printer;
+    showDialog("<h4>Presets for " + esc(type.label) + "</h4>" +
+      "<p class='small muted' style='margin:0 0 6px'>Use presets switches OrcaSlicer to these in one click, so every slice for this type uses the same settings.</p>" +
+      saved +
+      "<p class='small muted' style='margin:10px 0 0'>" + (canSave
+        ? "Selected in OrcaSlicer now: " + esc(current.printer) + " \u00b7 " + esc(current.process || "") + " \u00b7 " + esc((current.filaments || []).join(", "))
+        : "To change them, select this printer type and the presets you want in OrcaSlicer first.") + "</p>" +
+      "<div class='dialog-actions'>" +
+        (combo ? "<button type='button' class='quiet' id='dlg-forget' style='margin-right:auto'>Forget</button>" : "") +
+        "<button type='button' class='quiet' id='dlg-cancel'>Close</button>" +
+        "<button type='button' id='dlg-ok'" + (canSave ? "" : " disabled") + ">Remember current</button></div>");
+    $("dlg-cancel").onclick = hideDialog;
+    $("dlg-ok").onclick = function () { send("save_combo"); hideDialog(); };
+    if (combo) $("dlg-forget").onclick = function () { send("delete_combo", { key: key }); hideDialog(); };
   }
 
-  $("combos").addEventListener("click", function (event) {
+  $("job").addEventListener("click", function (event) {
     var d = event.target.dataset || {};
     if (d.comboLoad) send("load_combo", { key: d.comboLoad });
-    else if (d.comboDel) send("delete_combo", { key: d.comboDel });
+    else if (d.typePresets) presetsDialog(d.typePresets);
   });
 
   function renderMulti() {
-    var withPlate = state.printers.filter(function (p) { return jobOf(p); });
+    // "Available" here means it could start now: a plate for its type, idle, bed clear.
+    var withPlate = state.printers.filter(function (p) { return jobOf(p) && !blockReason(p, true); });
     var chosen = state.printers.filter(function (p) { return selected[p.id]; });
     if (chosen.length < 2 && withPlate.length < 2) { $("multi").style.display = "none"; return; }
     $("multi").style.display = "block";
     var allPicked = withPlate.length > 0 && withPlate.every(function (p) { return selected[p.id]; });
     var html = "<div class='row spread'><span>" + (chosen.length ? chosen.length + " selected" : "Send to several printers") + "</span><span>" +
-      (withPlate.length >= 2 && !allPicked ? "<button type='button' class='linkish' id='multi-all'>select all with a plate (" + withPlate.length + ")</button>" : "") +
+      (withPlate.length >= 2 && !allPicked ? "<button type='button' class='linkish' id='multi-all'>select all available (" + withPlate.length + ")</button>" : "") +
       (chosen.length ? "<button type='button' class='linkish' id='multi-clear'>clear</button>" : "") + "</span></div>";
     if (chosen.length >= 2) {
       var uploadBlocked = chosen.some(function (p) { return blockReason(p, false); });
@@ -324,7 +348,7 @@
       html += "<div class='actions'><button type='button' class='quiet' id='multi-upload'" + (uploadBlocked ? " disabled" : "") + ">Upload to all</button>" +
         "<button type='button' id='multi-start'" + (startBlocked ? " disabled" : "") + ">Upload and print on all</button></div>";
       if (uploadBlocked) html += "<div class='muted small' style='margin-top:4px'>A selected printer has no plate sliced for its type, or is offline.</div>";
-      else if (startBlocked) html += "<div class='muted small' style='margin-top:4px'>Print is available when every selected printer is idle.</div>";
+      else if (startBlocked) html += "<div class='muted small' style='margin-top:4px'>Print is available when every selected printer is idle with a clear bed.</div>";
     }
     $("multi").innerHTML = html;
     if ($("multi-all")) $("multi-all").onclick = function () { withPlate.forEach(function (p) { selected[p.id] = true; }); render(); };
@@ -333,60 +357,101 @@
     if ($("multi-start")) $("multi-start").onclick = function () { confirmSend(chosen, true); };
   }
 
+  // Which group a printer belongs in. Nothing is hidden: the groups only order the list.
+  function groupOf(p) {
+    var status = state.status[p.id];
+    if (!status || status.state === "unknown") return "busy";
+    if (status.state === "paused" || status.state === "error" || status.state === "offline") return "attention";
+    if (status.state === "idle") return status.needs_clearing ? "attention" : "available";
+    return "busy";
+  }
+  function progressText(status) {
+    var pct = status.progress == null ? "" : Math.round(status.progress) + "%";
+    if (status.remaining_s == null) return pct;
+    return (pct ? pct + " \u00b7 " : "") + (status.state === "paused" ? duration(status.remaining_s) + " left" : finishAt(status.remaining_s));
+  }
+  function slimCard(p, status) {
+    return "<div class='box slim' data-expand='" + esc(p.id) + "' title='Show details'>" +
+      "<div class='row spread' data-expand='" + esc(p.id) + "'><div class='row' style='min-width:0' data-expand='" + esc(p.id) + "'>" +
+        "<span class='dot " + esc(status.state) + "'></span><span class='card-title' data-expand='" + esc(p.id) + "'>" + esc(p.name) + "</span></div>" +
+      "<span class='small muted' style='white-space:nowrap' data-expand='" + esc(p.id) + "'>" +
+        esc(refreshing[p.id] ? "Checking..." : (status.state === "printing" ? progressText(status) || "Printing" : (status.state_text || status.state))) +
+      "</span></div></div>";
+  }
+  function fullCard(p, status, group) {
+    var sending = state.sends[p.id];
+    var uploadWhy = blockReason(p, false), startWhy = blockReason(p, true);
+    var lines = "";
+    if (status.state === "printing" || status.state === "paused") {
+      var pct = status.progress == null ? null : Math.round(status.progress);
+      lines += "<div class='file small' title='" + esc(status.filename) + "'>" + esc(status.filename) + "</div>" +
+               "<div class='bar'><i style='width:" + (pct || 0) + "%'></i></div>" +
+               "<div class='row spread small muted'><span>" + (pct == null ? "" : pct + "%") + "</span><span>" +
+               (status.remaining_s == null ? "" : duration(status.remaining_s) + " left \u00b7 " +
+                 (status.state === "paused" ? "paused" : finishAt(status.remaining_s))) + "</span></div>";
+    }
+    var temps = [];
+    if (status.nozzle) temps.push("Nozzle " + temp(status.nozzle));
+    if (status.bed) temps.push("Bed " + temp(status.bed));
+    var checked = status.checked_at ? "checked " + clock(new Date(status.checked_at * 1000), true) : "";
+    if (temps.length || checked) lines += "<div class='row spread small muted' style='flex-wrap:wrap'><span>" + temps.join(" \u00b7 ") +
+                                          "</span><span style='white-space:nowrap'>" + checked + "</span></div>";
+    if (status.notice) lines += "<div class='small " + (status.notice.level === "error" ? "err" : "ok") + "'>" + esc(status.notice.text) +
+                                " \u00b7 " + clock(new Date(status.notice.at * 1000), false) + "</div>";
+    if (status.state === "offline" && status.detail) lines += "<div class='small muted'>" + esc(status.detail) + "</div>";
+    if (status.needs_clearing) {
+      lines += "<div class='row spread' style='margin-top:6px;gap:8px'><span class='warn small'>Take the finished print off the bed.</span>" +
+               "<button type='button' class='quiet' style='flex:none' data-cleared='" + esc(p.id) + "'>Bed cleared</button></div>";
+    }
+    var sendLine = "";
+    if (sending) {
+      if (sending.active) {
+        sendLine = "<div class='small'>" + esc(sending.text) + "</div><div class='bar'><i style='width:" + Math.round(sending.percent || 0) + "%'></i></div>" +
+                   "<button type='button' class='linkish' data-cancel='" + esc(p.id) + "'>cancel</button>";
+      } else {
+        sendLine = "<div class='small " + (sending.ok ? "ok" : "err") + "'>" + esc(sending.text) + "</div>";
+      }
+    }
+    var hint = "";
+    if (!sending || !sending.active) {
+      if (uploadWhy) hint = uploadWhy; else if (startWhy) hint = "Print: " + startWhy.charAt(0).toLowerCase() + startWhy.slice(1);
+    }
+    var stateText = refreshing[p.id] ? "Checking..." : (status.needs_clearing ? "Finished" : (status.state_text || status.state));
+    return "<div class='box'>" +
+      "<div class='row spread'><div class='row' style='min-width:0'>" +
+        "<input type='checkbox' data-pick='" + esc(p.id) + "'" + (selected[p.id] ? " checked" : "") + " title='Select for sending to several printers'>" +
+        "<span class='dot " + esc(status.needs_clearing ? "paused" : status.state) + "'></span><span class='card-title'>" + esc(p.name) + "</span></div>" +
+        "<div class='row'><span class='small muted'>" + esc(stateText) + "</span>" +
+        (group === "busy" ? "<button type='button' class='linkish' data-collapse='" + esc(p.id) + "'>less</button>" : "") +
+        "<button type='button' class='linkish' data-refresh='" + esc(p.id) + "' title='Ask this printer for its status now'>refresh</button>" +
+        "<button type='button' class='linkish' data-edit='" + esc(p.id) + "'>edit</button></div></div>" +
+      lines + sendLine +
+      "<div class='actions'>" +
+        "<button type='button' class='quiet' data-upload='" + esc(p.id) + "'" + (uploadWhy ? " disabled" : "") + ">Upload</button>" +
+        "<button type='button' data-start='" + esc(p.id) + "'" + (startWhy ? " disabled" : "") + ">Upload and print</button></div>" +
+      (hint ? "<div class='small muted' style='margin-top:4px'>" + esc(hint) + "</div>" : "") +
+      "</div>";
+  }
   function renderPrinters() {
     $("empty").style.display = state.printers.length ? "none" : "block";
-    $("printers").innerHTML = state.printers.map(function (p) {
-      var status = state.status[p.id] || { state: "unknown", state_text: "Checking..." };
-      var sending = state.sends[p.id];
-      var uploadWhy = blockReason(p, false), startWhy = blockReason(p, true);
-      var lines = "";
-      if (status.state === "printing" || status.state === "paused") {
-        var pct = status.progress == null ? null : Math.round(status.progress);
-        lines += "<div class='file small' title='" + esc(status.filename) + "'>" + esc(status.filename) + "</div>" +
-                 "<div class='bar'><i style='width:" + (pct || 0) + "%'></i></div>" +
-                 "<div class='row spread small muted'><span>" + (pct == null ? "" : pct + "%") + "</span><span>" +
-                 (status.remaining_s == null ? "" : duration(status.remaining_s) + " left \u00b7 " +
-                   (status.state === "paused" ? "paused" : finishAt(status.remaining_s))) + "</span></div>";
-      }
-      var temps = [];
-      if (status.nozzle) temps.push("Nozzle " + temp(status.nozzle));
-      if (status.bed) temps.push("Bed " + temp(status.bed));
-      var checked = status.checked_at ? "checked " + clock(new Date(status.checked_at * 1000), true) : "";
-      if (temps.length || checked) lines += "<div class='row spread small muted' style='flex-wrap:wrap'><span>" + temps.join(" · ") +
-                                            "</span><span style='white-space:nowrap'>" + checked + "</span></div>";
-      if (status.notice) lines += "<div class='small " + (status.notice.level === "error" ? "err" : "ok") + "'>" + esc(status.notice.text) +
-                                  " \u00b7 " + clock(new Date(status.notice.at * 1000), false) + "</div>";
-      if (status.state === "offline" && status.detail) lines += "<div class='small muted'>" + esc(status.detail) + "</div>";
-      var sendLine = "";
-      if (sending) {
-        if (sending.active) {
-          sendLine = "<div class='small'>" + esc(sending.text) + "</div><div class='bar'><i style='width:" + Math.round(sending.percent || 0) + "%'></i></div>" +
-                     "<button type='button' class='linkish' data-cancel='" + esc(p.id) + "'>cancel</button>";
-        } else {
-          sendLine = "<div class='small " + (sending.ok ? "ok" : "err") + "'>" + esc(sending.text) + "</div>";
-        }
-      }
-      var hint = "";
-      if (!sending || !sending.active) {
-        if (uploadWhy) hint = uploadWhy; else if (startWhy) hint = "Print: " + startWhy.charAt(0).toLowerCase() + startWhy.slice(1);
-      }
-      return "<div class='box'>" +
-        "<div class='row spread'><div class='row' style='min-width:0'>" +
-          "<input type='checkbox' data-pick='" + esc(p.id) + "'" + (selected[p.id] ? " checked" : "") + " title='Select for sending to several printers'>" +
-          "<span class='dot " + esc(status.state) + "'></span><span class='card-title'>" + esc(p.name) + "</span></div>" +
-          "<div class='row'><span class='small muted'>" + esc(refreshing[p.id] ? "Checking..." : (status.state_text || status.state)) + "</span>" +
-          "<button type='button' class='linkish' data-refresh='" + esc(p.id) + "' title='Ask this printer for its status now'>refresh</button>" +
-          "<button type='button' class='linkish' data-edit='" + esc(p.id) + "'>edit</button></div></div>" +
-        lines + sendLine +
-        "<div class='actions'>" +
-          "<button type='button' class='quiet' data-upload='" + esc(p.id) + "'" + (uploadWhy ? " disabled" : "") + ">Upload</button>" +
-          "<button type='button' data-start='" + esc(p.id) + "'" + (startWhy ? " disabled" : "") + ">Upload and print</button></div>" +
-        (hint ? "<div class='small muted' style='margin-top:4px'>" + esc(hint) + "</div>" : "") +
-        "</div>";
+    var groups = { attention: [], available: [], busy: [] };
+    state.printers.forEach(function (p) { groups[groupOf(p)].push(p); });
+    var titles = { attention: "Needs attention", available: "Available", busy: "Busy" };
+    $("printers").innerHTML = ["attention", "available", "busy"].map(function (name) {
+      var list = groups[name];
+      if (!list.length && (name === "attention" || !state.printers.length)) return "";
+      var body = list.map(function (p) {
+        var status = state.status[p.id] || { state: "unknown", state_text: "Checking..." };
+        // A busy printer is one line, unless opened, selected or in the middle of a send.
+        var slim = name === "busy" && !expanded[p.id] && !selected[p.id] && !(state.sends[p.id] && state.sends[p.id].active);
+        return slim ? slimCard(p, status) : fullCard(p, status, name);
+      }).join("");
+      return "<div class='group'>" + titles[name] + " (" + list.length + ")</div>" +
+             (body || "<div class='small muted' style='margin-top:5px'>" + (name === "available" ? "No printer is free right now." : "Nothing is printing.") + "</div>");
     }).join("");
   }
 
-  function render() { renderCombos(); renderJob(); renderMulti(); renderPrinters(); }
+  function render() { renderJob(); renderMulti(); renderPrinters(); }
 
   function byId(id) { return state.printers.filter(function (p) { return p.id === id; })[0]; }
 
@@ -395,6 +460,9 @@
     if (d.upload) confirmSend([byId(d.upload)], false);
     else if (d.start) confirmSend([byId(d.start)], true);
     else if (d.refresh) refresh([d.refresh]);
+    else if (d.cleared) send("bed_cleared", { id: d.cleared });
+    else if (d.collapse) { delete expanded[d.collapse]; renderPrinters(); }
+    else if (d.expand) { expanded[d.expand] = true; renderPrinters(); }
     else if (d.edit) editPrinter(byId(d.edit));
     else if (d.cancel) send("cancel_send", { id: d.cancel });
     else if (d.pick) { selected[d.pick] = t.checked; renderMulti(); }
@@ -406,7 +474,7 @@
   orca.onMessage(function (message) {
     if (!message) return;
     if (message.command === "state") {
-      ["printers", "jobs", "job_for", "slicing", "combos", "current", "combo_note", "can_switch"].forEach(function (key) { if (key in message) state[key] = message[key]; });
+      ["printers", "jobs", "job_for", "slicing", "combos", "types", "current", "combo_note", "can_switch"].forEach(function (key) { if (key in message) state[key] = message[key]; });
       if (message.status) state.status = message.status;
       if (message.sends) state.sends = message.sends;
       render();

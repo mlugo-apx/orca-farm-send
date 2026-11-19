@@ -1324,6 +1324,76 @@ class PrinterStore:
         return sorted({host_of(p.get("address", "")).split(":")[0] for p in self.printers if p.get("address")})
 
 
+class BedLog:
+    """Which printers have a finished print still on the bed. Kept in a small file so it survives
+    restarting OrcaSlicer and is the same in every OrcaSlicer window.
+
+    Per printer id: True = clear the bed first, False = the user said it is clear, absent = never seen."""
+
+    def __init__(self, path):
+        self.path, self._stamp, self._beds = path, None, {}
+
+    def _load(self):
+        try:
+            info = os.stat(self.path)
+            stamp = (info.st_mtime_ns, info.st_size)
+        except OSError:
+            stamp = None
+        if stamp == self._stamp:
+            return
+        self._stamp, self._beds = stamp, {}
+        if stamp is None:
+            return
+        try:
+            with open(self.path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            if isinstance(data, dict):
+                self._beds = {str(key): bool(value) for key, value in data.items()}
+        except (OSError, ValueError):
+            pass
+
+    def get(self, printer_id):
+        self._load()
+        return self._beds.get(printer_id)
+
+    def set(self, printer_id, needs_clearing):
+        self._load()
+        if self._beds.get(printer_id) is needs_clearing:
+            return
+        self._beds[printer_id] = needs_clearing
+        self._write()
+
+    def forget(self, printer_id):
+        self._load()
+        if self._beds.pop(printer_id, None) is not None:
+            self._write()
+
+    def _write(self):
+        temp = "%s.%d.tmp" % (self.path, os.getpid())
+        try:
+            fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(self._beds, handle)
+            os.replace(temp, self.path)
+        except OSError:
+            pass   # still right in this window; only the sharing and the restart memory are lost
+        self._stamp = None
+
+
+def bed_needs_clearing(known, status):
+    """New value for a printer's bed flag after a status read, or None to leave it as it is.
+
+    known: True, False, or None when this printer was never seen. A print that is running leaves a
+    part on the bed. A printer first seen idle that reports a completed or cancelled last print is
+    assumed to still hold it; after the user says the bed is clear, only a new print sets it again."""
+    state = status.get("state")
+    if state in ("printing", "paused"):
+        return True
+    if state == "idle" and known is None:
+        return bool(status.get("last_result"))
+    return None
+
+
 def presets_to_printers(preset_dir):
     """Build printer entries from OrcaSlicer user machine presets that have a print host set."""
     found = []
