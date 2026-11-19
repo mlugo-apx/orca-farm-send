@@ -2,6 +2,7 @@
 shell supplies post()/notify() and forwards panel messages and slicer events."""
 # BUNDLE-STRIP-BEGIN
 import os
+import shutil
 import threading
 import time
 import uuid
@@ -10,7 +11,7 @@ from core import (KIND_CC2, FarmError, PrinterStore, can_start, job_filename, ma
                   parse_gcode_meta, presets_to_printers, strip_model_suffix, validate_printer)
 # BUNDLE-STRIP-END
 
-MAX_JOBS = 8
+SLICE_DIR = "slices"
 STATUS_MIN_INTERVAL = 3.0
 STATUS_MIN_INTERVAL_CC2 = 8.0   # each CC2 poll is a full MQTT connect + register; be gentle
 BLOCKED_TEXT = "OrcaSlicer blocked network access to this printer. Approve the permission prompt, then it retries."
@@ -37,8 +38,12 @@ class FarmApp:
         self._default_name = default_name or (lambda: "")
         self._spawn = spawn or self._spawn_thread
         self.lock = threading.RLock()
-        self.jobs = []            # newest first
-        self.selected_job = None
+        # One sliced plate per printer type, newest first. Each is the plugin's OWN copy of the G-code,
+        # because OrcaSlicer rewrites its temp file on the next slice: without a copy, slicing for
+        # the second printer type would destroy the plate sliced for the first.
+        self.jobs = []
+        self.slice_dir = os.path.join(storage_dir, SLICE_DIR)
+        self._clear_slice_dir()
         self.slicing = False
         self.status = {}          # printer id -> normalized status
         self._status_at = {}
@@ -52,6 +57,22 @@ class FarmApp:
         self._apply_presets = apply_presets
         self.current = None
         self.combo_note = {"text": "", "ok": True, "busy": False}
+
+    def _clear_slice_dir(self):
+        """Drop copies left by an earlier session or project. They are only useful while their plate is open."""
+        try:
+            for name in os.listdir(self.slice_dir):
+                if name.endswith(".gcode") or name.endswith(".part"):
+                    self._remove_file(os.path.join(self.slice_dir, name))
+        except OSError:
+            pass
+
+    @staticmethod
+    def _remove_file(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
     @staticmethod
     def _spawn_thread(target, *args):
@@ -79,34 +100,51 @@ class FarmApp:
     def on_gcode_exported(self, path, name=""):
         if not path or not path.lower().endswith(".gcode"):
             return
-        job = {"id": uuid.uuid4().hex[:10], "path": path, "name": name or "", "captured_at": time.time(),
-               "ready": False, "error": "", "stale": False, "meta": {}, "mtime": None, "size": None}
+        job = {"id": uuid.uuid4().hex[:10], "source": path, "path": "", "name": name or "", "captured_at": time.time(),
+               "ready": False, "error": "", "stale": False, "meta": {}, "key": ""}
         with self.lock:
             self.slicing = False
-            # A re-slice of the same plate reuses the same temp file: the old entry is now wrong.
-            self.jobs = [existing for existing in self.jobs if existing["path"] != path]
+            # Earlier failed or still-pending captures are superseded by this slice.
+            self.jobs = [existing for existing in self.jobs if existing["ready"]]
             self.jobs.insert(0, job)
-            del self.jobs[MAX_JOBS:]
-            self.selected_job = job["id"]
         self.post_state()
         self._spawn(self._read_job, job)
 
     def _read_job(self, job):
+        """Copy the freshly sliced G-code into plugin storage, then read its metadata."""
+        copy = os.path.join(self.slice_dir, job["id"] + ".gcode")
         try:
-            stat = os.stat(job["path"])
-            meta = parse_gcode_meta(job["path"])
+            os.makedirs(self.slice_dir, exist_ok=True)
+            before = os.stat(job["source"])
+            shutil.copyfile(job["source"], copy + ".part")
+            after = os.stat(job["source"])
+            if (before.st_size, before.st_mtime) != (after.st_size, after.st_mtime) or os.path.getsize(copy + ".part") != after.st_size:
+                raise FarmError("The plate was sliced again while it was being read. The newer slice replaces it.")
+            os.replace(copy + ".part", copy)
+            meta = parse_gcode_meta(copy)
+            if not meta.get("printer_model"):
+                raise FarmError("The sliced G-code does not name a printer model, so it cannot be matched to a printer.")
+            replaced = []
             with self.lock:
-                job["mtime"], job["size"], job["meta"] = stat.st_mtime, stat.st_size, meta
-                if not meta.get("printer_model"):
-                    job["error"] = "The sliced G-code does not name a printer model, so it cannot be matched to a printer."
+                if job not in self.jobs:          # project closed or superseded while copying
+                    replaced.append(copy)
                 else:
+                    job["path"], job["meta"], job["key"] = copy, meta, model_key(meta["printer_model"])
+                    # The newest slice for a printer type replaces the older one for that type only.
+                    replaced += [other["path"] for other in self.jobs if other is not job and other["key"] == job["key"]]
+                    self.jobs = [other for other in self.jobs if other is job or other["key"] != job["key"]]
                     job["ready"] = True
+            for path in replaced:
+                self._remove_file(path)
+        except FarmError as error:
+            job["error"] = str(error)
         except PermissionError:
-            with self.lock:
-                job["error"] = "OrcaSlicer blocked reading the sliced G-code. Approve the permission prompt and slice again."
+            job["error"] = "OrcaSlicer blocked reading the sliced G-code. Approve the permission prompt and slice again."
         except OSError as error:
-            with self.lock:
-                job["error"] = "Cannot read the sliced G-code: %s" % (error.strerror or error)
+            job["error"] = "Cannot read the sliced G-code: %s" % (error.strerror or error)
+        if job["error"]:
+            self._remove_file(copy + ".part")
+            self._remove_file(copy)
         self.post_state()
 
     def mark_stale(self):
@@ -120,15 +158,18 @@ class FarmApp:
 
     def project_closed(self):
         with self.lock:
-            self.jobs, self.selected_job, self.slicing = [], None, False
+            paths = [job["path"] for job in self.jobs if job["path"]]
+            self.jobs, self.slicing = [], False
+        for path in paths:
+            self._remove_file(path)
         self.post_state()
 
-    # ---- state for the panel ---------------------------------------------------------------------
-    def _current_job(self):
+    def _job_for(self, printer):
+        """The ready sliced plate for this printer's type, or None."""
         for job in self.jobs:
-            if job["id"] == self.selected_job:
+            if job["ready"] and model_matches(job["meta"].get("printer_model"), printer.get("model")):
                 return job
-        return self.jobs[0] if self.jobs else None
+        return None
 
     def _job_base_name(self, job):
         if not job["name"]:
@@ -158,18 +199,21 @@ class FarmApp:
             "printer_model": meta.get("printer_model", ""), "sliced_at": _clock(job["captured_at"]),
             "post_process": bool((meta.get("post_process") or "").strip()),
             "presets": " \u00b7 ".join(part for part in (meta.get("process_preset"), meta.get("filament_preset")) if part),
-            "matches": {p["id"]: model_matches(meta.get("printer_model"), p.get("model")) for p in self.store.printers},
+            "printers": [p["name"] for p in self.store.printers if model_matches(meta.get("printer_model"), p.get("model"))],
         }
 
     def snapshot(self):
         with self.lock:
-            job = self._current_job()
+            job_for = {}
+            for printer in self.store.printers:
+                match = self._job_for(printer)
+                job_for[printer["id"]] = match["id"] if match else None
             return {
                 "command": "state",
                 "printers": [{k: p.get(k, "") for k in ("id", "name", "kind", "address", "model", "access_code", "api_key")}
                              for p in self.store.printers],
-                "job": self._job_view(job) if job else None,
-                "jobs": [self._job_view(j) for j in self.jobs if j["ready"]],
+                "jobs": [self._job_view(job) for job in self.jobs],
+                "job_for": job_for,
                 "slicing": self.slicing,
                 "status": dict(self.status),
                 "sends": dict(self.sends),
@@ -273,12 +317,6 @@ class FarmApp:
         # The selection is re-read on the next poll, which runs on the UI thread.
         self.post_state()
 
-    def _cmd_select_job(self, message):
-        with self.lock:
-            if any(job["id"] == message.get("job_id") for job in self.jobs):
-                self.selected_job = message.get("job_id")
-        self.post_state()
-
     def _cmd_test_printer(self, message):
         try:
             printer = validate_printer(dict(message.get("printer") or {}, model=(message.get("printer") or {}).get("model") or "?"))
@@ -344,45 +382,42 @@ class FarmApp:
             event.set()
 
     def _cmd_send(self, message):
+        """Send to each listed printer the plate that was sliced for its type."""
         start = bool(message.get("start"))
         options = message.get("options") or {}
+        work = []
         with self.lock:
-            job = next((j for j in self.jobs if j["id"] == message.get("job_id")), None)
-            targets = []
+            names = {}
             for printer_id in message.get("printer_ids") or []:
                 printer = self.store.get(printer_id)
                 if printer is None:
                     continue
-                problem = self._send_problem(job, printer)
-                if problem:
+                if self.sends.get(printer_id, {}).get("active"):
+                    continue
+                job = self._job_for(printer)
+                if job is None:
+                    other = next((j for j in self.jobs if j["ready"]), None)
+                    if other is not None:
+                        problem = "Blocked: no plate sliced for %s (the sliced plate is for %s)" % (
+                            printer.get("model"), other["meta"].get("printer_model") or "another printer")
+                    else:
+                        problem = "No sliced plate for this printer type. Slice one first."
                     self._set_send(printer_id, False, problem, ok=False)
                     continue
+                if job["id"] not in names:
+                    # One file name per plate, fixed now so every printer of that type gets the same one.
+                    meta = job["meta"]
+                    parts = [self._job_base_name(job)]
+                    if meta.get("filament_type"):
+                        parts.append(meta["filament_type"].split(";")[0])
+                    if meta.get("time_s"):
+                        parts.append(_short_duration(meta["time_s"]))
+                    names[job["id"]] = job_filename("_".join(parts))
                 self._cancel[printer_id] = threading.Event()
                 self._set_send(printer_id, True, "Preparing...", percent=0)
-                targets.append(dict(printer))
-            if job is not None and targets:
-                # One file name for the whole batch, fixed now so every printer gets the same one.
-                meta = job["meta"]
-                parts = [self._job_base_name(job)]
-                if meta.get("filament_type"):
-                    parts.append(meta["filament_type"].split(";")[0])
-                if meta.get("time_s"):
-                    parts.append(_short_duration(meta["time_s"]))
-                filename = job_filename("_".join(parts))
-                snapshot = {"path": job["path"], "mtime": job["mtime"], "size": job["size"], "name": filename}
-        for printer in targets:
+                work.append((dict(printer), {"path": job["path"], "name": names[job["id"]]}))
+        for printer, snapshot in work:
             self._spawn(self._send_worker, printer, snapshot, start, options)
-
-    def _send_problem(self, job, printer):
-        if self.slicing:
-            return "Slicing is in progress"
-        if job is None or not job["ready"]:
-            return "That sliced plate is no longer available. Slice again."
-        if not model_matches(job["meta"].get("printer_model"), printer.get("model")):
-            return "Blocked: sliced for %s, this printer is %s" % (job["meta"].get("printer_model") or "unknown", printer.get("model"))
-        if self.sends.get(printer["id"], {}).get("active"):
-            return "A send is already running"
-        return ""
 
     def _set_send(self, printer_id, active, text, percent=None, ok=None):
         entry = {"active": active, "text": text, "percent": percent, "ok": ok}
@@ -394,9 +429,8 @@ class FarmApp:
         printer_id, name = printer["id"], printer["name"]
         cancel = self._cancel.get(printer_id) or threading.Event()
         try:
-            stat = os.stat(snapshot["path"])
-            if stat.st_size != snapshot["size"] or stat.st_mtime != snapshot["mtime"]:
-                raise FarmError("The plate was sliced again while sending. Send the new slice.")
+            if not os.path.exists(snapshot["path"]):
+                raise FarmError("That sliced plate was replaced by a newer slice. Send again.")
             client = make_client(printer)
             last = [0.0]
 
@@ -408,9 +442,6 @@ class FarmApp:
 
             self._set_send(printer_id, True, "Uploading 0%", percent=0)
             remote = client.upload(snapshot["path"], snapshot["name"], progress=progress, cancelled=cancel.is_set)
-            stat = os.stat(snapshot["path"])
-            if stat.st_size != snapshot["size"] or stat.st_mtime != snapshot["mtime"]:
-                raise FarmError("The plate was sliced again during the upload. The uploaded file may be incomplete; send again.")
             if not start:
                 self._set_send(printer_id, False, "Uploaded %s" % remote, ok=True)
                 self._notify("info", "Farm Send: uploaded %s to %s" % (remote, name))
@@ -429,6 +460,9 @@ class FarmApp:
             self._notify("error", "Farm Send: %s: %s" % (name, error))
         except PermissionError:
             self._set_send(printer_id, False, BLOCKED_TEXT, ok=False)
+        except FileNotFoundError:
+            # A re-slice for this printer type, or closing the project, removed the copy mid-upload.
+            self._set_send(printer_id, False, "The sliced plate was replaced or closed during the upload. Send again.", ok=False)
         except OSError as error:
             self._set_send(printer_id, False, "Cannot read the sliced G-code: %s" % (error.strerror or error), ok=False)
         except Exception as error:  # never leave a card stuck on "Uploading"

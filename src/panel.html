@@ -54,7 +54,7 @@
 
 <script>
 (function () {
-  var state = { printers: [], job: null, jobs: [], status: {}, sends: {}, slicing: false,
+  var state = { printers: [], jobs: [], job_for: {}, status: {}, sends: {}, slicing: false,
                 combos: [], current: null, combo_note: { text: "" }, can_switch: false };
   var selected = {};
   var $ = function (id) { return document.getElementById(id); };
@@ -86,15 +86,19 @@
   function hideDialog() { $("overlay").className = ""; $("dialog").innerHTML = ""; }
   $("overlay").addEventListener("click", function (event) { if (event.target === $("overlay")) hideDialog(); });
 
-  function compatible(printer) {
-    return state.job && state.job.ready && state.job.matches && state.job.matches[printer.id];
+  function jobOf(printer) {
+    var id = state.job_for[printer.id];
+    if (!id) return null;
+    return state.jobs.filter(function (j) { return j.id === id && j.ready; })[0] || null;
   }
   function blockReason(printer, start) {
-    var job = state.job, status = state.status[printer.id];
-    if (state.slicing) return "Slicing in progress";
-    if (!job) return "Slice a plate first";
-    if (!job.ready) return job.error || "Reading the sliced G-code";
-    if (!compatible(printer)) return "Sliced for " + (job.printer_model || "an unknown printer") + ", not " + printer.model;
+    var job = jobOf(printer), status = state.status[printer.id];
+    if (!job) {
+      var ready = state.jobs.filter(function (j) { return j.ready; });
+      if (ready.length) return "No plate sliced for " + printer.model + " yet";
+      if (state.jobs.length && !state.jobs[0].error) return "Reading the sliced G-code";
+      return "Slice a plate first";
+    }
     if (state.sends[printer.id] && state.sends[printer.id].active) return "Send in progress";
     if (!status || status.state === "unknown") return "Checking printer";
     if (status.state === "offline") return "Printer is offline";
@@ -103,29 +107,40 @@
   }
 
   function confirmSend(printers, start) {
-    var job = state.job;
-    var names = printers.map(function (p) { return "<li>" + esc(p.name) + " <span class='muted'>(" + esc(p.address) + ")</span></li>"; }).join("");
-    var notes = "";
-    if (job.stale) notes += "<p class='warn small'>The plate or a preset changed after this slice. Re-slice if the change matters.</p>";
-    if (job.post_process) notes += "<p class='warn small'>This process preset has post-processing scripts. Farm Send sends the G-code before those scripts run.</p>";
+    // Group the printers by the plate each one will receive: one plate per printer type.
+    var groups = [], seen = {};
+    printers.forEach(function (p) {
+      var job = jobOf(p);
+      if (!job) return;
+      if (!(job.id in seen)) { seen[job.id] = groups.length; groups.push({ job: job, printers: [] }); }
+      groups[seen[job.id]].printers.push(p);
+    });
+    var body = groups.map(function (g) {
+      var notes = "";
+      if (g.job.stale) notes += "<div class='warn small'>The plate changed after this slice. Re-slice if the change matters.</div>";
+      if (g.job.post_process) notes += "<div class='warn small'>Post-processing scripts are not applied to this file.</div>";
+      return "<div class='box' style='margin-top:8px'><div class='job-name small'>" + esc(g.job.display_name) + "</div>" +
+        "<div class='muted small'>" + esc(g.job.summary) + " · for " + esc(g.job.printer_model) + "</div>" + notes +
+        "<ul class='plain'>" + g.printers.map(function (p) {
+          return "<li>" + esc(p.name) + " <span class='muted'>(" + esc(p.address) + ")</span></li>";
+        }).join("") + "</ul></div>";
+    }).join("");
     var options = "";
     if (start && printers.some(function (p) { return p.kind === "elegoo_cc2"; })) {
-      options = "<div class='check'><input type='checkbox' id='opt-level' checked><label for='opt-level'>Bed leveling before print (CC2)</label></div>" +
+      options = "<div class='check' style='margin-top:8px'><input type='checkbox' id='opt-level' checked><label for='opt-level'>Bed leveling before print (CC2)</label></div>" +
                 "<div class='check'><input type='checkbox' id='opt-lapse'><label for='opt-lapse'>Time-lapse (CC2)</label></div>";
     }
     showDialog(
-      "<h4>" + (start ? "Start printing?" : "Upload file?") + "</h4>" +
-      "<div class='job-name small'>" + esc(job.display_name) + "</div>" +
-      "<div class='muted small'>" + esc(job.summary) + "</div>" +
-      "<p style='margin:10px 0 0'>" + (start ? "The print starts immediately on:" : "The file is uploaded, not printed, to:") + "</p>" +
-      "<ul class='plain'>" + names + "</ul>" + options + notes +
+      "<h4>" + (start ? "Start printing?" : "Upload?") + "</h4>" +
+      "<p style='margin:0'>" + (start ? "Each print starts immediately." : "Files are uploaded, not printed.") +
+      (groups.length > 1 ? " Each printer gets the plate sliced for its type." : "") + "</p>" + body + options +
       (start ? "<p class='small muted'>Make sure each bed is clear.</p>" : "") +
       "<div class='dialog-actions'><button type='button' class='quiet' id='dlg-cancel'>Cancel</button>" +
       "<button type='button' id='dlg-ok'" + (start ? " class='danger'" : "") + ">" + (start ? "Start print" : "Upload") + "</button></div>");
     $("dlg-cancel").onclick = hideDialog;
     $("dlg-ok").onclick = function () {
       var options = { bed_leveling: $("opt-level") ? $("opt-level").checked : true, timelapse: $("opt-lapse") ? $("opt-lapse").checked : false };
-      send("send", { printer_ids: printers.map(function (p) { return p.id; }), start: start, job_id: job.id, options: options });
+      send("send", { printer_ids: printers.map(function (p) { return p.id; }), start: start, options: options });
       hideDialog();
     };
   }
@@ -180,28 +195,25 @@
 
   // ---- rendering ---------------------------------------------------------------------------
   function renderJob() {
-    var job = state.job, html;
-    if (state.slicing) {
-      html = "<div class='muted'>Slicing...</div>";
-    } else if (!job) {
-      html = "<div class='muted'>No sliced plate yet. Slice a plate and it appears here.</div>";
-    } else if (!job.ready) {
-      html = "<div class='" + (job.error ? "err" : "muted") + "'>" + esc(job.error || "Reading the sliced G-code...") + "</div>";
-    } else {
-      html = "<div class='job-name'>" + esc(job.display_name) + "</div>" +
-             "<div class='muted small'>" + esc(job.summary) + "</div>" +
-             "<div class='muted small'>For " + esc(job.printer_model || "unknown printer") + " · sliced " + esc(job.sliced_at) + "</div>" +
-             (job.presets ? "<div class='muted small file' title='" + esc(job.presets) + "'>" + esc(job.presets) + "</div>" : "") +
-             (job.stale ? "<div class='warn small'>Plate or preset changed since this slice.</div>" : "") +
-             (job.post_process ? "<div class='warn small'>Post-processing scripts are not applied.</div>" : "");
-      if (state.jobs.length > 1) {
-        html += "<label class='field'>Other sliced plates<select id='job-pick'>" + state.jobs.map(function (j) {
-          return "<option value='" + esc(j.id) + "'" + (j.id === job.id ? " selected" : "") + ">" + esc(j.display_name) + " (" + esc(j.sliced_at) + ")</option>";
-        }).join("") + "</select></label>";
-      }
+    var html = "";
+    if (state.slicing) html += "<div class='muted'>Slicing...</div>";
+    if (!state.jobs.length && !state.slicing) {
+      html += "<div class='muted'>No sliced plate yet. Slice once for each printer type; every slice is kept here until you send.</div>";
     }
+    html += state.jobs.map(function (job, index) {
+      var top = (index || state.slicing) ? " style='margin-top:8px;padding-top:8px;border-top:1px solid var(--orca-border)'" : "";
+      if (!job.ready) {
+        return "<div" + top + " class='" + (job.error ? "err" : "muted") + "'>" + esc(job.error || "Reading the sliced G-code...") + "</div>";
+      }
+      return "<div" + top + "><div class='job-name'>" + esc(job.display_name) + "</div>" +
+        "<div class='muted small'>" + esc(job.summary) + "</div>" +
+        "<div class='small'>For <b>" + esc(job.printer_model || "unknown printer") + "</b><span class='muted'> · sliced " + esc(job.sliced_at) +
+          (job.printers.length ? " · " + esc(job.printers.join(", ")) : " · no printer of this type") + "</span></div>" +
+        (job.presets ? "<div class='muted small file' title='" + esc(job.presets) + "'>" + esc(job.presets) + "</div>" : "") +
+        (job.stale ? "<div class='warn small'>Plate changed since this slice.</div>" : "") +
+        (job.post_process ? "<div class='warn small'>Post-processing scripts are not applied.</div>" : "") + "</div>";
+    }).join("");
     $("job").innerHTML = html;
-    if ($("job-pick")) $("job-pick").onchange = function () { send("select_job", { job_id: this.value }); };
   }
 
   function renderCombos() {
@@ -237,20 +249,27 @@
   });
 
   function renderMulti() {
-    var ids = Object.keys(selected).filter(function (id) { return selected[id]; });
-    var chosen = state.printers.filter(function (p) { return ids.indexOf(p.id) >= 0; });
-    if (chosen.length < 2) { $("multi").style.display = "none"; return; }
-    var uploadBlocked = chosen.some(function (p) { return blockReason(p, false); });
-    var startBlocked = chosen.some(function (p) { return blockReason(p, true); });
+    var withPlate = state.printers.filter(function (p) { return jobOf(p); });
+    var chosen = state.printers.filter(function (p) { return selected[p.id]; });
+    if (chosen.length < 2 && withPlate.length < 2) { $("multi").style.display = "none"; return; }
     $("multi").style.display = "block";
-    $("multi").innerHTML = "<div class='row spread'><span>" + chosen.length + " printers selected</span>" +
-      "<button type='button' class='linkish' id='multi-clear'>clear</button></div>" +
-      "<div class='actions'><button type='button' class='quiet' id='multi-upload'" + (uploadBlocked ? " disabled" : "") + ">Upload to all</button>" +
-      "<button type='button' id='multi-start'" + (startBlocked ? " disabled" : "") + ">Upload and print on all</button></div>" +
-      (startBlocked && !uploadBlocked ? "<div class='muted small' style='margin-top:4px'>Print is available when every selected printer is idle.</div>" : "");
-    $("multi-clear").onclick = function () { selected = {}; render(); };
-    $("multi-upload").onclick = function () { confirmSend(chosen, false); };
-    $("multi-start").onclick = function () { confirmSend(chosen, true); };
+    var allPicked = withPlate.length > 0 && withPlate.every(function (p) { return selected[p.id]; });
+    var html = "<div class='row spread'><span>" + (chosen.length ? chosen.length + " selected" : "Send to several printers") + "</span><span>" +
+      (withPlate.length >= 2 && !allPicked ? "<button type='button' class='linkish' id='multi-all'>select all with a plate (" + withPlate.length + ")</button>" : "") +
+      (chosen.length ? "<button type='button' class='linkish' id='multi-clear'>clear</button>" : "") + "</span></div>";
+    if (chosen.length >= 2) {
+      var uploadBlocked = chosen.some(function (p) { return blockReason(p, false); });
+      var startBlocked = chosen.some(function (p) { return blockReason(p, true); });
+      html += "<div class='actions'><button type='button' class='quiet' id='multi-upload'" + (uploadBlocked ? " disabled" : "") + ">Upload to all</button>" +
+        "<button type='button' id='multi-start'" + (startBlocked ? " disabled" : "") + ">Upload and print on all</button></div>";
+      if (uploadBlocked) html += "<div class='muted small' style='margin-top:4px'>A selected printer has no plate sliced for its type, or is offline.</div>";
+      else if (startBlocked) html += "<div class='muted small' style='margin-top:4px'>Print is available when every selected printer is idle.</div>";
+    }
+    $("multi").innerHTML = html;
+    if ($("multi-all")) $("multi-all").onclick = function () { withPlate.forEach(function (p) { selected[p.id] = true; }); render(); };
+    if ($("multi-clear")) $("multi-clear").onclick = function () { selected = {}; render(); };
+    if ($("multi-upload")) $("multi-upload").onclick = function () { confirmSend(chosen, false); };
+    if ($("multi-start")) $("multi-start").onclick = function () { confirmSend(chosen, true); };
   }
 
   function renderPrinters() {
@@ -318,7 +337,7 @@
   orca.onMessage(function (message) {
     if (!message) return;
     if (message.command === "state") {
-      ["printers", "job", "jobs", "slicing", "combos", "current", "combo_note", "can_switch"].forEach(function (key) { if (key in message) state[key] = message[key]; });
+      ["printers", "jobs", "job_for", "slicing", "combos", "current", "combo_note", "can_switch"].forEach(function (key) { if (key in message) state[key] = message[key]; });
       if (message.status) state.status = message.status;
       if (message.sends) state.sends = message.sends;
       render();

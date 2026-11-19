@@ -153,8 +153,9 @@ class FarmSend(orca.script.ScriptPluginCapabilityBase):
                 self.app.on_slice_started()
             elif event == events.SlicingJobComplete:
                 self.app.on_slice_done()
-            elif event in (events.ObjectAdded, events.ObjectDeleted, events.ObjectTransformed, events.ObjectChanged,
-                           events.PresetSelected, events.PresetSaved):
+            elif event in (events.ObjectAdded, events.ObjectDeleted, events.ObjectTransformed, events.ObjectChanged):
+                # Preset changes are deliberately not treated as "plate changed": switching presets
+                # is exactly what happens between slicing for one printer type and the next.
                 self.app.mark_stale()
             elif event in (events.ProjectClosed, events.NewProject, events.ProjectOpened):
                 self.app.project_closed()

@@ -9,10 +9,14 @@ Built for OrcaSlicer 2.5.1's Python plugin system.
 
 ## Use
 
-1. Slice a plate. It appears at the top of the panel with time, grams, layers and the printer model it was sliced for.
-2. On a printer card click **Upload**, or **Upload and print**, and confirm.
+1. Slice the plate once for each printer type you want to print on. Every slice is kept in the panel, one per type, with time, grams, layers and the type it was sliced for.
+2. On a printer card click **Upload**, or **Upload and print**, and confirm. The printer gets the plate sliced for its type.
 
-Tick several cards to send one plate to several printers of the same model at once.
+To send everything at once, click **select all with a plate**, then **Upload and print on all**.
+The U1s get the U1 plate and the CC2s get the CC2 plate, in one action.
+
+The plugin keeps its own copy of each slice, because OrcaSlicer overwrites its temp G-code on the next slice.
+Slicing again for a type replaces that type's plate only. Copies are deleted when the project closes.
 
 **Slice for (presets per printer type)**
 
@@ -28,7 +32,7 @@ The plugin cannot press Slice for you.
 - "Upload and print" only starts when the printer reports idle. If it is busy the file is still uploaded and you are told it was not started.
 - Every start asks for confirmation and names the printers.
 - Uploaded files are named `<object>_<filament>_<time>_<YYYYMMDD-HHMMSS>.gcode`, so nothing is overwritten.
-- If the plate is re-sliced during a send, the send is refused.
+- A printer with no plate sliced for its type cannot be sent to.
 
 ## Install
 
@@ -45,7 +49,7 @@ Printers are stored in `<OrcaSlicer config>/orca_plugins/plugin_data/farm_send/f
 ## Develop
 
 ```
-python3 tests/test_farm.py            # 43 tests against in-process fake printers
+python3 tests/test_farm.py            # 45 tests against in-process fake printers
 python3 tests/hardware_check.py       # read-only check of your real printers
 python3 tests/hardware_check.py --upload "U1 #2"   # 1 KB upload, list, delete. Never prints.
 ./install.sh                          # rebuild and copy over the installed plugin

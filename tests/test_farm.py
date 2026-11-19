@@ -265,6 +265,8 @@ class AppTests(unittest.TestCase):
     def setUp(self):
         self.folder = tempfile.TemporaryDirectory()
         self.addCleanup(self.folder.cleanup)
+        self.orca_tmp = tempfile.TemporaryDirectory()      # stands in for OrcaSlicer's temp folder
+        self.addCleanup(self.orca_tmp.cleanup)
         self.u1, self.u1b, self.cc2 = FakeMoonraker(), FakeMoonraker(), FakeCC2()
         for fake in (self.u1, self.u1b, self.cc2):
             self.addCleanup(fake.close)
@@ -276,115 +278,148 @@ class AppTests(unittest.TestCase):
         self.p_cc2 = self.app.store.upsert({"name": "CC1", "kind": core.KIND_CC2, "address": self.cc2.address, "model": "Centauri Carbon 2",
                                             "access_code": "abc123", "mqtt_port": self.cc2.mqtt_port})
 
-    def slice(self, text=U1_GCODE, name="t.gcode", model_name=""):
-        path = write(self.folder.name, name, text)
+    def slice(self, text=U1_GCODE, model_name=""):
+        """Slice 'the plate': OrcaSlicer always rewrites the same temp file, whatever the printer."""
+        path = write(self.orca_tmp.name, ".1.0.gcode", text)
         self.app.on_slice_started()
         self.app.on_gcode_exported(path, model_name)
-        self.assertTrue(wait_for(lambda: self.app.jobs[0]["ready"] or self.app.jobs[0]["error"]))
-        return self.app.jobs[0]
+        job = self.app.jobs[0]
+        self.assertTrue(wait_for(lambda: job["ready"] or job["error"]))
+        return job
 
-    def send(self, job, printers, start):
-        self.app.handle({"command": "send", "job_id": job["id"], "printer_ids": [p["id"] for p in printers], "start": start})
+    def send(self, printers, start):
+        self.app.handle({"command": "send", "printer_ids": [p["id"] for p in printers], "start": start})
         self.assertTrue(wait_for(lambda: all(not self.app.sends.get(p["id"], {"active": True})["active"] for p in printers)))
         return [self.app.sends[p["id"]] for p in printers]
 
+    def copies(self):
+        folder = os.path.join(self.folder.name, "slices")
+        return sorted(os.listdir(folder)) if os.path.isdir(folder) else []
+
     def test_capture_and_view(self):
         job = self.slice()
-        view = self.app.snapshot()["job"]
+        snapshot = self.app.snapshot()
+        (view,) = snapshot["jobs"]
         self.assertTrue(view["ready"])
         self.assertEqual(view["display_name"], "widget")
         self.assertIn("1h02m", view["summary"])
-        self.assertEqual(view["matches"], {self.p_u1["id"]: True, self.p_u1b["id"]: True, self.p_cc2["id"]: False})
-        self.assertFalse(self.app.snapshot()["slicing"])
-        self.assertEqual(job["meta"]["printer_model"], "Snapmaker U1")
+        self.assertEqual(view["printers"], ["U1 #1", "U1 #2"])
+        self.assertEqual(snapshot["job_for"], {self.p_u1["id"]: job["id"], self.p_u1b["id"]: job["id"], self.p_cc2["id"]: None})
+        self.assertFalse(snapshot["slicing"])
+        self.assertEqual(self.copies(), [job["id"] + ".gcode"])
 
     def test_upload_only_does_not_start(self):
-        (result,) = self.send(self.slice(), [self.p_u1], start=False)
+        self.slice()
+        (result,) = self.send([self.p_u1], start=False)
         self.assertTrue(result["ok"], result)
-        self.assertEqual(len(self.u1.files), 1)
-        name = next(iter(self.u1.files))
+        (name,) = self.u1.files
         self.assertRegex(name, r"^widget_PETG_1h02m_\d{8}-\d{6}\.gcode$")
         self.assertEqual(self.u1.files[name].decode(), U1_GCODE)
         self.assertEqual(self.u1.started, [])
 
     def test_upload_and_print(self):
-        (result,) = self.send(self.slice(), [self.p_u1], start=True)
+        self.slice()
+        (result,) = self.send([self.p_u1], start=True)
         self.assertTrue(result["ok"], result)
         self.assertEqual(self.u1.started, list(self.u1.files))
         self.assertTrue(any(level == "info" for level, _ in self.notes))
 
-    def test_mismatch_is_blocked_before_any_network_call(self):
-        (result,) = self.send(self.slice(), [self.p_cc2], start=True)
+    def test_wrong_type_is_blocked_before_any_network_call(self):
+        self.slice()
+        (result,) = self.send([self.p_cc2], start=True)
         self.assertFalse(result["ok"])
         self.assertIn("Blocked", result["text"])
-        self.assertEqual(self.cc2.files, {})
-        self.assertEqual(self.cc2.started, [])
+        self.assertEqual((self.cc2.files, self.cc2.started), ({}, []))
+
+    def test_slice_for_both_types_then_send_everything_at_once(self):
+        u1_job = self.slice(U1_GCODE)
+        cc2_job = self.slice(CC2_GCODE)       # same temp file, rewritten: the U1 plate must survive
+        self.assertEqual({job["id"] for job in self.app.jobs}, {u1_job["id"], cc2_job["id"]})
+        self.assertEqual(len(self.copies()), 2)
+        snapshot = self.app.snapshot()
+        self.assertEqual(snapshot["job_for"], {self.p_u1["id"]: u1_job["id"], self.p_u1b["id"]: u1_job["id"], self.p_cc2["id"]: cc2_job["id"]})
+        results = self.send([self.p_u1, self.p_u1b, self.p_cc2], start=True)
+        self.assertEqual([r["ok"] for r in results], [True, True, True], results)
+        self.assertEqual(list(self.u1.files), list(self.u1b.files))                 # one name for the U1 batch
+        self.assertEqual(next(iter(self.u1.files.values())).decode(), U1_GCODE)     # each type got its own plate
+        self.assertEqual(next(iter(self.cc2.files.values())).decode(), CC2_GCODE)
+        self.assertEqual((len(self.u1.started), len(self.u1b.started), len(self.cc2.started)), (1, 1, 1))
 
     def test_cc2_upload_and_print(self):
-        (result,) = self.send(self.slice(CC2_GCODE), [self.p_cc2], start=True)
+        self.slice(CC2_GCODE)
+        (result,) = self.send([self.p_cc2], start=True)
         self.assertTrue(result["ok"], result)
         self.assertEqual(self.cc2.started, list(self.cc2.files))
         self.assertEqual(self.u1.files, {})
 
     def test_print_refused_when_busy_but_file_stays(self):
         self.u1.state = "printing"
-        (result,) = self.send(self.slice(), [self.p_u1], start=True)
+        self.slice()
+        (result,) = self.send([self.p_u1], start=True)
         self.assertFalse(result["ok"])
         self.assertIn("not started", result["text"])
-        self.assertEqual(len(self.u1.files), 1)
-        self.assertEqual(self.u1.started, [])
-
-    def test_batch_uses_one_filename(self):
-        results = self.send(self.slice(), [self.p_u1, self.p_u1b, self.p_cc2], start=True)
-        self.assertEqual([r["ok"] for r in results], [True, True, False])
-        self.assertEqual(list(self.u1.files), list(self.u1b.files))
-        self.assertEqual(self.cc2.files, {})
+        self.assertEqual((len(self.u1.files), self.u1.started), (1, []))
 
     def test_offline_printer_fails_cleanly_and_others_succeed(self):
         self.u1b.close()
-        results = self.send(self.slice(), [self.p_u1, self.p_u1b], start=False)
+        self.slice()
+        results = self.send([self.p_u1, self.p_u1b], start=False)
         self.assertEqual([r["ok"] for r in results], [True, False])
         self.assertIn("Cannot reach", results[1]["text"])
 
-    def test_reslice_replaces_job_and_stale_send_is_refused(self):
-        job = self.slice()
-        time.sleep(0.02)
-        newer = self.slice(U1_GCODE + "; changed\n")
-        self.assertEqual(len(self.app.jobs), 1)
-        (result,) = self.send(job, [self.p_u1], start=False)
-        self.assertFalse(result["ok"])
-        self.assertEqual(self.u1.files, {})
-        (result,) = self.send(newer, [self.p_u1], start=False)
-        self.assertTrue(result["ok"])
+    def test_reslice_for_same_type_replaces_only_that_type(self):
+        self.slice(CC2_GCODE)
+        old = self.slice(U1_GCODE)
+        new = self.slice(U1_GCODE + "; changed\n")
+        self.assertEqual(len(self.app.jobs), 2)
+        self.assertNotIn(old["id"] + ".gcode", self.copies())
+        self.assertEqual(len(self.copies()), 2)
+        self.send([self.p_u1], start=False)
+        self.assertTrue(next(iter(self.u1.files.values())).decode().endswith("; changed\n"))
+        self.assertEqual(self.app.snapshot()["job_for"][self.p_u1["id"]], new["id"])
 
-    def test_file_changed_on_disk_is_refused(self):
-        job = self.slice()
-        time.sleep(0.02)
-        write(self.folder.name, "t.gcode", U1_GCODE + "; rewritten behind our back\n")
-        (result,) = self.send(job, [self.p_u1], start=True)
-        self.assertFalse(result["ok"])
-        self.assertIn("sliced again", result["text"])
-        self.assertEqual(self.u1.started, [])
+    def test_orca_rewriting_its_temp_file_does_not_change_what_is_sent(self):
+        self.slice(U1_GCODE)
+        write(self.orca_tmp.name, ".1.0.gcode", "; something else entirely, never announced\n")
+        (result,) = self.send([self.p_u1], start=False)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(next(iter(self.u1.files.values())).decode(), U1_GCODE)
+
+    def test_sending_keeps_working_while_the_next_type_is_slicing(self):
+        self.slice(U1_GCODE)
+        self.app.on_slice_started()
+        (result,) = self.send([self.p_u1], start=False)
+        self.assertTrue(result["ok"], result)
 
     def test_no_model_in_gcode_cannot_be_sent(self):
         job = self.slice("G28\n; nothing useful\n")
         self.assertFalse(job["ready"])
-        (result,) = self.send(job, [self.p_u1], start=False)
+        self.assertIn("printer model", job["error"])
+        (result,) = self.send([self.p_u1], start=False)
         self.assertFalse(result["ok"])
+        self.assertEqual(self.copies(), [])
 
-    def test_sending_blocked_while_slicing(self):
-        job = self.slice()
-        self.app.on_slice_started()
-        (result,) = self.send(job, [self.p_u1], start=False)
-        self.assertFalse(result["ok"])
-        self.assertIn("Slicing", result["text"])
+    def test_failed_capture_does_not_discard_good_plates(self):
+        good = self.slice(U1_GCODE)
+        self.slice("G28\n; nothing useful\n")
+        self.assertEqual(self.app.snapshot()["job_for"][self.p_u1["id"]], good["id"])
+        (result,) = self.send([self.p_u1], start=False)
+        self.assertTrue(result["ok"], result)
 
-    def test_stale_flag_and_project_close(self):
-        self.slice()
+    def test_stale_flag_and_project_close_removes_copies(self):
+        self.slice(U1_GCODE)
+        self.slice(CC2_GCODE)
         self.app.mark_stale()
-        self.assertTrue(self.app.snapshot()["job"]["stale"])
+        self.assertEqual([view["stale"] for view in self.app.snapshot()["jobs"]], [True, True])
         self.app.project_closed()
-        self.assertIsNone(self.app.snapshot()["job"])
+        self.assertEqual(self.app.snapshot()["jobs"], [])
+        self.assertEqual(self.copies(), [])
+
+    def test_leftover_copies_are_cleared_at_startup(self):
+        self.slice(U1_GCODE)
+        self.assertEqual(len(self.copies()), 1)
+        FarmApp(self.folder.name, lambda message: None)
+        self.assertEqual(self.copies(), [])
 
     def test_poll_reports_each_printer(self):
         self.u1b.close()
@@ -407,8 +442,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(len(core.PrinterStore(self.app.store.path).printers), 4)
 
     def test_cancel_during_upload(self):
-        big = U1_GCODE.replace("G1 X1\n", "G1 X1\n" * 400000)
-        job = self.slice(big)
+        self.slice(U1_GCODE.replace("G1 X1\n", "G1 X1\n" * 400000))
         original = core.Moonraker.upload
 
         def slow(client, path, filename, progress=None, cancelled=None):
@@ -420,7 +454,7 @@ class AppTests(unittest.TestCase):
 
         core.Moonraker.upload = slow
         self.addCleanup(setattr, core.Moonraker, "upload", original)
-        self.app.handle({"command": "send", "job_id": job["id"], "printer_ids": [self.p_u1["id"]], "start": True})
+        self.app.handle({"command": "send", "printer_ids": [self.p_u1["id"]], "start": True})
         self.assertTrue(wait_for(lambda: (self.app.sends.get(self.p_u1["id"]) or {}).get("percent")))
         self.app.handle({"command": "cancel_send", "id": self.p_u1["id"]})
         self.assertTrue(wait_for(lambda: not self.app.sends[self.p_u1["id"]]["active"]))

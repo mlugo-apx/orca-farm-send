@@ -1029,7 +1029,7 @@ def can_start(status):
 
 # ======================================================================================
 # app
-MAX_JOBS = 8
+SLICE_DIR = "slices"
 STATUS_MIN_INTERVAL = 3.0
 STATUS_MIN_INTERVAL_CC2 = 8.0   # each CC2 poll is a full MQTT connect + register; be gentle
 BLOCKED_TEXT = "OrcaSlicer blocked network access to this printer. Approve the permission prompt, then it retries."
@@ -1056,8 +1056,12 @@ class FarmApp:
         self._default_name = default_name or (lambda: "")
         self._spawn = spawn or self._spawn_thread
         self.lock = threading.RLock()
-        self.jobs = []            # newest first
-        self.selected_job = None
+        # One sliced plate per printer type, newest first. Each is the plugin's OWN copy of the G-code,
+        # because OrcaSlicer rewrites its temp file on the next slice: without a copy, slicing for
+        # the second printer type would destroy the plate sliced for the first.
+        self.jobs = []
+        self.slice_dir = os.path.join(storage_dir, SLICE_DIR)
+        self._clear_slice_dir()
         self.slicing = False
         self.status = {}          # printer id -> normalized status
         self._status_at = {}
@@ -1071,6 +1075,22 @@ class FarmApp:
         self._apply_presets = apply_presets
         self.current = None
         self.combo_note = {"text": "", "ok": True, "busy": False}
+
+    def _clear_slice_dir(self):
+        """Drop copies left by an earlier session or project. They are only useful while their plate is open."""
+        try:
+            for name in os.listdir(self.slice_dir):
+                if name.endswith(".gcode") or name.endswith(".part"):
+                    self._remove_file(os.path.join(self.slice_dir, name))
+        except OSError:
+            pass
+
+    @staticmethod
+    def _remove_file(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
     @staticmethod
     def _spawn_thread(target, *args):
@@ -1098,34 +1118,51 @@ class FarmApp:
     def on_gcode_exported(self, path, name=""):
         if not path or not path.lower().endswith(".gcode"):
             return
-        job = {"id": uuid.uuid4().hex[:10], "path": path, "name": name or "", "captured_at": time.time(),
-               "ready": False, "error": "", "stale": False, "meta": {}, "mtime": None, "size": None}
+        job = {"id": uuid.uuid4().hex[:10], "source": path, "path": "", "name": name or "", "captured_at": time.time(),
+               "ready": False, "error": "", "stale": False, "meta": {}, "key": ""}
         with self.lock:
             self.slicing = False
-            # A re-slice of the same plate reuses the same temp file: the old entry is now wrong.
-            self.jobs = [existing for existing in self.jobs if existing["path"] != path]
+            # Earlier failed or still-pending captures are superseded by this slice.
+            self.jobs = [existing for existing in self.jobs if existing["ready"]]
             self.jobs.insert(0, job)
-            del self.jobs[MAX_JOBS:]
-            self.selected_job = job["id"]
         self.post_state()
         self._spawn(self._read_job, job)
 
     def _read_job(self, job):
+        """Copy the freshly sliced G-code into plugin storage, then read its metadata."""
+        copy = os.path.join(self.slice_dir, job["id"] + ".gcode")
         try:
-            stat = os.stat(job["path"])
-            meta = parse_gcode_meta(job["path"])
+            os.makedirs(self.slice_dir, exist_ok=True)
+            before = os.stat(job["source"])
+            shutil.copyfile(job["source"], copy + ".part")
+            after = os.stat(job["source"])
+            if (before.st_size, before.st_mtime) != (after.st_size, after.st_mtime) or os.path.getsize(copy + ".part") != after.st_size:
+                raise FarmError("The plate was sliced again while it was being read. The newer slice replaces it.")
+            os.replace(copy + ".part", copy)
+            meta = parse_gcode_meta(copy)
+            if not meta.get("printer_model"):
+                raise FarmError("The sliced G-code does not name a printer model, so it cannot be matched to a printer.")
+            replaced = []
             with self.lock:
-                job["mtime"], job["size"], job["meta"] = stat.st_mtime, stat.st_size, meta
-                if not meta.get("printer_model"):
-                    job["error"] = "The sliced G-code does not name a printer model, so it cannot be matched to a printer."
+                if job not in self.jobs:          # project closed or superseded while copying
+                    replaced.append(copy)
                 else:
+                    job["path"], job["meta"], job["key"] = copy, meta, model_key(meta["printer_model"])
+                    # The newest slice for a printer type replaces the older one for that type only.
+                    replaced += [other["path"] for other in self.jobs if other is not job and other["key"] == job["key"]]
+                    self.jobs = [other for other in self.jobs if other is job or other["key"] != job["key"]]
                     job["ready"] = True
+            for path in replaced:
+                self._remove_file(path)
+        except FarmError as error:
+            job["error"] = str(error)
         except PermissionError:
-            with self.lock:
-                job["error"] = "OrcaSlicer blocked reading the sliced G-code. Approve the permission prompt and slice again."
+            job["error"] = "OrcaSlicer blocked reading the sliced G-code. Approve the permission prompt and slice again."
         except OSError as error:
-            with self.lock:
-                job["error"] = "Cannot read the sliced G-code: %s" % (error.strerror or error)
+            job["error"] = "Cannot read the sliced G-code: %s" % (error.strerror or error)
+        if job["error"]:
+            self._remove_file(copy + ".part")
+            self._remove_file(copy)
         self.post_state()
 
     def mark_stale(self):
@@ -1139,15 +1176,18 @@ class FarmApp:
 
     def project_closed(self):
         with self.lock:
-            self.jobs, self.selected_job, self.slicing = [], None, False
+            paths = [job["path"] for job in self.jobs if job["path"]]
+            self.jobs, self.slicing = [], False
+        for path in paths:
+            self._remove_file(path)
         self.post_state()
 
-    # ---- state for the panel ---------------------------------------------------------------------
-    def _current_job(self):
+    def _job_for(self, printer):
+        """The ready sliced plate for this printer's type, or None."""
         for job in self.jobs:
-            if job["id"] == self.selected_job:
+            if job["ready"] and model_matches(job["meta"].get("printer_model"), printer.get("model")):
                 return job
-        return self.jobs[0] if self.jobs else None
+        return None
 
     def _job_base_name(self, job):
         if not job["name"]:
@@ -1177,18 +1217,21 @@ class FarmApp:
             "printer_model": meta.get("printer_model", ""), "sliced_at": _clock(job["captured_at"]),
             "post_process": bool((meta.get("post_process") or "").strip()),
             "presets": " \u00b7 ".join(part for part in (meta.get("process_preset"), meta.get("filament_preset")) if part),
-            "matches": {p["id"]: model_matches(meta.get("printer_model"), p.get("model")) for p in self.store.printers},
+            "printers": [p["name"] for p in self.store.printers if model_matches(meta.get("printer_model"), p.get("model"))],
         }
 
     def snapshot(self):
         with self.lock:
-            job = self._current_job()
+            job_for = {}
+            for printer in self.store.printers:
+                match = self._job_for(printer)
+                job_for[printer["id"]] = match["id"] if match else None
             return {
                 "command": "state",
                 "printers": [{k: p.get(k, "") for k in ("id", "name", "kind", "address", "model", "access_code", "api_key")}
                              for p in self.store.printers],
-                "job": self._job_view(job) if job else None,
-                "jobs": [self._job_view(j) for j in self.jobs if j["ready"]],
+                "jobs": [self._job_view(job) for job in self.jobs],
+                "job_for": job_for,
                 "slicing": self.slicing,
                 "status": dict(self.status),
                 "sends": dict(self.sends),
@@ -1292,12 +1335,6 @@ class FarmApp:
         # The selection is re-read on the next poll, which runs on the UI thread.
         self.post_state()
 
-    def _cmd_select_job(self, message):
-        with self.lock:
-            if any(job["id"] == message.get("job_id") for job in self.jobs):
-                self.selected_job = message.get("job_id")
-        self.post_state()
-
     def _cmd_test_printer(self, message):
         try:
             printer = validate_printer(dict(message.get("printer") or {}, model=(message.get("printer") or {}).get("model") or "?"))
@@ -1363,45 +1400,42 @@ class FarmApp:
             event.set()
 
     def _cmd_send(self, message):
+        """Send to each listed printer the plate that was sliced for its type."""
         start = bool(message.get("start"))
         options = message.get("options") or {}
+        work = []
         with self.lock:
-            job = next((j for j in self.jobs if j["id"] == message.get("job_id")), None)
-            targets = []
+            names = {}
             for printer_id in message.get("printer_ids") or []:
                 printer = self.store.get(printer_id)
                 if printer is None:
                     continue
-                problem = self._send_problem(job, printer)
-                if problem:
+                if self.sends.get(printer_id, {}).get("active"):
+                    continue
+                job = self._job_for(printer)
+                if job is None:
+                    other = next((j for j in self.jobs if j["ready"]), None)
+                    if other is not None:
+                        problem = "Blocked: no plate sliced for %s (the sliced plate is for %s)" % (
+                            printer.get("model"), other["meta"].get("printer_model") or "another printer")
+                    else:
+                        problem = "No sliced plate for this printer type. Slice one first."
                     self._set_send(printer_id, False, problem, ok=False)
                     continue
+                if job["id"] not in names:
+                    # One file name per plate, fixed now so every printer of that type gets the same one.
+                    meta = job["meta"]
+                    parts = [self._job_base_name(job)]
+                    if meta.get("filament_type"):
+                        parts.append(meta["filament_type"].split(";")[0])
+                    if meta.get("time_s"):
+                        parts.append(_short_duration(meta["time_s"]))
+                    names[job["id"]] = job_filename("_".join(parts))
                 self._cancel[printer_id] = threading.Event()
                 self._set_send(printer_id, True, "Preparing...", percent=0)
-                targets.append(dict(printer))
-            if job is not None and targets:
-                # One file name for the whole batch, fixed now so every printer gets the same one.
-                meta = job["meta"]
-                parts = [self._job_base_name(job)]
-                if meta.get("filament_type"):
-                    parts.append(meta["filament_type"].split(";")[0])
-                if meta.get("time_s"):
-                    parts.append(_short_duration(meta["time_s"]))
-                filename = job_filename("_".join(parts))
-                snapshot = {"path": job["path"], "mtime": job["mtime"], "size": job["size"], "name": filename}
-        for printer in targets:
+                work.append((dict(printer), {"path": job["path"], "name": names[job["id"]]}))
+        for printer, snapshot in work:
             self._spawn(self._send_worker, printer, snapshot, start, options)
-
-    def _send_problem(self, job, printer):
-        if self.slicing:
-            return "Slicing is in progress"
-        if job is None or not job["ready"]:
-            return "That sliced plate is no longer available. Slice again."
-        if not model_matches(job["meta"].get("printer_model"), printer.get("model")):
-            return "Blocked: sliced for %s, this printer is %s" % (job["meta"].get("printer_model") or "unknown", printer.get("model"))
-        if self.sends.get(printer["id"], {}).get("active"):
-            return "A send is already running"
-        return ""
 
     def _set_send(self, printer_id, active, text, percent=None, ok=None):
         entry = {"active": active, "text": text, "percent": percent, "ok": ok}
@@ -1413,9 +1447,8 @@ class FarmApp:
         printer_id, name = printer["id"], printer["name"]
         cancel = self._cancel.get(printer_id) or threading.Event()
         try:
-            stat = os.stat(snapshot["path"])
-            if stat.st_size != snapshot["size"] or stat.st_mtime != snapshot["mtime"]:
-                raise FarmError("The plate was sliced again while sending. Send the new slice.")
+            if not os.path.exists(snapshot["path"]):
+                raise FarmError("That sliced plate was replaced by a newer slice. Send again.")
             client = make_client(printer)
             last = [0.0]
 
@@ -1427,9 +1460,6 @@ class FarmApp:
 
             self._set_send(printer_id, True, "Uploading 0%", percent=0)
             remote = client.upload(snapshot["path"], snapshot["name"], progress=progress, cancelled=cancel.is_set)
-            stat = os.stat(snapshot["path"])
-            if stat.st_size != snapshot["size"] or stat.st_mtime != snapshot["mtime"]:
-                raise FarmError("The plate was sliced again during the upload. The uploaded file may be incomplete; send again.")
             if not start:
                 self._set_send(printer_id, False, "Uploaded %s" % remote, ok=True)
                 self._notify("info", "Farm Send: uploaded %s to %s" % (remote, name))
@@ -1448,6 +1478,9 @@ class FarmApp:
             self._notify("error", "Farm Send: %s: %s" % (name, error))
         except PermissionError:
             self._set_send(printer_id, False, BLOCKED_TEXT, ok=False)
+        except FileNotFoundError:
+            # A re-slice for this printer type, or closing the project, removed the copy mid-upload.
+            self._set_send(printer_id, False, "The sliced plate was replaced or closed during the upload. Send again.", ok=False)
         except OSError as error:
             self._set_send(printer_id, False, "Cannot read the sliced G-code: %s" % (error.strerror or error), ok=False)
         except Exception as error:  # never leave a card stuck on "Uploading"
@@ -1555,7 +1588,7 @@ PANEL_HTML = r"""<style>
 
 <script>
 (function () {
-  var state = { printers: [], job: null, jobs: [], status: {}, sends: {}, slicing: false,
+  var state = { printers: [], jobs: [], job_for: {}, status: {}, sends: {}, slicing: false,
                 combos: [], current: null, combo_note: { text: "" }, can_switch: false };
   var selected = {};
   var $ = function (id) { return document.getElementById(id); };
@@ -1587,15 +1620,19 @@ PANEL_HTML = r"""<style>
   function hideDialog() { $("overlay").className = ""; $("dialog").innerHTML = ""; }
   $("overlay").addEventListener("click", function (event) { if (event.target === $("overlay")) hideDialog(); });
 
-  function compatible(printer) {
-    return state.job && state.job.ready && state.job.matches && state.job.matches[printer.id];
+  function jobOf(printer) {
+    var id = state.job_for[printer.id];
+    if (!id) return null;
+    return state.jobs.filter(function (j) { return j.id === id && j.ready; })[0] || null;
   }
   function blockReason(printer, start) {
-    var job = state.job, status = state.status[printer.id];
-    if (state.slicing) return "Slicing in progress";
-    if (!job) return "Slice a plate first";
-    if (!job.ready) return job.error || "Reading the sliced G-code";
-    if (!compatible(printer)) return "Sliced for " + (job.printer_model || "an unknown printer") + ", not " + printer.model;
+    var job = jobOf(printer), status = state.status[printer.id];
+    if (!job) {
+      var ready = state.jobs.filter(function (j) { return j.ready; });
+      if (ready.length) return "No plate sliced for " + printer.model + " yet";
+      if (state.jobs.length && !state.jobs[0].error) return "Reading the sliced G-code";
+      return "Slice a plate first";
+    }
     if (state.sends[printer.id] && state.sends[printer.id].active) return "Send in progress";
     if (!status || status.state === "unknown") return "Checking printer";
     if (status.state === "offline") return "Printer is offline";
@@ -1604,29 +1641,40 @@ PANEL_HTML = r"""<style>
   }
 
   function confirmSend(printers, start) {
-    var job = state.job;
-    var names = printers.map(function (p) { return "<li>" + esc(p.name) + " <span class='muted'>(" + esc(p.address) + ")</span></li>"; }).join("");
-    var notes = "";
-    if (job.stale) notes += "<p class='warn small'>The plate or a preset changed after this slice. Re-slice if the change matters.</p>";
-    if (job.post_process) notes += "<p class='warn small'>This process preset has post-processing scripts. Farm Send sends the G-code before those scripts run.</p>";
+    // Group the printers by the plate each one will receive: one plate per printer type.
+    var groups = [], seen = {};
+    printers.forEach(function (p) {
+      var job = jobOf(p);
+      if (!job) return;
+      if (!(job.id in seen)) { seen[job.id] = groups.length; groups.push({ job: job, printers: [] }); }
+      groups[seen[job.id]].printers.push(p);
+    });
+    var body = groups.map(function (g) {
+      var notes = "";
+      if (g.job.stale) notes += "<div class='warn small'>The plate changed after this slice. Re-slice if the change matters.</div>";
+      if (g.job.post_process) notes += "<div class='warn small'>Post-processing scripts are not applied to this file.</div>";
+      return "<div class='box' style='margin-top:8px'><div class='job-name small'>" + esc(g.job.display_name) + "</div>" +
+        "<div class='muted small'>" + esc(g.job.summary) + " · for " + esc(g.job.printer_model) + "</div>" + notes +
+        "<ul class='plain'>" + g.printers.map(function (p) {
+          return "<li>" + esc(p.name) + " <span class='muted'>(" + esc(p.address) + ")</span></li>";
+        }).join("") + "</ul></div>";
+    }).join("");
     var options = "";
     if (start && printers.some(function (p) { return p.kind === "elegoo_cc2"; })) {
-      options = "<div class='check'><input type='checkbox' id='opt-level' checked><label for='opt-level'>Bed leveling before print (CC2)</label></div>" +
+      options = "<div class='check' style='margin-top:8px'><input type='checkbox' id='opt-level' checked><label for='opt-level'>Bed leveling before print (CC2)</label></div>" +
                 "<div class='check'><input type='checkbox' id='opt-lapse'><label for='opt-lapse'>Time-lapse (CC2)</label></div>";
     }
     showDialog(
-      "<h4>" + (start ? "Start printing?" : "Upload file?") + "</h4>" +
-      "<div class='job-name small'>" + esc(job.display_name) + "</div>" +
-      "<div class='muted small'>" + esc(job.summary) + "</div>" +
-      "<p style='margin:10px 0 0'>" + (start ? "The print starts immediately on:" : "The file is uploaded, not printed, to:") + "</p>" +
-      "<ul class='plain'>" + names + "</ul>" + options + notes +
+      "<h4>" + (start ? "Start printing?" : "Upload?") + "</h4>" +
+      "<p style='margin:0'>" + (start ? "Each print starts immediately." : "Files are uploaded, not printed.") +
+      (groups.length > 1 ? " Each printer gets the plate sliced for its type." : "") + "</p>" + body + options +
       (start ? "<p class='small muted'>Make sure each bed is clear.</p>" : "") +
       "<div class='dialog-actions'><button type='button' class='quiet' id='dlg-cancel'>Cancel</button>" +
       "<button type='button' id='dlg-ok'" + (start ? " class='danger'" : "") + ">" + (start ? "Start print" : "Upload") + "</button></div>");
     $("dlg-cancel").onclick = hideDialog;
     $("dlg-ok").onclick = function () {
       var options = { bed_leveling: $("opt-level") ? $("opt-level").checked : true, timelapse: $("opt-lapse") ? $("opt-lapse").checked : false };
-      send("send", { printer_ids: printers.map(function (p) { return p.id; }), start: start, job_id: job.id, options: options });
+      send("send", { printer_ids: printers.map(function (p) { return p.id; }), start: start, options: options });
       hideDialog();
     };
   }
@@ -1681,28 +1729,25 @@ PANEL_HTML = r"""<style>
 
   // ---- rendering ---------------------------------------------------------------------------
   function renderJob() {
-    var job = state.job, html;
-    if (state.slicing) {
-      html = "<div class='muted'>Slicing...</div>";
-    } else if (!job) {
-      html = "<div class='muted'>No sliced plate yet. Slice a plate and it appears here.</div>";
-    } else if (!job.ready) {
-      html = "<div class='" + (job.error ? "err" : "muted") + "'>" + esc(job.error || "Reading the sliced G-code...") + "</div>";
-    } else {
-      html = "<div class='job-name'>" + esc(job.display_name) + "</div>" +
-             "<div class='muted small'>" + esc(job.summary) + "</div>" +
-             "<div class='muted small'>For " + esc(job.printer_model || "unknown printer") + " · sliced " + esc(job.sliced_at) + "</div>" +
-             (job.presets ? "<div class='muted small file' title='" + esc(job.presets) + "'>" + esc(job.presets) + "</div>" : "") +
-             (job.stale ? "<div class='warn small'>Plate or preset changed since this slice.</div>" : "") +
-             (job.post_process ? "<div class='warn small'>Post-processing scripts are not applied.</div>" : "");
-      if (state.jobs.length > 1) {
-        html += "<label class='field'>Other sliced plates<select id='job-pick'>" + state.jobs.map(function (j) {
-          return "<option value='" + esc(j.id) + "'" + (j.id === job.id ? " selected" : "") + ">" + esc(j.display_name) + " (" + esc(j.sliced_at) + ")</option>";
-        }).join("") + "</select></label>";
-      }
+    var html = "";
+    if (state.slicing) html += "<div class='muted'>Slicing...</div>";
+    if (!state.jobs.length && !state.slicing) {
+      html += "<div class='muted'>No sliced plate yet. Slice once for each printer type; every slice is kept here until you send.</div>";
     }
+    html += state.jobs.map(function (job, index) {
+      var top = (index || state.slicing) ? " style='margin-top:8px;padding-top:8px;border-top:1px solid var(--orca-border)'" : "";
+      if (!job.ready) {
+        return "<div" + top + " class='" + (job.error ? "err" : "muted") + "'>" + esc(job.error || "Reading the sliced G-code...") + "</div>";
+      }
+      return "<div" + top + "><div class='job-name'>" + esc(job.display_name) + "</div>" +
+        "<div class='muted small'>" + esc(job.summary) + "</div>" +
+        "<div class='small'>For <b>" + esc(job.printer_model || "unknown printer") + "</b><span class='muted'> · sliced " + esc(job.sliced_at) +
+          (job.printers.length ? " · " + esc(job.printers.join(", ")) : " · no printer of this type") + "</span></div>" +
+        (job.presets ? "<div class='muted small file' title='" + esc(job.presets) + "'>" + esc(job.presets) + "</div>" : "") +
+        (job.stale ? "<div class='warn small'>Plate changed since this slice.</div>" : "") +
+        (job.post_process ? "<div class='warn small'>Post-processing scripts are not applied.</div>" : "") + "</div>";
+    }).join("");
     $("job").innerHTML = html;
-    if ($("job-pick")) $("job-pick").onchange = function () { send("select_job", { job_id: this.value }); };
   }
 
   function renderCombos() {
@@ -1738,20 +1783,27 @@ PANEL_HTML = r"""<style>
   });
 
   function renderMulti() {
-    var ids = Object.keys(selected).filter(function (id) { return selected[id]; });
-    var chosen = state.printers.filter(function (p) { return ids.indexOf(p.id) >= 0; });
-    if (chosen.length < 2) { $("multi").style.display = "none"; return; }
-    var uploadBlocked = chosen.some(function (p) { return blockReason(p, false); });
-    var startBlocked = chosen.some(function (p) { return blockReason(p, true); });
+    var withPlate = state.printers.filter(function (p) { return jobOf(p); });
+    var chosen = state.printers.filter(function (p) { return selected[p.id]; });
+    if (chosen.length < 2 && withPlate.length < 2) { $("multi").style.display = "none"; return; }
     $("multi").style.display = "block";
-    $("multi").innerHTML = "<div class='row spread'><span>" + chosen.length + " printers selected</span>" +
-      "<button type='button' class='linkish' id='multi-clear'>clear</button></div>" +
-      "<div class='actions'><button type='button' class='quiet' id='multi-upload'" + (uploadBlocked ? " disabled" : "") + ">Upload to all</button>" +
-      "<button type='button' id='multi-start'" + (startBlocked ? " disabled" : "") + ">Upload and print on all</button></div>" +
-      (startBlocked && !uploadBlocked ? "<div class='muted small' style='margin-top:4px'>Print is available when every selected printer is idle.</div>" : "");
-    $("multi-clear").onclick = function () { selected = {}; render(); };
-    $("multi-upload").onclick = function () { confirmSend(chosen, false); };
-    $("multi-start").onclick = function () { confirmSend(chosen, true); };
+    var allPicked = withPlate.length > 0 && withPlate.every(function (p) { return selected[p.id]; });
+    var html = "<div class='row spread'><span>" + (chosen.length ? chosen.length + " selected" : "Send to several printers") + "</span><span>" +
+      (withPlate.length >= 2 && !allPicked ? "<button type='button' class='linkish' id='multi-all'>select all with a plate (" + withPlate.length + ")</button>" : "") +
+      (chosen.length ? "<button type='button' class='linkish' id='multi-clear'>clear</button>" : "") + "</span></div>";
+    if (chosen.length >= 2) {
+      var uploadBlocked = chosen.some(function (p) { return blockReason(p, false); });
+      var startBlocked = chosen.some(function (p) { return blockReason(p, true); });
+      html += "<div class='actions'><button type='button' class='quiet' id='multi-upload'" + (uploadBlocked ? " disabled" : "") + ">Upload to all</button>" +
+        "<button type='button' id='multi-start'" + (startBlocked ? " disabled" : "") + ">Upload and print on all</button></div>";
+      if (uploadBlocked) html += "<div class='muted small' style='margin-top:4px'>A selected printer has no plate sliced for its type, or is offline.</div>";
+      else if (startBlocked) html += "<div class='muted small' style='margin-top:4px'>Print is available when every selected printer is idle.</div>";
+    }
+    $("multi").innerHTML = html;
+    if ($("multi-all")) $("multi-all").onclick = function () { withPlate.forEach(function (p) { selected[p.id] = true; }); render(); };
+    if ($("multi-clear")) $("multi-clear").onclick = function () { selected = {}; render(); };
+    if ($("multi-upload")) $("multi-upload").onclick = function () { confirmSend(chosen, false); };
+    if ($("multi-start")) $("multi-start").onclick = function () { confirmSend(chosen, true); };
   }
 
   function renderPrinters() {
@@ -1819,7 +1871,7 @@ PANEL_HTML = r"""<style>
   orca.onMessage(function (message) {
     if (!message) return;
     if (message.command === "state") {
-      ["printers", "job", "jobs", "slicing", "combos", "current", "combo_note", "can_switch"].forEach(function (key) { if (key in message) state[key] = message[key]; });
+      ["printers", "jobs", "job_for", "slicing", "combos", "current", "combo_note", "can_switch"].forEach(function (key) { if (key in message) state[key] = message[key]; });
       if (message.status) state.status = message.status;
       if (message.sends) state.sends = message.sends;
       render();
@@ -1995,8 +2047,9 @@ class FarmSend(orca.script.ScriptPluginCapabilityBase):
                 self.app.on_slice_started()
             elif event == events.SlicingJobComplete:
                 self.app.on_slice_done()
-            elif event in (events.ObjectAdded, events.ObjectDeleted, events.ObjectTransformed, events.ObjectChanged,
-                           events.PresetSelected, events.PresetSaved):
+            elif event in (events.ObjectAdded, events.ObjectDeleted, events.ObjectTransformed, events.ObjectChanged):
+                # Preset changes are deliberately not treated as "plate changed": switching presets
+                # is exactly what happens between slicing for one printer type and the next.
                 self.app.mark_stale()
             elif event in (events.ProjectClosed, events.NewProject, events.ProjectOpened):
                 self.app.project_closed()
