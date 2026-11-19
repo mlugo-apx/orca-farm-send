@@ -904,12 +904,14 @@ class PrinterStore:
     def save(self):
         with self._lock:
             temp = self.path + ".tmp"
-            with open(temp, "w", encoding="utf-8") as handle:
+            # Created owner-only in one step: the file holds access codes, so it must never exist
+            # with wider permissions, and O_NOFOLLOW refuses a symlink planted at the temp name.
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(temp, flags, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                if hasattr(os, "fchmod"):
+                    os.fchmod(handle.fileno(), 0o600)   # also tightens a leftover temp file
                 json.dump({"version": 1, "printers": self.printers}, handle, indent=2)
-            try:
-                os.chmod(temp, 0o600)
-            except OSError:
-                pass
             os.replace(temp, self.path)
 
     def get(self, printer_id):

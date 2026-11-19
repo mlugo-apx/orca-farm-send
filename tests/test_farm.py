@@ -87,6 +87,17 @@ class CoreTests(unittest.TestCase):
             store = core.PrinterStore(path)
             saved = store.upsert({"name": "CC", "kind": core.KIND_CC2, "address": "10.0.0.5", "model": "Centauri Carbon 2", "access_code": "s3cret"})
             self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+            # a leftover world-readable temp file must not leak its mode into the saved file
+            with open(path + ".tmp", "w") as handle:
+                handle.write("stale")
+            os.chmod(path + ".tmp", 0o644)
+            store.save()
+            self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+            os.symlink(os.path.join(folder, "elsewhere"), path + ".tmp")
+            with self.assertRaises(OSError):
+                store.save()
+            self.assertFalse(os.path.exists(os.path.join(folder, "elsewhere")))
+            os.unlink(path + ".tmp")
             again = core.PrinterStore(path)
             self.assertEqual(again.get(saved["id"])["access_code"], "s3cret")
             self.assertEqual(again.hosts(), ["10.0.0.5"])
