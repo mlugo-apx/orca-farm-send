@@ -751,6 +751,29 @@ def set_shared_dir(path):
             _CC2_CLIENT_IDS.clear()
 
 
+def write_private(path, text, exclusive=False):
+    """Write a small file readable only by the owner, created that way in one step.
+
+    Only calls that name the file are used. OrcaSlicer's permission check asks the user about any
+    file call it cannot show a path for, which rules out os.fdopen() and os.fchmod() on a bare
+    descriptor: both raised an "allow this operation with no visible target" prompt. So the file
+    is created with its final permissions by os.open(), written with os.write(), and a leftover
+    from an earlier run is removed first instead of having its permissions changed. O_EXCL makes
+    the create fail if anything, including a planted symlink, is already at the name."""
+    if not exclusive:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        data = text.encode("utf-8")
+        while data:
+            data = data[os.write(fd, data):]
+    finally:
+        os.close(fd)
+
+
 def _cc2_install_token(folder):
     """A random token kept in the shared folder, so two computers never pick the same client id."""
     path = os.path.join(folder, "cc2_client_token")
@@ -764,9 +787,7 @@ def _cc2_install_token(folder):
             pass
         try:
             # O_EXCL: when two windows start together, one creates the file and the other reads it.
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
-            with os.fdopen(fd, "w", encoding="ascii") as handle:
-                handle.write(uuid.uuid4().hex)
+            write_private(path, uuid.uuid4().hex, exclusive=True)
         except FileExistsError:
             try:   # present but unreadable or damaged: replace it
                 if os.path.getsize(path) != 32:
@@ -1339,12 +1360,8 @@ class PrinterStore:
             temp = self.path + ".tmp"
             # Created owner-only in one step: the file holds access codes, so it must never exist
             # with wider permissions, and O_NOFOLLOW refuses a symlink planted at the temp name.
-            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-            fd = os.open(temp, flags, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                if hasattr(os, "fchmod"):
-                    os.fchmod(handle.fileno(), 0o600)   # also tightens a leftover temp file
-                json.dump({"version": 1, "printers": self.printers, "combos": self.combos, "cleanup": self.cleanup}, handle, indent=2)
+            write_private(temp, json.dumps({"version": 1, "printers": self.printers, "combos": self.combos,
+                                            "cleanup": self.cleanup}, indent=2))
             os.replace(temp, self.path)
 
     def get(self, printer_id):
@@ -1486,9 +1503,7 @@ class BedLog:
     def _write(self):
         temp = "%s.%d.tmp" % (self.path, os.getpid())
         try:
-            fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(self._beds, handle)
+            write_private(temp, json.dumps(self._beds))
             os.replace(temp, self.path)
         except OSError:
             pass   # still right in this window; only the sharing and the restart memory are lost

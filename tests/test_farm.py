@@ -114,11 +114,17 @@ class CoreTests(unittest.TestCase):
             os.chmod(path + ".tmp", 0o644)
             store.save()
             self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
-            os.symlink(os.path.join(folder, "elsewhere"), path + ".tmp")
-            with self.assertRaises(OSError):
-                store.save()
-            self.assertFalse(os.path.exists(os.path.join(folder, "elsewhere")))
-            os.unlink(path + ".tmp")
+            # A symlink planted at the temp name must never be written through. The link itself is
+            # removed and a fresh private file is created in its place; its target stays untouched.
+            target = os.path.join(folder, "elsewhere")
+            with open(target, "w") as handle:
+                handle.write("not ours")
+            os.symlink(target, path + ".tmp")
+            store.save()
+            self.assertEqual(open(target).read(), "not ours")
+            self.assertFalse(os.path.islink(path))
+            self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+            self.assertFalse(os.path.lexists(path + ".tmp"))
             again = core.PrinterStore(path)
             self.assertEqual(again.get(saved["id"])["access_code"], "s3cret")
             self.assertEqual(again.hosts(), ["10.0.0.5"])
@@ -404,6 +410,58 @@ class InstallLayoutTests(unittest.TestCase):
         self.assertEqual(core.data_dir_of("/somewhere/else/file.py"), "")
         self.assertEqual(core.data_dir_of(""), "")
         self.assertEqual(core.saved_store_files(""), [])
+
+
+class WorkerPoolTests(unittest.TestCase):
+    """All background work runs on workers started once, never on a thread started while a panel
+    message is being handled (OrcaSlicer can credit such a thread to another plugin)."""
+
+    def _pool_class(self):
+        return core.WorkerPool if hasattr(core, "WorkerPool") else __import__("app").WorkerPool
+
+    def test_jobs_run_and_a_failing_job_does_not_stop_the_workers(self):
+        pool = self._pool_class()(size=3)
+        pool.start()
+        pool.start()                                   # starting twice adds no threads
+        self.assertEqual(len(pool._threads), 3)
+        done = []
+        pool.submit(lambda: 1 / 0)
+        for n in range(20):
+            pool.submit(done.append, n)
+        self.assertTrue(wait_for(lambda: len(done) == 20))
+        self.assertEqual(sorted(done), list(range(20)))
+
+    def test_no_thread_is_started_while_handling_panel_messages(self):
+        fake = FakeMoonraker()
+        self.addCleanup(fake.close)
+        pool = self._pool_class()(size=6)
+        pool.start()                                   # what execute() does, once
+        with tempfile.TemporaryDirectory() as folder:
+            posts = []
+            app = FarmApp(folder, posts.append, spawn=pool.submit)
+            printer = app.store.upsert({"name": "U1", "kind": core.KIND_MOONRAKER, "address": fake.address, "model": "Snapmaker U1"})
+            started = []
+            original = threading.Thread.start
+            # Record what each new thread is for at the moment it starts. The fake printer's own
+            # web server starts one thread per request; those are not the plugin's.
+            threading.Thread.start = lambda self_: (started.append(repr(getattr(self_, "_target", None))), original(self_))[1]
+            try:
+                for command in ({"command": "init"}, {"command": "poll"}, {"command": "refresh"},
+                                {"command": "refresh", "id": printer["id"]}, {"command": "check_storage"},
+                                {"command": "cleanup", "printer_ids": [printer["id"]]}):
+                    app.handle(command)
+                self.assertTrue(wait_for(lambda: app.status.get(printer["id"], {}).get("state") == "idle"))
+                self.assertTrue(wait_for(lambda: printer["id"] in app.storage))
+            finally:
+                threading.Thread.start = original
+            mine = [t for t in started if "process_request" not in t and "serve_forever" not in t]
+            self.assertEqual(mine, [], "a thread was started while handling a panel message")
+
+    def test_before_start_jobs_still_run(self):
+        pool = self._pool_class()(size=2)
+        done = []
+        pool.submit(done.append, "x")
+        self.assertTrue(wait_for(lambda: done == ["x"]))
 
 
 class SharedSlotTests(unittest.TestCase):

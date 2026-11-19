@@ -2,6 +2,7 @@
 shell supplies post()/notify() and forwards panel messages and slicer events."""
 # BUNDLE-STRIP-BEGIN
 import os
+import queue
 import threading
 import time
 import uuid
@@ -28,6 +29,52 @@ def _short_duration(seconds):
         return ""
     hours, minutes = int(seconds) // 3600, (int(seconds) % 3600) // 60
     return ("%dh%02dm" % (hours, minutes)) if hours else ("%dm" % max(1, minutes))
+
+
+class WorkerPool:
+    """A fixed set of background threads that run the plugin's network and file work.
+
+    Why not start a thread per job: OrcaSlicer decides which plugin a thread belongs to at the
+    moment the thread is started, from whichever plugin it believes is running right then. A
+    message from a docked panel is delivered without that being set, so a thread started while
+    handling one can be credited to another plugin: its printer requests then raise permission
+    prompts in that other plugin's name, or are refused. Threads started from the plugin's own
+    execute() call are credited correctly, so all workers are started there, once, and jobs are
+    handed to them through a queue."""
+
+    def __init__(self, size=16):
+        self.size, self._jobs, self._threads = size, queue.Queue(), []
+        self._lock = threading.Lock()
+
+    @property
+    def started(self):
+        return bool(self._threads)
+
+    def start(self):
+        """Start the workers. Call only from a place where OrcaSlicer knows the plugin is running."""
+        with self._lock:
+            if self._threads:
+                return
+            for _ in range(self.size):
+                thread = threading.Thread(target=self._run, daemon=True)
+                thread.start()
+                self._threads.append(thread)
+
+    def submit(self, target, *args):
+        if not self._threads:
+            # Not started (tests, or a slice event before the panel was ever opened): run it now on
+            # a thread of its own, as before.
+            threading.Thread(target=target, args=args, daemon=True).start()
+            return
+        self._jobs.put((target, args))
+
+    def _run(self):
+        while True:
+            target, args = self._jobs.get()
+            try:
+                target(*args)
+            except Exception:
+                pass   # a failing job must not take a worker down; each job reports its own errors
 
 
 class FarmApp:

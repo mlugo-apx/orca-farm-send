@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.3
+
+- Fixed: with another plugin's tab open, OrcaSlicer could raise a flood of permission prompts naming that other plugin but listing your printers' addresses. Farm Send's background work now runs on workers started once when the panel opens, which OrcaSlicer credits to Farm Send correctly.
+- Fixed: OrcaSlicer could ask to allow an "open" or "os.chmod" operation with no visible target, repeatedly, when the plugin saved its settings from a background worker. Settings files are now written only with calls that name the file.
+
 ## 0.1.2
 
 - Import now asks OrcaSlicer for the printer presets it has loaded, instead of reading preset files. A signed-in user has two preset folders on disk, and the old Import mixed printers from both.

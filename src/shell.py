@@ -3,7 +3,7 @@ import os
 import tempfile
 
 import orca
-from app import FarmApp
+from app import FarmApp, WorkerPool
 from core import PrinterStore, data_dir_of, saved_store_files
 PANEL_HTML = ""
 # BUNDLE-STRIP-END
@@ -49,18 +49,28 @@ def _saved_hosts():
 
 class FarmSend(orca.script.ScriptPluginCapabilityBase):
     panel = None
+    pool = None
     app = None
 
     def get_name(self):
         return PLUGIN_TITLE
 
     # ---- wiring ------------------------------------------------------------------------------
+    def _start_workers(self):
+        """Start the background workers. Only called from execute(), where OrcaSlicer knows this
+        plugin is the one running; never from a panel message."""
+        if self.pool is None:
+            self.pool = WorkerPool()
+        self.pool.start()
+
     def _ensure_app(self):
+        if self.pool is None:
+            self.pool = WorkerPool()
         if self.app is None:
             storage = orca.host.plugin.storage()
             self.app = FarmApp(storage, self._post, self._notify, (), self._default_name,
                                read_presets=self._read_presets, apply_presets=self._apply_presets,
-                               list_presets=self._list_printer_presets)
+                               list_presets=self._list_printer_presets, spawn=self.pool.submit)
         return self.app
 
     def _post(self, message):
@@ -138,6 +148,7 @@ class FarmSend(orca.script.ScriptPluginCapabilityBase):
 
     # ---- capability entry points -------------------------------------------------------------
     def execute(self):
+        self._start_workers()
         self._ensure_app()
         if self.panel is not None and self.panel.is_open():
             self.panel.show()
