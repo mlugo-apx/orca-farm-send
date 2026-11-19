@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.4
+
+- A plate sliced for one nozzle size is no longer sent to a printer set up with another. The printer's nozzle size is taken from its printer preset when you click Import; click Import once to record it for printers you already added.
+- On Klipper printers other than the Snapmaker U1, start options (bed leveling, time-lapse) cannot be passed. The panel now says so after starting, instead of implying they were applied.
+
 ## 0.1.3
 
 - Fixed: with another plugin's tab open, OrcaSlicer could raise a flood of permission prompts naming that other plugin but listing your printers' addresses. Farm Send's background work now runs on workers started once when the panel opens, which OrcaSlicer credits to Farm Send correctly.

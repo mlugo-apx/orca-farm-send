@@ -121,7 +121,8 @@ class CoreTests(unittest.TestCase):
                 handle.write("not ours")
             os.symlink(target, path + ".tmp")
             store.save()
-            self.assertEqual(open(target).read(), "not ours")
+            with open(target) as handle:
+                self.assertEqual(handle.read(), "not ours")
             self.assertFalse(os.path.islink(path))
             self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
             self.assertFalse(os.path.lexists(path + ".tmp"))
@@ -789,6 +790,38 @@ class AppTests(unittest.TestCase):
         other = FarmApp(self.folder.name, lambda message: None)
         self.assertEqual((other.store.cleanup["mode"], other.store.cleanup["keep"]), ("count", 12))
         self.assertEqual(self.app.snapshot()["cleanup"]["text"], "keep the newest 12 files")
+
+    def test_plate_for_another_nozzle_size_is_blocked(self):
+        self.slice(U1_GCODE.replace("; printer_model = Snapmaker U1", "; nozzle_diameter = 0.6,0.6,0.6,0.6\n; printer_model = Snapmaker U1"))
+        self.assertEqual(self.app.jobs[0]["meta"].get("nozzle_diameter"), "0.6,0.6,0.6,0.6")
+        self.p_u1 = self.app.store.upsert(dict(self.p_u1, nozzle=0.4))      # as Import records it
+        blocked, unknown = self.send([self.p_u1, self.p_u1b], True)         # U1 #2 has no nozzle size on record
+        self.assertFalse(blocked["ok"])
+        self.assertIn("0.6 mm nozzle", blocked["text"])
+        self.assertIn("0.4 mm", blocked["text"])
+        self.assertTrue(unknown["ok"], unknown)
+        self.assertEqual(self.u1.started, [])
+        self.assertEqual(len(self.u1b.started), 1)
+
+    def test_nozzle_helpers_and_import_fills_missing_size(self):
+        self.assertEqual(core.first_number("0.4,0.4"), 0.4)
+        self.assertEqual(core.first_number(["0.6"]), 0.6)
+        self.assertIsNone(core.first_number(""))
+        self.assertEqual(core.nozzle_mismatch("0.4", 0.4), "")
+        self.assertEqual(core.nozzle_mismatch(None, 0.4), "")
+        self.assertIn("0.6 mm nozzle", core.nozzle_mismatch("0.6;0.6", "0.4"))
+        live = [{"name": "Snapmaker U1 (0.4 nozzle) - #1", "print_host": self.p_u1["address"], "host_type": "moonraker",
+                 "printer_model": "Snapmaker U1", "inherits": "Snapmaker U1 (0.4 nozzle)", "nozzle_diameter": ["0.4", "0.4", "0.4", "0.4"]}]
+        self.app._list_presets = lambda: live
+        self.app.handle({"command": "import_presets"})
+        self.assertEqual(self.app.store.get(self.p_u1["id"])["nozzle"], 0.4)
+        self.assertEqual(len(self.app.store.printers), 3)                   # nothing added twice
+
+    def test_plain_moonraker_start_says_options_were_not_applied(self):
+        self.slice()
+        (sent,) = self.send([self.p_u1], True)                              # the fake is a plain Moonraker printer
+        self.assertTrue(sent["ok"], sent)
+        self.assertIn("does not accept start options", sent["text"])
 
     def test_refresh_one_printer_and_all(self):
         self.app.handle({"command": "poll"})

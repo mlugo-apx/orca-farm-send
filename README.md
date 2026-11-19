@@ -64,6 +64,7 @@ A Centauri Carbon 2 holding 250 or more files shows a warning on its card: uploa
 - Every start asks for confirmation and names the printers.
 - Uploaded files are named `<object>_<filament>_<time>_<YYYYMMDD-HHMMSS>.gcode`, so nothing is overwritten.
 - A printer with no plate sliced for its type cannot be sent to.
+- A plate sliced for a different nozzle size than the printer preset records is refused. Click **Import** once so the plugin knows each printer's nozzle size; a printer with no size on record is not checked.
 - After a print ends, the printer is held under Needs attention and cannot be started again until you click **Bed cleared** on its card. Uploading without printing is still allowed. This is remembered across restarts and shared between OrcaSlicer windows. It only knows about prints the panel saw, or a printer that reports a completed print when first seen, so still look at the bed.
 
 ## Install
@@ -133,5 +134,5 @@ In-app checks ran in an OrcaSlicer instance on a hidden virtual display (Xvfb), 
 | Start print on CC2, with bed leveling | Real CC1 and CC2 from the panel inside OrcaSlicer: 25-layer test tile completed on both (2026-11-19) |
 | Slice capture, copy and plate display | Inside OrcaSlicer 2.5.1 |
 | Slice for U1, switch presets, slice for CC2, both plates kept | Inside OrcaSlicer 2.5.1 |
-| Slice-for "Use" switching printer, filament slots and process, both directions | Inside OrcaSlicer 2.5.1 |
-| Select all with a plate, grouped confirmation | Inside OrcaSlicer 2.5.1, cancelled before sending |
+| "Use presets" switching printer, filament slots and process, both directions | Inside OrcaSlicer 2.5.1 |
+| Select all available, grouped confirmation | Inside OrcaSlicer 2.5.1, cancelled before sending |

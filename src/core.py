@@ -1322,7 +1322,26 @@ def validate_printer(printer):
         "access_code": (printer.get("access_code") or "").strip(),
         "api_key": (printer.get("api_key") or "").strip(),
         "mqtt_port": int(printer.get("mqtt_port") or 0),
+        "nozzle": first_number(printer.get("nozzle")),   # mm, from the printer preset; None when unknown
     }
+
+
+def first_number(value):
+    """0.4 from 0.4, "0.4", "0.4,0.4,0.4,0.4", ["0.4", "0.4"] or "0.4;0.4". None when there is none."""
+    if isinstance(value, (list, tuple)):
+        value = value[0] if value else None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value) if value > 0 else None
+    match = re.match(r"\s*(\d+(?:\.\d+)?)", str(value or ""))
+    return float(match.group(1)) if match and float(match.group(1)) > 0 else None
+
+
+def nozzle_mismatch(plate_nozzle, printer_nozzle):
+    """Text describing a nozzle-size mismatch, or "" when they agree or either side is unknown."""
+    plate, printer = first_number(plate_nozzle), first_number(printer_nozzle)
+    if plate is None or printer is None or abs(plate - printer) < 0.01:
+        return ""
+    return "this plate was sliced for a %g mm nozzle and the printer is set up with %g mm" % (plate, printer)
 
 
 class PrinterStore:
@@ -1591,7 +1610,8 @@ def preset_to_printer(preset, fallback_name=""):
         return None
     key = _first(preset.get("printhost_apikey")) or ""
     return {"name": short_printer_name(label, inherits, model), "kind": kind, "address": address, "model": model,
-            "access_code": key if kind == KIND_CC2 else "", "api_key": key if kind == KIND_MOONRAKER else ""}
+            "access_code": key if kind == KIND_CC2 else "", "api_key": key if kind == KIND_MOONRAKER else "",
+            "nozzle": first_number(preset.get("nozzle_diameter"))}
 
 
 def presets_to_printers(preset_dir):

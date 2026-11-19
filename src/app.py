@@ -7,7 +7,7 @@ import threading
 import time
 import uuid
 
-from core import (CC2_MANY_FILES, STORE_FILE, KIND_CC2, WATCHED_STATES, BedLog, FarmError, bed_needs_clearing, files_to_clean, rule_text,
+from core import (CC2_MANY_FILES, nozzle_mismatch, STORE_FILE, KIND_CC2, WATCHED_STATES, BedLog, FarmError, bed_needs_clearing, files_to_clean, rule_text,
                   storage_summary, PrinterStore, can_start, job_filename, make_client, model_key, model_matches,
                   parse_gcode_meta, preset_to_printer, presets_to_printers, set_shared_dir, status_event, strip_model_suffix, validate_printer)
 # BUNDLE-STRIP-END
@@ -492,6 +492,13 @@ class FarmApp:
                 candidates += presets_to_printers(folder)
         for candidate in candidates:
             if candidate["address"] in seen:
+                # Already saved: only fill in a nozzle size it does not have yet.
+                for known in self.store.printers:
+                    if known["address"] == candidate["address"] and candidate.get("nozzle") and not known.get("nozzle"):
+                        try:
+                            self.store.upsert(dict(known, nozzle=candidate["nozzle"]))
+                        except (FarmError, OSError):
+                            pass
                 continue
             try:
                 self.store.upsert(candidate)
@@ -538,6 +545,10 @@ class FarmApp:
                     else:
                         problem = "No sliced plate for this printer type. Slice one first."
                     self._set_send(printer_id, False, problem, ok=False)
+                    continue
+                wrong = nozzle_mismatch(job["meta"].get("nozzle_diameter"), printer.get("nozzle"))
+                if wrong:
+                    self._set_send(printer_id, False, "Blocked: %s." % wrong, ok=False)
                     continue
                 if job["id"] not in names:
                     # One file name per plate, fixed now so every printer of that type gets the same one.
@@ -587,8 +598,12 @@ class FarmApp:
             status = client.status()
             if not can_start(status):
                 raise FarmError("Uploaded, but not started: the printer is %s." % status.get("state_text", status.get("state")).lower())
-            client.start_print(remote, options)
-            self._set_send(printer_id, False, "Started %s" % remote, ok=True, started=True)
+            how = client.start_print(remote, options)
+            note = ""
+            if how == "standard":
+                # Only Snapmaker firmware takes start options. Say so instead of implying they applied.
+                note = ". This printer does not accept start options, so bed leveling and time-lapse follow its own settings"
+            self._set_send(printer_id, False, "Started %s%s" % (remote, note), ok=True, started=True)
             self._notify("info", "Farm Send: %s started printing %s" % (name, remote))
         except FarmError as error:
             self._set_send(printer_id, False, str(error), ok=False)

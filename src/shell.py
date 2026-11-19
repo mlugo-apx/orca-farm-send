@@ -117,7 +117,7 @@ class FarmSend(orca.script.ScriptPluginCapabilityBase):
             if not preset.is_user():
                 continue
             entry = {"name": preset.name}
-            for key in ("print_host", "printhost_apikey", "host_type", "printer_model", "inherits"):
+            for key in ("print_host", "printhost_apikey", "host_type", "printer_model", "inherits", "nozzle_diameter"):
                 entry[key] = preset.config_value(key)
             found.append(entry)
         return found
