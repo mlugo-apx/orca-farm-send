@@ -673,6 +673,35 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(self.app.snapshot()["orders"][0]["printing"], 0)
         self.assertEqual(self.u1.started, [])
 
+    def test_open_at_start_setting_defaults_on_and_is_remembered(self):
+        self.assertTrue(self.app.snapshot()["auto_open"])
+        self.app.handle({"command": "set_auto_open", "on": False})
+        self.assertFalse(self.app.snapshot()["auto_open"])
+        again = core.PrinterStore(self.app.store.path)
+        self.assertFalse(again.auto_open)
+        self.assertEqual(len(again.printers), 2)
+        self.app.handle({"command": "set_auto_open", "on": True})
+        self.assertTrue(core.PrinterStore(self.app.store.path).auto_open)
+
+    def test_open_at_start_is_not_retried_after_an_attempt_that_never_finished(self):
+        self.assertTrue(core.auto_open_begin(self.folder.name))
+        self.assertFalse(core.auto_open_begin(self.folder.name))     # the earlier attempt left its mark
+        core.auto_open_done(self.folder.name)
+        self.assertTrue(core.auto_open_begin(self.folder.name))
+        core.auto_open_done(self.folder.name)
+        core.auto_open_done(self.folder.name)                        # removing twice is harmless
+
+    def test_saving_into_a_folder_that_does_not_exist_yet_makes_it(self):
+        self.app.handle({"command": "library_folder", "action": "add", "name": "Clips"})
+        path = write(self.tmp.name, ".1.0.gcode", U1_GCODE)
+        self.app.on_slice_started(); self.app.on_gcode_exported(path, "")
+        job = self.app.jobs[0]
+        self.assertTrue(wait_for(lambda: job["ready"] or job["error"]))
+        self.app.handle({"command": "library_save", "job_id": job["id"], "item": "Rail clip", "parts": 24,
+                         "folder": "Clips / Brand new"})
+        self.assertEqual(self.app.library()[0]["folder"], "Clips / Brand new")
+        self.assertIn("Clips / Brand new", self.app.snapshot()["folders"])
+
     def test_report_details_leave_out_names_addresses_and_codes(self):
         self.app.handle({"command": "report"})
         text = [post for post in self.posts if post.get("command") == "report"][-1]["text"]

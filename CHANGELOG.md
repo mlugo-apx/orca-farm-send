@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.2
+
+- **The panel opens by itself when OrcaSlicer starts.** OrcaSlicer has no run-at-start for plugins, so the plugin opens its panel on the first event OrcaSlicer sends it while starting. Once per session: close it and it stays closed. A checkbox at the bottom of the panel turns this off. If OrcaSlicer ever goes down while the panel is opening itself, the setting turns itself off on the next start.
+- **Library:** the Save to library and Edit dialogs can make a new folder on the spot, inside the folder picked. Folders start collapsed; the folder you just saved into opens.
+
 ## 0.3.1
 
 - The link at the bottom of the panel now reads "Report a problem or request an enhancement", and the GitHub repository has a form for each.

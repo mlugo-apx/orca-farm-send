@@ -53,7 +53,7 @@ The plugin cannot press Slice for you.
 
 For parts you print again and again. On a sliced plate's row click **Save to library**, name the item and enter how many parts are on the plate.
 The plate is kept on this computer, in the plugin's own data folder, and survives closing the project and restarting OrcaSlicer.
-You can also put it in a folder. **New folder** in the Library view makes one at the top, and the plus on a folder makes one inside it, up to four levels. The pencil and bin on a folder rename or remove it; removing a folder keeps what is in it and moves it up one level. The pencil on a library row renames the item, corrects the count or moves it to another folder.
+You can also put it in a folder. The save dialog can make a new folder on the spot, inside the folder you picked. Folders start collapsed. **New folder** in the Library view makes one at the top, and the plus on a folder makes one inside it, up to four levels. The pencil and bin on a folder rename or remove it; removing a folder keeps what is in it and moves it up one level. The pencil on a library row renames the item, corrects the count or moves it to another folder.
 In the Plates box, **Library** lists what you kept, grouped by folder, with search. **Send** shows the printers of the right type with their state, and the total parts for the printers you tick, then uploads and starts them. No project, no slicing.
 
 A kept plate is the G-code exactly as sliced: printer type, nozzle, material and temperatures do not change. To change any of those, slice again and save a new plate.
@@ -107,7 +107,7 @@ A Centauri Carbon 2 holding 250 or more files shows a warning on its card: uploa
 3. Expand the row and click the run arrow. The panel docks to the right of the 3D view.
 4. **Import** pulls printers from the printer presets OrcaSlicer has loaded (address and access code). **Add** adds one by hand; **Test connection** fills in the model.
 
-The panel has to be opened from the Plugins dialog once per OrcaSlicer session.
+From then on the panel opens by itself when OrcaSlicer starts. It opens once per session, so closing it keeps it closed. Untick **Open this panel when OrcaSlicer starts** at the bottom of the panel to open it only from the Plugins dialog.
 After adding a printer, OrcaSlicer asks for network access to it the next time the plugin loads.
 
 If you install both the Plugin Hub copy and a local file copy, only one can be active at a time; OrcaSlicer reports a "capability collision" for the second. Each copy keeps its own printer list.

@@ -347,6 +347,7 @@ class FarmApp:
                 "current": dict(self.current) if self.current else None,
                 "combo_note": dict(self.combo_note),
                 "can_switch": self._apply_presets is not None,
+                "auto_open": self.store.auto_open,
             }
 
     def _combo_views(self):
@@ -1164,6 +1165,13 @@ class FarmApp:
             self._notify("error", "Farm Send: could not save the cleanup rule: %s" % (error.strerror or error))
         self.post_state()
         self.check_storage(force=True)
+
+    def _cmd_set_auto_open(self, message):
+        try:
+            self.store.set_auto_open(message.get("on"))
+        except OSError as error:
+            self._notify("error", "Farm Send: could not save the setting: %s" % (error.strerror or error))
+        self.post_state()
 
     def _cmd_check_storage(self, message):
         self.check_storage(force=True)

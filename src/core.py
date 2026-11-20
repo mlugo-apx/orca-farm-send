@@ -1502,6 +1502,27 @@ def nozzle_mismatch(plate_nozzle, printer_nozzle):
     return "this plate was sliced for a %g mm nozzle and the printer is set up with %g mm" % (plate, printer)
 
 
+AUTO_OPEN_MARK = "farm_send_opening"
+
+
+def auto_open_begin(folder):
+    """Leave a mark before the panel is opened by itself. False when the mark of an earlier attempt
+    is still there: that attempt never finished, so OrcaSlicer most likely went down while opening
+    the panel at start, and it must not be tried again."""
+    path = os.path.join(folder, AUTO_OPEN_MARK)
+    if os.path.exists(path):
+        return False
+    write_private(path, "1")
+    return True
+
+
+def auto_open_done(folder):
+    try:
+        os.remove(os.path.join(folder, AUTO_OPEN_MARK))
+    except OSError:
+        pass
+
+
 class PrinterStore:
     """Printers saved as JSON in the plugin's storage folder. The file holds LAN access codes,
     so it is written with owner-only permissions."""
@@ -1512,6 +1533,7 @@ class PrinterStore:
         self.printers = []
         self.combos = {}
         self.cleanup = dict(DEFAULT_CLEANUP)
+        self.auto_open = True
         self._stamp = None
         self.load()
 
@@ -1528,9 +1550,15 @@ class PrinterStore:
         self.cleanup = clean_rule(rule)
         self.save()
 
+    def set_auto_open(self, value):
+        self.sync()
+        self.auto_open = bool(value)
+        self.save()
+
     def load(self):
         self.combos = {}
         self.cleanup = dict(DEFAULT_CLEANUP)
+        self.auto_open = True
         self._stamp = file_stamp(self.path)
         try:
             with open(self.path, "r", encoding="utf-8") as handle:
@@ -1540,6 +1568,7 @@ class PrinterStore:
             if isinstance(combos, dict):
                 self.combos = {key: value for key, value in combos.items() if isinstance(value, dict) and value.get("printer")}
             self.cleanup = clean_rule(data.get("cleanup"))
+            self.auto_open = data.get("auto_open") is not False
         except (OSError, ValueError, AttributeError):
             self.printers = []
 
@@ -1549,7 +1578,7 @@ class PrinterStore:
             # Created owner-only in one step: the file holds access codes, so it must never exist
             # with wider permissions, and O_NOFOLLOW refuses a symlink planted at the temp name.
             write_private(temp, json.dumps({"version": 1, "printers": self.printers, "combos": self.combos,
-                                            "cleanup": self.cleanup}, indent=2))
+                                            "cleanup": self.cleanup, "auto_open": self.auto_open}, indent=2))
             os.replace(temp, self.path)
             self._stamp = file_stamp(self.path)
 

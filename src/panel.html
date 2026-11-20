@@ -59,7 +59,8 @@
 <div class="box" id="storage" style="display:none;margin-top:14px"></div>
 <p id="empty" class="muted" style="display:none">No printers yet. Use Import to pull them from your printer presets, or Add.</p>
 
-<p class="small muted" style="margin-top:14px;text-align:right"><button type="button" class="linkish" id="btn-report" title="Tell the developer what went wrong or what you would like added">Report a problem or request an enhancement</button></p>
+<p class="small muted" style="margin-top:14px"><label title="Open this panel by itself when OrcaSlicer starts or a project is opened. Off: open it from the Plugins dialog."><input type="checkbox" id="auto-open"> Open this panel when OrcaSlicer starts</label></p>
+<p class="small muted" style="margin-top:6px;text-align:right"><button type="button" class="linkish" id="btn-report" title="Tell the developer what went wrong or what you would like added">Report a problem or request an enhancement</button></p>
 
 <div id="overlay"><div id="dialog"></div></div>
 
@@ -352,7 +353,7 @@
                   .sort(function (a, b) { return a.toLowerCase() < b.toLowerCase() ? -1 : 1; });
     };
     var node = function (f) {
-      var open = words.length > 0 || !libClosed[f], leaf = f.slice(f.lastIndexOf(SEP) < 0 ? 0 : f.lastIndexOf(SEP) + SEP.length);
+      var open = words.length > 0 || !!libOpen[f], leaf = f.slice(f.lastIndexOf(SEP) < 0 ? 0 : f.lastIndexOf(SEP) + SEP.length);
       var depth = f.split(SEP).length, body = kids(f).map(node).join("") + (by[f] || []).map(row).join("");
       return "<div class='type'><div class='row spread' style='gap:6px'>" +
         "<button type='button' class='linkish file' style='padding:0;text-decoration:none;font-weight:600;color:inherit;text-align:left;min-width:0' data-lib-folder='" + esc(f) + "' title='" + esc(f) + "'>" +
@@ -391,13 +392,23 @@
     };
     $("f-name").focus();
   }
-  var libClosed = {};
+  var libOpen = {};        // folders start collapsed; this holds the ones opened by hand
+  function openFolderPath(f) {
+    var parts = f ? f.split(SEP) : [];
+    for (var d = 1; d <= parts.length; d++) libOpen[parts.slice(0, d).join(SEP)] = true;
+  }
+  // The folder picked in a dialog: the one selected, or a new one typed in, made inside the selected one.
+  function pickedFolder() {
+    var base = $("l-folder").value, leaf = $("l-newfolder").value.replace(/\//g, " ").trim();
+    if (!leaf) return base;
+    return (base ? base + SEP : "") + leaf;
+  }
   function folderField(current) {
     var names = state.folders.slice();
     if (current && names.indexOf(current) < 0) names.push(current);
     return "<label class='field'>Folder<select id='l-folder'><option value=''>No folder</option>" + names.map(function (n) {
       return "<option value='" + esc(n) + "'" + (n === current ? " selected" : "") + ">" + esc(n) + "</option>"; }).join("") + "</select></label>" +
-      (names.length ? "" : "<div class='small muted' style='margin-top:3px'>Make folders with New folder in the Library view.</div>");
+      "<label class='field'>Or a new folder<input id='l-newfolder' maxlength='40' placeholder='name, made inside the folder picked above'></label>";
   }
   function wireFolderPicks() {}
   function editLibrary(id) {
@@ -413,7 +424,8 @@
     wireFolderPicks();
     $("dlg-cancel").onclick = hideDialog;
     $("dlg-ok").onclick = function () {
-      send("library_edit", { id: id, item: $("l-item").value, parts: $("l-parts").value, folder: $("l-folder").value });
+      send("library_edit", { id: id, item: $("l-item").value, parts: $("l-parts").value, folder: pickedFolder() });
+      openFolderPath(pickedFolder());
     };
   }
 
@@ -559,7 +571,8 @@
     $("dlg-cancel").onclick = hideDialog;
     $("dlg-ok").onclick = function () {
       $("l-result").className = "small muted"; $("l-result").textContent = "Saving...";
-      libLastFolder = $("l-folder").value;
+      libLastFolder = pickedFolder();
+      openFolderPath(libLastFolder);
       send("library_save", { job_id: jobId, item: $("l-item").value, parts: $("l-parts").value, folder: libLastFolder });
     };
     wireFolderPicks();
@@ -743,8 +756,8 @@
     else if (d.folderNew !== undefined) folderDialog("", d.folderNew);
     else if (d.folderRename) folderDialog(d.folderRename);
     else if (d.foldersAll) {
-      libClosed = {};
-      if (d.foldersAll === "closed") { libClosed[""] = true; state.folders.forEach(function (f) { libClosed[f] = true; }); }
+      libOpen = {};
+      if (d.foldersAll === "open") state.folders.forEach(function (f) { libOpen[f] = true; });
       $("lib-list").innerHTML = libraryListHtml();
     }
     else if (d.folderRemove) {
@@ -757,7 +770,7 @@
       $("dlg-cancel").onclick = hideDialog;
       $("dlg-ok").onclick = function () { send("library_folder", { action: "remove", name: d.folderRemove }); hideDialog(); };
     }
-    else if (d.libFolder !== undefined) { libClosed[d.libFolder] = !libClosed[d.libFolder]; $("lib-list").innerHTML = libraryListHtml(); }
+    else if (d.libFolder !== undefined) { libOpen[d.libFolder] = !libOpen[d.libFolder]; $("lib-list").innerHTML = libraryListHtml(); }
     else if (d.libSend) sendFromLibrary(d.libSend);
     else if (d.libDel) {
       var entry = state.library.filter(function (x) { return x.id === d.libDel; })[0];
@@ -1026,6 +1039,7 @@
     };
   }
   $("btn-report").onclick = function () { send("report"); };
+  $("auto-open").onchange = function () { send("set_auto_open", { on: this.checked }); };
   $("btn-refresh").onclick = function () { refresh(state.printers.map(function (p) { return p.id; })); recount(); };
   $("btn-import").onclick = function () { send("import_presets"); };
 
@@ -1035,6 +1049,7 @@
       ["printers", "jobs", "job_for", "slicing", "combos", "types", "library", "folders", "orders", "order_plates", "toolhead_names", "current", "combo_note", "can_switch", "storage", "cleanup"].forEach(function (key) { if (key in message) state[key] = message[key]; });
       if (message.status) state.status = message.status;
       if (message.sends) state.sends = message.sends;
+      if ("auto_open" in message) $("auto-open").checked = !!message.auto_open;
       render();
     } else if (message.command === "status") {
       delete refreshing[message.id];

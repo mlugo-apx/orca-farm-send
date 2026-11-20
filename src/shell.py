@@ -1,10 +1,11 @@
 # BUNDLE-STRIP-BEGIN
 import os
 import tempfile
+import threading
 
 import orca
 from app import FarmApp, WorkerPool
-from core import PrinterStore, data_dir_of, saved_store_files
+from core import PrinterStore, auto_open_begin, auto_open_done, data_dir_of, saved_store_files
 PANEL_HTML = ""
 # BUNDLE-STRIP-END
 
@@ -51,6 +52,7 @@ class FarmSend(orca.script.ScriptPluginCapabilityBase):
     panel = None
     pool = None
     app = None
+    opened_once = False     # the panel was opened this session, by the run arrow or by itself
 
     def get_name(self):
         return PLUGIN_TITLE
@@ -148,6 +150,7 @@ class FarmSend(orca.script.ScriptPluginCapabilityBase):
 
     # ---- capability entry points -------------------------------------------------------------
     def execute(self):
+        self.opened_once = True
         self._start_workers()
         self._ensure_app()
         if self.panel is not None and self.panel.is_open():
@@ -171,6 +174,25 @@ class FarmSend(orca.script.ScriptPluginCapabilityBase):
         # Slice events arrive on the slicing worker thread. Nothing here may wait on the UI thread.
         events = orca.LifecycleEvent
         try:
+            if not self.opened_once and threading.current_thread() is threading.main_thread():
+                # OrcaSlicer has no run-at-start for plugins. The first event it delivers on the UI
+                # thread (it sends a few while starting) opens the panel instead, once per session,
+                # if the user wants it. Slice events come from a worker thread and never do this.
+                self.opened_once = True
+                app = self._ensure_app()
+                if app.store.auto_open:
+                    folder = orca.host.plugin.storage()
+                    if not auto_open_begin(folder):
+                        # The last attempt never finished. Turn the setting off rather than risk
+                        # taking OrcaSlicer down at every start; the Plugins dialog still opens the panel.
+                        auto_open_done(folder)
+                        app.store.set_auto_open(False)
+                    else:
+                        try:
+                            self.execute()
+                        except Exception:
+                            self.opened_once = False    # the window was not ready yet: try the next event
+                        auto_open_done(folder)
             if event == events.GCodeExportFinished:
                 app = self._ensure_app()
                 if ctx.code == orca.LifecycleEvtCode.Ok:
