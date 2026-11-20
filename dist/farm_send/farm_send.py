@@ -2049,6 +2049,8 @@ def can_start(status):
 # ======================================================================================
 # app
 SLICE_DIR = "slices"
+SLICE_KEEP_S = 12 * 3600      # sliced copies of a window that is gone are dropped after this long
+SLICE_TOUCH_S = 600
 LIBRARY_DIR = "library"   # kept plates: <id>.gcode plus <id>.json describing it
 STATUS_MIN_INTERVAL = 3.0
 STATUS_MIN_INTERVAL_CC2 = 8.0   # each CC2 poll is a full MQTT connect + register; be gentle
@@ -2138,10 +2140,15 @@ class FarmApp:
         # because OrcaSlicer rewrites its temp file on the next slice: without a copy, slicing for
         # the second printer type would destroy the plate sliced for the first.
         self.jobs = []
-        self.slice_dir = os.path.join(storage_dir, SLICE_DIR)
+        # Each OrcaSlicer window keeps its sliced copies in a folder of its own, so a second window
+        # starting up never removes the plates another window still holds.
+        self.slice_root = os.path.join(storage_dir, SLICE_DIR)
+        self.slice_dir = os.path.join(self.slice_root, uuid.uuid4().hex[:8])
+        self._slice_touched = time.monotonic()
         self.library_dir = os.path.join(storage_dir, LIBRARY_DIR)
         self._library_cache, self._library_stamp = None, None
         self.chosen = {}        # printer type key -> id of the sliced plate its cards send
+        self._saved_names = {}  # md5 of a kept plate -> its item name, refreshed with every snapshot
         self._clear_slice_dir()
         self.slicing = False
         self.status = {}          # printer id -> normalized status
@@ -2159,12 +2166,37 @@ class FarmApp:
         self.current = None
         self.combo_note = {"text": "", "ok": True, "busy": False}
 
-    def _clear_slice_dir(self):
-        """Drop copies left by an earlier session or project. They are only useful while their plate is open."""
+    def _clear_slice_dir(self, now=None):
+        """Drop sliced copies left behind by windows that are gone. There is no way to ask whether
+        another window is still open, so a folder counts as left behind once nothing in it has changed
+        for SLICE_KEEP_S; an open window refreshes its folder while its panel is in use."""
+        now = time.time() if now is None else now
         try:
-            for name in os.listdir(self.slice_dir):
-                if name.endswith(".gcode") or name.endswith(".part"):
-                    self._remove_file(os.path.join(self.slice_dir, name))
+            names = os.listdir(self.slice_root)
+        except OSError:
+            return
+        for name in names:
+            path = os.path.join(self.slice_root, name)
+            try:
+                if path == self.slice_dir or now - os.path.getmtime(path) < SLICE_KEEP_S:
+                    continue
+                if os.path.isdir(path):
+                    for inner in os.listdir(path):
+                        if inner.endswith(".gcode") or inner.endswith(".part"):
+                            self._remove_file(os.path.join(path, inner))
+                    os.rmdir(path)
+                elif name.endswith(".gcode") or name.endswith(".part"):      # from before 0.3.3
+                    self._remove_file(path)
+            except OSError:
+                pass
+
+    def _touch_slice_dir(self):
+        """Mark this window's sliced copies as still in use. Cheap, and at most every few minutes."""
+        if time.monotonic() - self._slice_touched < SLICE_TOUCH_S:
+            return
+        self._slice_touched = time.monotonic()
+        try:
+            os.utime(self.slice_dir, None)
         except OSError:
             pass
 
@@ -2239,6 +2271,7 @@ class FarmApp:
             meta = parse_gcode_meta(copy)
             if not meta.get("printer_model"):
                 raise FarmError("The sliced G-code does not name a printer model, so it cannot be matched to a printer.")
+            job["objects"], job["md5"] = count_objects(copy), file_md5(copy)
             replaced = []
             with self.lock:
                 if job not in self.jobs:          # project closed or superseded while copying
@@ -2338,6 +2371,8 @@ class FarmApp:
         return {
             "id": job["id"], "ready": job["ready"], "error": job["error"], "stale": job["stale"], "key": job.get("key", ""),
             "plate": job.get("plate", 1),
+            "objects": job.get("objects") or 0,
+            "saved_as": self._saved_names.get(job.get("md5") or "", ""),
             "chosen": job is self._chosen_plate(job.get("key")),
             "display_name": self._job_base_name(job), "summary": " · ".join(bits),
             "printer_model": meta.get("printer_model", ""), "sliced_at": _clock(job["captured_at"]),
@@ -2355,6 +2390,9 @@ class FarmApp:
             stamp = file_stamp(self.library_dir)
             if stamp != self._library_stamp:
                 self._library_stamp, self._library_cache = stamp, None
+            self._saved_names = {e["md5"]: e.get("item", "") for e in self.library() if e.get("md5")}
+            if self.jobs:
+                self._touch_slice_dir()
             job_for = {}
             for printer in self.store.printers:
                 match = self._job_for(printer)
@@ -2906,37 +2944,86 @@ class FarmApp:
             self.post({"command": "library_result", "ok": False, "text": "Could not save: %s" % (error.strerror or error)})
         self.post_state()
 
+    def _library_keep(self, job, item, parts, folder):
+        """Copy one sliced plate into the library. Raises FarmError or OSError."""
+        if job is None:
+            raise FarmError("That plate is no longer here. Slice it again.")
+        if job.get("stale"):
+            raise FarmError("The plate changed after this slice. Slice again, then save.")
+        os.makedirs(self.library_dir, exist_ok=True)
+        entry_id = "%s-%s" % (time.strftime("%Y%m%d-%H%M%S"), job["id"][:6])
+        target = os.path.join(self.library_dir, entry_id + ".gcode")
+        self._copy_file(job["path"], target + ".part")
+        os.replace(target + ".part", target)
+        meta = job["meta"]
+        entry = {"id": entry_id, "item": item, "parts": parts, "folder": folder, "key": job.get("key", ""),
+                 "printer_model": meta.get("printer_model", ""), "time_s": meta.get("time_s"),
+                 "filament_g": meta.get("filament_g"), "layers": meta.get("layers"),
+                 "filaments": list(meta.get("filaments") or []), "nozzle_diameter": meta.get("nozzle_diameter"),
+                 "presets": " \u00b7 ".join(x for x in (meta.get("process_preset"), meta.get("filament_preset")) if x),
+                 "saved_at": time.time(), "size": os.path.getsize(target), "md5": file_md5(target),
+                 "objects": count_objects(target)}
+        # The description is written last: a plate only counts as kept once it is complete.
+        write_private(os.path.join(self.library_dir, entry_id + ".json"), json.dumps(entry, indent=1))
+        self._library_cache = None
+        return entry
+
     def _cmd_library_save(self, message):
         """Keep the plate sliced just now, under an item name and with the number of parts on it."""
         with self.lock:
             job = next((j for j in self.jobs if j["id"] == message.get("job_id") and j["ready"]), None)
         try:
             item, parts, folder = self._library_fields(message)
-            if job is None:
-                raise FarmError("That plate is no longer here. Slice it again.")
-            if job.get("stale"):
-                raise FarmError("The plate changed after this slice. Slice again, then save.")
-            os.makedirs(self.library_dir, exist_ok=True)
-            entry_id = "%s-%s" % (time.strftime("%Y%m%d-%H%M%S"), job["id"][:6])
-            target = os.path.join(self.library_dir, entry_id + ".gcode")
-            self._copy_file(job["path"], target + ".part")
-            os.replace(target + ".part", target)
-            meta = job["meta"]
-            entry = {"id": entry_id, "item": item, "parts": parts, "folder": folder, "key": job.get("key", ""),
-                     "printer_model": meta.get("printer_model", ""), "time_s": meta.get("time_s"),
-                     "filament_g": meta.get("filament_g"), "layers": meta.get("layers"),
-                     "filaments": list(meta.get("filaments") or []), "nozzle_diameter": meta.get("nozzle_diameter"),
-                     "presets": " \u00b7 ".join(x for x in (meta.get("process_preset"), meta.get("filament_preset")) if x),
-                     "saved_at": time.time(), "size": os.path.getsize(target), "md5": file_md5(target),
-                     "objects": count_objects(target)}
-            # The description is written last: a plate only counts as kept once it is complete.
-            write_private(os.path.join(self.library_dir, entry_id + ".json"), json.dumps(entry, indent=1))
-            self._library_cache = None
+            self._library_keep(job, item, parts, folder)
             self.post({"command": "library_result", "ok": True, "text": "Saved %s x%d to the library." % (item, parts)})
         except FarmError as error:
             self.post({"command": "library_result", "ok": False, "text": str(error)})
         except OSError as error:
             self.post({"command": "library_result", "ok": False, "text": "Could not save: %s" % (error.strerror or error)})
+        self.post_state()
+
+    def _cmd_library_save_all(self, message):
+        """Keep several sliced plates in one go. rows: [{job_id, item, parts, folder}]. Every row is
+        checked before anything is copied, so a typing mistake never leaves half of them saved."""
+        rows = [row for row in (message.get("rows") or []) if isinstance(row, dict)]
+        try:
+            if not rows:
+                raise FarmError("Nothing to save")
+            todo = []
+            with self.lock:
+                jobs = {j["id"]: j for j in self.jobs if j["ready"]}
+            for number, row in enumerate(rows, 1):
+                job = jobs.get(row.get("job_id"))
+                label = "Plate %s" % job["plate"] if job else "Row %d" % number
+                try:
+                    item, parts, folder = self._library_fields(row)
+                    if job is None:
+                        raise FarmError("That plate is no longer here. Slice it again.")
+                    if job.get("stale"):
+                        raise FarmError("The plate changed after this slice. Slice again, then save.")
+                except FarmError as error:
+                    raise FarmError("%s: %s" % (label, error))
+                todo.append((job, item, parts, folder))
+            for job, item, parts, folder in todo:
+                self._library_keep(job, item, parts, folder)
+            self.post({"command": "library_result", "ok": True,
+                       "text": "Saved %d plate%s to the library." % (len(todo), "" if len(todo) == 1 else "s")})
+        except FarmError as error:
+            self.post({"command": "library_result", "ok": False, "text": str(error)})
+        except OSError as error:
+            self._library_cache = None
+            self.post({"command": "library_result", "ok": False, "text": "Could not save: %s" % (error.strerror or error)})
+        self.post_state()
+
+    def _cmd_clear_slices(self, message):
+        """Drop the sliced plates held for one printer type. Kept library plates are not touched."""
+        key = message.get("key")
+        with self.lock:
+            gone = [job for job in self.jobs if job.get("key") == key and job["ready"]]
+            self.jobs = [job for job in self.jobs if job not in gone]
+            self.chosen.pop(key, None)
+        for job in gone:
+            self._remove_file(job["path"])
         self.post_state()
 
     def _cmd_library_delete(self, message):
@@ -3639,26 +3726,45 @@ PANEL_HTML = r"""<style>
     return state.jobs.filter(function (j) { return j.ready && j.key === type.key; })
                      .sort(function (a, b) { return a.plate - b.plate; });
   }
-  // Several plates of one project held for a type: each is shown, and one of them is what the cards send.
+  // Sliced plates are shown one line each; a click on the line opens its details. The printer type
+  // OrcaSlicer is set to is open, the others are folded to one line.
+  var typeOpen = {}, plateOpen = {};
+  function plateBrief(job) { return String(job.summary || "").split(" · ").slice(0, 2).join(" · "); }
+  function plateTitle(job, many) { return many ? "Plate " + job.plate : job.display_name; }
+  // OrcaSlicer's copy counter ("Basket (13)") says nothing about the plate, so it is left out of the suggestion.
+  function suggestedName(job, many) { return String(job.display_name || "").replace(/\s*\(\d+\)\s*$/, "") + (many ? " - plate " + job.plate : ""); }
   function platesHtml(jobs) {
-    if (jobs.length === 1) return plateHtml(jobs[0]);
+    var many = jobs.length > 1;
     return jobs.map(function (job) {
-      return "<div style='margin-top:6px;padding-left:8px;border-left:2px solid " + (job.chosen ? "var(--orca-accent, #009688)" : "var(--orca-border)") + "'>" +
-        "<div class='row spread small' style='gap:8px'><b>Plate " + esc(job.plate) + "</b>" +
-        (job.chosen ? "<span class='ok'>the cards send this one</span>"
-                    : "<button type='button' class='linkish' data-choose-plate='" + esc(job.id) + "'>send this one</button>") + "</div>" +
-        plateHtml(job) + "</div>";
+      var open = !!plateOpen[job.id];
+      var pick = !many ? "" : "<input type='radio' style='margin:0;flex:none' data-choose-plate='" + esc(job.id) + "'" + (job.chosen ? " checked" : "") +
+                              " title='" + (job.chosen ? "The printer cards send this plate" : "Send this plate from the printer cards") + "'>";
+      var keep = job.stale ? "" : (job.saved_as
+        ? "<span class='ok small' style='flex:none' title='In the library as " + esc(job.saved_as) + "'>saved</span>"
+        : "<button type='button' class='quiet' style='flex:none;padding:1px 8px;font-size:12px' data-lib-save='" + esc(job.id) +
+          "' title='Keep this plate so it can be sent again later without slicing'>Save</button>");
+      return "<div style='margin-top:4px'><div class='row' style='gap:6px'>" + pick +
+        "<button type='button' class='linkish file' style='flex:1;min-width:0;text-align:left;text-decoration:none;color:inherit;padding:0' data-plate-toggle='" + esc(job.id) +
+          "' title='" + esc(job.display_name) + "'>" + (open ? "▾ " : "▸ ") + "<b>" + esc(plateTitle(job, many)) + "</b> <span class='muted'>" + esc(plateBrief(job)) + "</span></button>" +
+        keep + "</div>" +
+        (job.stale ? "<div class='warn small'>Plate changed since this slice. Slice again if this type should get the change.</div>" : "") +
+        (open ? "<div style='padding-left:14px'>" + plateHtml(job) + "</div>" : "") + "</div>";
     }).join("");
   }
   function plateHtml(job) {
-    return "<div class='job-name'>" + esc(job.display_name) + "</div>" +
-      "<div class='muted small'>" + esc(job.summary) + " \u00b7 sliced " + esc(job.sliced_at) + "</div>" +
+    return "<div class='small file' title='" + esc(job.display_name) + "'>" + esc(job.display_name) + "</div>" +
+      "<div class='muted small'>" + esc(job.summary) + " · sliced " + esc(job.sliced_at) + "</div>" +
       filamentLines(job) +
       (job.presets ? "<div class='muted small file' title='" + esc(job.presets) + "'>" + esc(job.presets) + "</div>" : "") +
-      (job.stale ? "<div class='warn small'>Plate changed since this slice. Slice again if this type should get the change.</div>" : "") +
-      (job.post_process ? "<div class='warn small'>Post-processing scripts are not applied.</div>" : "") +
-      (job.stale ? "" : "<div style='margin-top:6px'><button type='button' class='quiet' data-lib-save='" + esc(job.id) +
-                       "' title='Keep this plate so it can be sent again later without slicing'>Save to library</button></div>");
+      (job.post_process ? "<div class='warn small'>Post-processing scripts are not applied.</div>" : "");
+  }
+  // A short tag for a printer model, shown on library rows: "Snapmaker U1" -> U1, "Elegoo Centauri Carbon 2" -> CC2.
+  function modelTag(model) {
+    var words = String(model || "").replace(/\(.*?\)/g, " ").trim().split(/\s+/).filter(Boolean);
+    if (words.length > 1) words = words.slice(1);
+    var text = words.join(" ");
+    if (text.length <= 8) return text;
+    return words.map(function (w) { return /^\d/.test(w) ? w : w.charAt(0).toUpperCase(); }).join("");
   }
 
   // ---- library: plates kept for reprinting ---------------------------------------------------
@@ -3676,7 +3782,8 @@ PANEL_HTML = r"""<style>
     var row = function (e) {
       var saved = e.saved_at ? new Date(e.saved_at * 1000).toLocaleDateString([], { month: "short", day: "numeric" }) : "";
       return "<div class='type'><div class='row spread' style='gap:8px'>" +
-        "<div class='file'><b>" + esc(e.item) + "</b> <span class='muted'>x" + esc(e.parts) + "</span></div>" +
+        "<div class='file'><b>" + esc(e.item) + "</b> <span class='muted'>x" + esc(e.parts) + "</span>" +
+          (modelTag(e.printer_model) ? " <span class='small' style='border:1px solid var(--orca-border);border-radius:3px;padding:0 4px' title='" + esc(e.printer_model) + "'>" + esc(modelTag(e.printer_model)) + "</span>" : "") + "</div>" +
         "<div class='row' style='flex:none'><button type='button' class='quiet' data-lib-send='" + esc(e.id) + "'" +
           (e.printers.length ? "" : " disabled") + ">Send</button>" + iconButton("edit", "data-lib-edit", e.id, "Rename, change the count or move to a folder") +
           iconButton("trash", "data-lib-del", e.id, "Remove from the library") + "</div></div>" +
@@ -3911,8 +4018,10 @@ PANEL_HTML = r"""<style>
     showDialog("<h4>Save to library</h4>" +
       "<p class='small muted' style='margin:0'>Keeps this sliced plate so you can send it again later without slicing. It is kept as sliced: for " +
         esc(job.printer_model) + ", with these settings.</p>" +
-      "<label class='field'>Item name<input id='l-item' value='" + esc(job.display_name) + "'></label>" +
-      "<label class='field'>Parts on this plate<input id='l-parts' type='number' min='1' max='9999' placeholder='count them, e.g. 24'></label>" +
+      "<label class='field'>Item name<input id='l-item' value='" + esc(suggestedName(job, state.jobs.filter(function (j) { return j.ready && j.key === job.key; }).length > 1)) + "'></label>" +
+      "<label class='field'>Parts on this plate<input id='l-parts' type='number' min='1' max='9999' placeholder='count them, e.g. 24'" +
+        (job.objects ? " value='" + esc(job.objects) + "'" : "") + "></label>" +
+      (job.objects ? "<div class='small muted' style='margin-top:3px'>" + esc(job.objects) + " labelled part" + (job.objects === 1 ? "" : "s") + " found in the G-code. Change it if that is not the count you sell.</div>" : "") +
       folderField(libLastFolder) +
       "<p class='small' id='l-result' style='min-height:16px;margin:8px 0 0'></p>" +
       "<div class='dialog-actions'><button type='button' class='quiet' id='dlg-cancel'>Cancel</button><button type='button' id='dlg-ok'>Save</button></div>");
@@ -3925,6 +4034,40 @@ PANEL_HTML = r"""<style>
     };
     wireFolderPicks();
     $("l-parts").focus();
+  }
+  // Every plate of one printer type not saved yet: a name, a parts count and a folder for each.
+  function saveAllDialog(key) {
+    var all = state.jobs.filter(function (j) { return j.ready && j.key === key; }).sort(function (a, b) { return a.plate - b.plate; });
+    var jobs = all.filter(function (j) { return !j.stale && !j.saved_as; });
+    if (!jobs.length) return;
+    var SAME = "\u0001same";
+    var options = "<option value='" + SAME + "'>Folder for all (above)</option><option value=''>No folder</option>" +
+      state.folders.map(function (n) { return "<option value='" + esc(n) + "'>" + esc(n) + "</option>"; }).join("");
+    showDialog("<h4>Save " + jobs.length + " plates to the library</h4>" +
+      "<p class='small muted' style='margin:0'>Kept as sliced, for " + esc(jobs[0].printer_model) + ". Give each plate a name and its parts count.</p>" +
+      folderField(libLastFolder).replace("Folder<select", "Folder for all<select") +
+      "<div style='margin-top:12px'>" + jobs.map(function (job) {
+        return "<div class='type'><div class='small muted'>Plate " + esc(job.plate) + " · " + esc(plateBrief(job)) + "</div>" +
+          "<input data-a-item='" + esc(job.id) + "' maxlength='80' style='display:block;width:100%;box-sizing:border-box;margin-top:3px' value='" + esc(suggestedName(job, all.length > 1)) + "'>" +
+          "<div class='row' style='gap:6px;margin-top:4px'><input data-a-parts='" + esc(job.id) + "' type='number' min='1' max='9999' placeholder='parts' title='Parts on this plate' style='width:76px;flex:none'" +
+            (job.objects ? " value='" + esc(job.objects) + "'" : "") + ">" +
+          "<select data-a-folder='" + esc(job.id) + "' title='Folder for this plate' style='flex:1;min-width:0'>" + options + "</select></div></div>";
+      }).join("") + "</div>" +
+      "<p class='small' id='l-result' style='min-height:16px;margin:8px 0 0'></p>" +
+      "<div class='dialog-actions'><button type='button' class='quiet' id='dlg-cancel'>Cancel</button><button type='button' id='dlg-ok'>Save all</button></div>");
+    $("dlg-cancel").onclick = hideDialog;
+    $("dlg-ok").onclick = function () {
+      var forAll = pickedFolder(), box = $("dialog");
+      var rows = jobs.map(function (job) {
+        var own = box.querySelector("[data-a-folder='" + job.id + "']").value;
+        return { job_id: job.id, item: box.querySelector("[data-a-item='" + job.id + "']").value,
+                 parts: box.querySelector("[data-a-parts='" + job.id + "']").value, folder: own === SAME ? forAll : own };
+      });
+      $("l-result").className = "small muted"; $("l-result").textContent = "Saving...";
+      libLastFolder = forAll;
+      rows.forEach(function (row) { openFolderPath(row.folder); });
+      send("library_save_all", { rows: rows });
+    };
   }
   function toolsHtml(printer) {
     var tools = (state.status[printer.id] || {}).tools || [];
@@ -4041,6 +4184,8 @@ PANEL_HTML = r"""<style>
       html += "<div class='muted small' style='margin-top:4px'>Add your printers, then slice once for each printer type. " +
               "Every slice is kept here until you send it.</div>";
     }
+    var held = state.types.filter(function (t) { return platesFor(t).length; });
+    var anyCurrent = held.some(function (t) { return t.selected || (t.combo && t.combo.active); });
     html += "<div style='margin-top:7px'>" + state.types.map(function (type) {
       var jobs = platesFor(type), job = jobs[0], combo = type.combo, action = "";
       if (combo && combo.active) action = "<span class='ok small'>in use</span>";
@@ -4048,10 +4193,23 @@ PANEL_HTML = r"""<style>
                                (busy || !state.can_switch ? " disabled" : "") +
                                " title='Switch OrcaSlicer to the printer, process and filament remembered for this type'>Use presets</button>";
       else if (type.selected) action = "<span class='muted small'>selected</span>";
-      return "<div class='type'><div class='row spread' style='gap:8px'>" +
-        "<div class='file'><b>" + esc(type.label) + "</b></div><div class='row' style='flex:none'>" + action + "</div></div>" +
-        (job ? platesHtml(jobs) : "<div class='muted small'>Not sliced yet" +
-               (combo ? (combo.active ? ". Slice the plate." : "") : ". Select its presets in OrcaSlicer and slice.") + "</div>") +
+      // Open: the type OrcaSlicer is set to, or every type when none of the held ones is current.
+      var current = type.selected || (combo && combo.active);
+      var open = typeOpen[type.key] !== undefined ? typeOpen[type.key] : (current || !anyCurrent || held.length < 2);
+      var unsaved = jobs.filter(function (j) { return !j.stale && !j.saved_as; });
+      var title = job
+        ? "<button type='button' class='linkish file' style='padding:0;text-decoration:none;font-weight:600;color:inherit;text-align:left;min-width:0' data-type-toggle='" + esc(type.key) + "'>" +
+          (open ? "▾ " : "▸ ") + esc(type.label) + "</button>"
+        : "<div class='file'><b>" + esc(type.label) + "</b></div>";
+      var body;
+      if (!job) body = "<div class='muted small'>Not sliced yet" + (combo ? (combo.active ? ". Slice the plate." : "") : ". Select its presets in OrcaSlicer and slice.") + "</div>";
+      else if (!open) body = "<div class='muted small'>" + jobs.length + " plate" + (jobs.length === 1 ? "" : "s") + " · sliced " + esc(job.sliced_at) +
+                             (unsaved.length ? "" : " · <span class='ok'>all saved</span>") + "</div>";
+      else body = platesHtml(jobs) + "<div class='row spread' style='gap:8px;margin-top:6px'>" +
+        (unsaved.length > 1 ? "<button type='button' class='quiet' style='white-space:nowrap;padding:1px 8px;font-size:12px' data-save-all='" + esc(type.key) +
+                              "' title='Name and keep every plate not saved yet'>Save all to library (" + unsaved.length + ")</button>" : "<span></span>") +
+        "<button type='button' class='linkish' style='flex:none' data-type-clear='" + esc(type.key) + "' title='Drop these sliced plates. Library plates are kept.'>clear</button></div>";
+      return "<div class='type'><div class='row spread' style='gap:8px'>" + title + "<div class='row' style='flex:none'>" + action + "</div></div>" + body +
         "<div class='row spread small muted' style='gap:8px'><span class='file'>" +
           (type.printers.length ? esc(type.printers.join(", ")) : "no printers of this type") + "</span>" +
           "<button type='button' class='linkish' style='flex:none' data-type-presets='" + esc(type.key) + "'>presets</button></div></div>";
@@ -4086,7 +4244,10 @@ PANEL_HTML = r"""<style>
   }
 
   $("job").addEventListener("click", function (event) {
-    var d = event.target.dataset || {};
+    // The click may land on text inside a button: take the nearest element that carries an action.
+    var node = event.target;
+    while (node && node !== this && !Object.keys(node.dataset || {}).length) node = node.parentNode;
+    var d = (node && node !== this && node.dataset) || {};
     if (d.view) { plateView = d.view; libNote = null; renderJob(); }
     else if (d.orderNew) newOrder();
     else if (d.toolNames) toolheadNames();
@@ -4100,6 +4261,20 @@ PANEL_HTML = r"""<style>
       $("dlg-ok").onclick = function () { send("order_delete", { id: d.orderDel }); hideDialog(); };
     }
     else if (d.choosePlate) send("choose_plate", { id: d.choosePlate });
+    else if (d.plateToggle) { plateOpen[d.plateToggle] = !plateOpen[d.plateToggle]; renderJob(); }
+    else if (d.typeToggle) {
+      var isOpen = event.target.closest("[data-type-toggle]").textContent.charAt(0) === "\u25be";
+      typeOpen[d.typeToggle] = !isOpen; renderJob();
+    }
+    else if (d.saveAll) saveAllDialog(d.saveAll);
+    else if (d.typeClear) {
+      var kept = state.types.filter(function (t) { return t.key === d.typeClear; })[0];
+      showDialog("<h4>Clear the sliced plates for " + esc(kept ? kept.label : "this type") + "?</h4>" +
+        "<p class='small muted'>They are dropped from this panel. Plates saved to the library are kept. To get them back, slice again.</p>" +
+        "<div class='dialog-actions'><button type='button' class='quiet' id='dlg-cancel'>Cancel</button><button type='button' class='danger' id='dlg-ok'>Clear</button></div>");
+      $("dlg-cancel").onclick = hideDialog;
+      $("dlg-ok").onclick = function () { send("clear_slices", { key: d.typeClear }); hideDialog(); };
+    }
     else if (d.libSave) saveToLibrary(d.libSave);
     else if (d.libEdit) editLibrary(d.libEdit);
     else if (d.folderNew !== undefined) folderDialog("", d.folderNew);

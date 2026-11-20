@@ -2,6 +2,12 @@
 
 ## 0.3.3
 
+- **Fix: a second OrcaSlicer window no longer removes the first window's sliced plates.** The copies of sliced plates were kept in one shared folder that every window emptied when its panel started, and since 0.3.2 the panel starts by itself. Sending or saving a plate from the first window then failed until it was sliced again. Each window now keeps its own copies.
+- **A tidier "Sliced now".** Each sliced plate is one line; click it for the details. The printer type OrcaSlicer is set to stays open and the other types fold to one line, so slicing for a second printer type no longer doubles the list.
+- **Save all to library.** One dialog for every plate of a project not saved yet: a name, a parts count and a folder for each, with one "folder for all" on top.
+- A plate that is already in the library shows "saved" instead of the Save button.
+- The parts count is filled in from the labelled objects in the G-code where there are any, and a suggested name includes the plate number.
+- **clear** drops the sliced plates of one printer type. Library rows show a short printer tag such as U1 or CC2.
 - The Sliced now / Library / Orders tabs no longer break onto two lines in a narrow panel.
 
 ## 0.3.2

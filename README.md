@@ -51,7 +51,7 @@ The plugin cannot press Slice for you.
 
 **Library**
 
-For parts you print again and again. On a sliced plate's row click **Save to library**, name the item and enter how many parts are on the plate.
+For parts you print again and again. On a sliced plate's row click **Save**, name the item and enter how many parts are on the plate (the count is filled in when the G-code labels its parts). A plate already in the library shows **saved**.
 The plate is kept on this computer, in the plugin's own data folder, and survives closing the project and restarting OrcaSlicer.
 You can also put it in a folder. The save dialog can make a new folder on the spot, inside the folder you picked. Folders start collapsed. **New folder** in the Library view makes one at the top, and the plus on a folder makes one inside it, up to four levels. The pencil and bin on a folder rename or remove it; removing a folder keeps what is in it and moves it up one level. The pencil on a library row renames the item, corrects the count or moves it to another folder.
 In the Plates box, **Library** lists what you kept, grouped by folder, with search. **Send** shows the printers of the right type with their state, and the total parts for the printers you tick, then uploads and starts them. No project, no slicing.
@@ -76,7 +76,7 @@ When a plate finishes, **Bed cleared** on that printer asks how many parts came 
 
 **Several plates in one project**
 
-After **Slice all**, every plate is held for its printer type, each with its own **Save to library** button. One of them is marked as the one the printer cards send; click **send this one** on another to change it. Slicing a plate again replaces that plate only.
+After **Slice all**, every plate is held for its printer type, one line each; click a line for its details. **Save all to library** names and keeps every plate not saved yet in one dialog, each with its own name, parts count and folder. The dot in front of a plate marks the one the printer cards send; click another plate's dot to change it. The printer type OrcaSlicer is set to stays open and the others fold to one line; **clear** drops the sliced plates of a type. Slicing a plate again replaces that plate only.
 
 **Toolhead names**
 

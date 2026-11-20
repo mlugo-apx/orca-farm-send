@@ -16,6 +16,8 @@ from core import (toolhead_color_problem, count_objects, file_stamp, OrderBook, 
 # BUNDLE-STRIP-END
 
 SLICE_DIR = "slices"
+SLICE_KEEP_S = 12 * 3600      # sliced copies of a window that is gone are dropped after this long
+SLICE_TOUCH_S = 600
 LIBRARY_DIR = "library"   # kept plates: <id>.gcode plus <id>.json describing it
 STATUS_MIN_INTERVAL = 3.0
 STATUS_MIN_INTERVAL_CC2 = 8.0   # each CC2 poll is a full MQTT connect + register; be gentle
@@ -105,10 +107,15 @@ class FarmApp:
         # because OrcaSlicer rewrites its temp file on the next slice: without a copy, slicing for
         # the second printer type would destroy the plate sliced for the first.
         self.jobs = []
-        self.slice_dir = os.path.join(storage_dir, SLICE_DIR)
+        # Each OrcaSlicer window keeps its sliced copies in a folder of its own, so a second window
+        # starting up never removes the plates another window still holds.
+        self.slice_root = os.path.join(storage_dir, SLICE_DIR)
+        self.slice_dir = os.path.join(self.slice_root, uuid.uuid4().hex[:8])
+        self._slice_touched = time.monotonic()
         self.library_dir = os.path.join(storage_dir, LIBRARY_DIR)
         self._library_cache, self._library_stamp = None, None
         self.chosen = {}        # printer type key -> id of the sliced plate its cards send
+        self._saved_names = {}  # md5 of a kept plate -> its item name, refreshed with every snapshot
         self._clear_slice_dir()
         self.slicing = False
         self.status = {}          # printer id -> normalized status
@@ -126,12 +133,37 @@ class FarmApp:
         self.current = None
         self.combo_note = {"text": "", "ok": True, "busy": False}
 
-    def _clear_slice_dir(self):
-        """Drop copies left by an earlier session or project. They are only useful while their plate is open."""
+    def _clear_slice_dir(self, now=None):
+        """Drop sliced copies left behind by windows that are gone. There is no way to ask whether
+        another window is still open, so a folder counts as left behind once nothing in it has changed
+        for SLICE_KEEP_S; an open window refreshes its folder while its panel is in use."""
+        now = time.time() if now is None else now
         try:
-            for name in os.listdir(self.slice_dir):
-                if name.endswith(".gcode") or name.endswith(".part"):
-                    self._remove_file(os.path.join(self.slice_dir, name))
+            names = os.listdir(self.slice_root)
+        except OSError:
+            return
+        for name in names:
+            path = os.path.join(self.slice_root, name)
+            try:
+                if path == self.slice_dir or now - os.path.getmtime(path) < SLICE_KEEP_S:
+                    continue
+                if os.path.isdir(path):
+                    for inner in os.listdir(path):
+                        if inner.endswith(".gcode") or inner.endswith(".part"):
+                            self._remove_file(os.path.join(path, inner))
+                    os.rmdir(path)
+                elif name.endswith(".gcode") or name.endswith(".part"):      # from before 0.3.3
+                    self._remove_file(path)
+            except OSError:
+                pass
+
+    def _touch_slice_dir(self):
+        """Mark this window's sliced copies as still in use. Cheap, and at most every few minutes."""
+        if time.monotonic() - self._slice_touched < SLICE_TOUCH_S:
+            return
+        self._slice_touched = time.monotonic()
+        try:
+            os.utime(self.slice_dir, None)
         except OSError:
             pass
 
@@ -206,6 +238,7 @@ class FarmApp:
             meta = parse_gcode_meta(copy)
             if not meta.get("printer_model"):
                 raise FarmError("The sliced G-code does not name a printer model, so it cannot be matched to a printer.")
+            job["objects"], job["md5"] = count_objects(copy), file_md5(copy)
             replaced = []
             with self.lock:
                 if job not in self.jobs:          # project closed or superseded while copying
@@ -305,6 +338,8 @@ class FarmApp:
         return {
             "id": job["id"], "ready": job["ready"], "error": job["error"], "stale": job["stale"], "key": job.get("key", ""),
             "plate": job.get("plate", 1),
+            "objects": job.get("objects") or 0,
+            "saved_as": self._saved_names.get(job.get("md5") or "", ""),
             "chosen": job is self._chosen_plate(job.get("key")),
             "display_name": self._job_base_name(job), "summary": " · ".join(bits),
             "printer_model": meta.get("printer_model", ""), "sliced_at": _clock(job["captured_at"]),
@@ -322,6 +357,9 @@ class FarmApp:
             stamp = file_stamp(self.library_dir)
             if stamp != self._library_stamp:
                 self._library_stamp, self._library_cache = stamp, None
+            self._saved_names = {e["md5"]: e.get("item", "") for e in self.library() if e.get("md5")}
+            if self.jobs:
+                self._touch_slice_dir()
             job_for = {}
             for printer in self.store.printers:
                 match = self._job_for(printer)
@@ -873,37 +911,86 @@ class FarmApp:
             self.post({"command": "library_result", "ok": False, "text": "Could not save: %s" % (error.strerror or error)})
         self.post_state()
 
+    def _library_keep(self, job, item, parts, folder):
+        """Copy one sliced plate into the library. Raises FarmError or OSError."""
+        if job is None:
+            raise FarmError("That plate is no longer here. Slice it again.")
+        if job.get("stale"):
+            raise FarmError("The plate changed after this slice. Slice again, then save.")
+        os.makedirs(self.library_dir, exist_ok=True)
+        entry_id = "%s-%s" % (time.strftime("%Y%m%d-%H%M%S"), job["id"][:6])
+        target = os.path.join(self.library_dir, entry_id + ".gcode")
+        self._copy_file(job["path"], target + ".part")
+        os.replace(target + ".part", target)
+        meta = job["meta"]
+        entry = {"id": entry_id, "item": item, "parts": parts, "folder": folder, "key": job.get("key", ""),
+                 "printer_model": meta.get("printer_model", ""), "time_s": meta.get("time_s"),
+                 "filament_g": meta.get("filament_g"), "layers": meta.get("layers"),
+                 "filaments": list(meta.get("filaments") or []), "nozzle_diameter": meta.get("nozzle_diameter"),
+                 "presets": " \u00b7 ".join(x for x in (meta.get("process_preset"), meta.get("filament_preset")) if x),
+                 "saved_at": time.time(), "size": os.path.getsize(target), "md5": file_md5(target),
+                 "objects": count_objects(target)}
+        # The description is written last: a plate only counts as kept once it is complete.
+        write_private(os.path.join(self.library_dir, entry_id + ".json"), json.dumps(entry, indent=1))
+        self._library_cache = None
+        return entry
+
     def _cmd_library_save(self, message):
         """Keep the plate sliced just now, under an item name and with the number of parts on it."""
         with self.lock:
             job = next((j for j in self.jobs if j["id"] == message.get("job_id") and j["ready"]), None)
         try:
             item, parts, folder = self._library_fields(message)
-            if job is None:
-                raise FarmError("That plate is no longer here. Slice it again.")
-            if job.get("stale"):
-                raise FarmError("The plate changed after this slice. Slice again, then save.")
-            os.makedirs(self.library_dir, exist_ok=True)
-            entry_id = "%s-%s" % (time.strftime("%Y%m%d-%H%M%S"), job["id"][:6])
-            target = os.path.join(self.library_dir, entry_id + ".gcode")
-            self._copy_file(job["path"], target + ".part")
-            os.replace(target + ".part", target)
-            meta = job["meta"]
-            entry = {"id": entry_id, "item": item, "parts": parts, "folder": folder, "key": job.get("key", ""),
-                     "printer_model": meta.get("printer_model", ""), "time_s": meta.get("time_s"),
-                     "filament_g": meta.get("filament_g"), "layers": meta.get("layers"),
-                     "filaments": list(meta.get("filaments") or []), "nozzle_diameter": meta.get("nozzle_diameter"),
-                     "presets": " \u00b7 ".join(x for x in (meta.get("process_preset"), meta.get("filament_preset")) if x),
-                     "saved_at": time.time(), "size": os.path.getsize(target), "md5": file_md5(target),
-                     "objects": count_objects(target)}
-            # The description is written last: a plate only counts as kept once it is complete.
-            write_private(os.path.join(self.library_dir, entry_id + ".json"), json.dumps(entry, indent=1))
-            self._library_cache = None
+            self._library_keep(job, item, parts, folder)
             self.post({"command": "library_result", "ok": True, "text": "Saved %s x%d to the library." % (item, parts)})
         except FarmError as error:
             self.post({"command": "library_result", "ok": False, "text": str(error)})
         except OSError as error:
             self.post({"command": "library_result", "ok": False, "text": "Could not save: %s" % (error.strerror or error)})
+        self.post_state()
+
+    def _cmd_library_save_all(self, message):
+        """Keep several sliced plates in one go. rows: [{job_id, item, parts, folder}]. Every row is
+        checked before anything is copied, so a typing mistake never leaves half of them saved."""
+        rows = [row for row in (message.get("rows") or []) if isinstance(row, dict)]
+        try:
+            if not rows:
+                raise FarmError("Nothing to save")
+            todo = []
+            with self.lock:
+                jobs = {j["id"]: j for j in self.jobs if j["ready"]}
+            for number, row in enumerate(rows, 1):
+                job = jobs.get(row.get("job_id"))
+                label = "Plate %s" % job["plate"] if job else "Row %d" % number
+                try:
+                    item, parts, folder = self._library_fields(row)
+                    if job is None:
+                        raise FarmError("That plate is no longer here. Slice it again.")
+                    if job.get("stale"):
+                        raise FarmError("The plate changed after this slice. Slice again, then save.")
+                except FarmError as error:
+                    raise FarmError("%s: %s" % (label, error))
+                todo.append((job, item, parts, folder))
+            for job, item, parts, folder in todo:
+                self._library_keep(job, item, parts, folder)
+            self.post({"command": "library_result", "ok": True,
+                       "text": "Saved %d plate%s to the library." % (len(todo), "" if len(todo) == 1 else "s")})
+        except FarmError as error:
+            self.post({"command": "library_result", "ok": False, "text": str(error)})
+        except OSError as error:
+            self._library_cache = None
+            self.post({"command": "library_result", "ok": False, "text": "Could not save: %s" % (error.strerror or error)})
+        self.post_state()
+
+    def _cmd_clear_slices(self, message):
+        """Drop the sliced plates held for one printer type. Kept library plates are not touched."""
+        key = message.get("key")
+        with self.lock:
+            gone = [job for job in self.jobs if job.get("key") == key and job["ready"]]
+            self.jobs = [job for job in self.jobs if job not in gone]
+            self.chosen.pop(key, None)
+        for job in gone:
+            self._remove_file(job["path"])
         self.post_state()
 
     def _cmd_library_delete(self, message):

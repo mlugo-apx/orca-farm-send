@@ -702,6 +702,63 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(self.app.library()[0]["folder"], "Clips / Brand new")
         self.assertIn("Clips / Brand new", self.app.snapshot()["folders"])
 
+    def _two_plates(self):
+        jobs = []
+        for index in (0, 1):
+            path = write(self.tmp.name, ".1.%d.gcode" % index, U1_GCODE + "; plate %d\n" % index)
+            self.app.on_slice_started(); self.app.on_gcode_exported(path, "")
+            job = self.app.jobs[0]
+            self.assertTrue(wait_for(lambda: job["ready"] or job["error"]))
+            jobs.append(job)
+        return jobs
+
+    def test_save_all_keeps_every_plate_with_its_own_name_and_folder(self):
+        first, second = self._two_plates()
+        self.app.handle({"command": "library_save_all", "rows": [
+            {"job_id": first["id"], "item": "Basket small", "parts": 1, "folder": "Baskets / U1"},
+            {"job_id": second["id"], "item": "Basket large", "parts": 2, "folder": ""}]})
+        result = [post for post in self.posts if post.get("command") == "library_result"][-1]
+        self.assertTrue(result["ok"], result)
+        kept = {e["item"]: e for e in self.app.library()}
+        self.assertEqual(kept["Basket small"]["folder"], "Baskets / U1")
+        self.assertEqual(kept["Basket large"]["folder"], "")
+        self.assertEqual(kept["Basket large"]["parts"], 2)
+        views = {view["plate"]: view for view in self.app.snapshot()["jobs"]}
+        self.assertEqual(views[1]["saved_as"], "Basket small")       # the panel marks them as saved
+        self.assertEqual(views[2]["saved_as"], "Basket large")
+
+    def test_save_all_saves_nothing_when_one_row_is_wrong(self):
+        first, second = self._two_plates()
+        self.app.handle({"command": "library_save_all", "rows": [
+            {"job_id": first["id"], "item": "Basket small", "parts": 1, "folder": ""},
+            {"job_id": second["id"], "item": "", "parts": 2, "folder": ""}]})
+        result = [post for post in self.posts if post.get("command") == "library_result"][-1]
+        self.assertFalse(result["ok"])
+        self.assertIn("Plate 2", result["text"])
+        self.assertEqual(self.app.library(), [])
+
+    def test_a_sliced_plate_reports_its_labelled_parts_and_clear_drops_one_type_only(self):
+        first, second = self._two_plates()
+        view = self.app.snapshot()["jobs"][0]
+        self.assertEqual(view["objects"], core.count_objects(first["path"]))
+        self.assertEqual(view["saved_as"], "")
+        self.app.handle({"command": "library_save", "job_id": first["id"], "item": "Kept", "parts": 3})
+        self.app.handle({"command": "clear_slices", "key": first["key"]})
+        self.assertEqual(self.app.jobs, [])
+        self.assertFalse(os.path.exists(first["path"]))
+        self.assertEqual(len(self.app.library()), 1)                 # the kept plate is untouched
+
+    def test_a_second_window_does_not_remove_the_first_windows_sliced_plates(self):
+        first, second = self._two_plates()
+        other = FarmApp(self.folder.name, [].append, default_name=lambda: "x.stl")     # another window starts
+        self.assertTrue(os.path.exists(first["path"]))
+        self.assertTrue(os.path.exists(second["path"]))
+        self.assertNotEqual(other.slice_dir, self.app.slice_dir)
+        # Copies nobody touched for longer than the keep time are dropped, folder and all.
+        other._clear_slice_dir(now=time.time() + 13 * 3600)
+        self.assertFalse(os.path.exists(first["path"]))
+        self.assertFalse(os.path.exists(self.app.slice_dir))
+
     def test_report_details_leave_out_names_addresses_and_codes(self):
         self.app.handle({"command": "report"})
         text = [post for post in self.posts if post.get("command") == "report"][-1]["text"]
@@ -1000,7 +1057,7 @@ class AppTests(unittest.TestCase):
         return [self.app.sends[p["id"]] for p in printers]
 
     def copies(self):
-        folder = os.path.join(self.folder.name, "slices")
+        folder = self.app.slice_dir            # each window keeps its sliced copies in its own folder
         return sorted(os.listdir(folder)) if os.path.isdir(folder) else []
 
     def _statuses(self):
@@ -1430,11 +1487,21 @@ class AppTests(unittest.TestCase):
         self.assertEqual(self.app.snapshot()["jobs"], [])
         self.assertEqual(self.copies(), [])
 
-    def test_leftover_copies_are_cleared_at_startup(self):
+    def test_leftover_copies_are_cleared_at_startup_only_once_they_are_old(self):
         self.slice(U1_GCODE)
         self.assertEqual(len(self.copies()), 1)
+        later = FarmApp(self.folder.name, lambda message: None)          # another window, or a restart soon after
+        self.assertEqual(len(self.copies()), 1)
+        old = time.time() - 13 * 3600
+        os.utime(self.app.slice_dir, (old, old))
+        loose = os.path.join(self.folder.name, "slices", "left-by-an-older-version.gcode")
+        with open(loose, "w") as handle:
+            handle.write("G28\n")
+        os.utime(loose, (old, old))
         FarmApp(self.folder.name, lambda message: None)
         self.assertEqual(self.copies(), [])
+        self.assertFalse(os.path.exists(loose))
+        self.assertTrue(later is not None)
 
     def test_poll_reports_each_printer(self):
         self.u1b.close()
