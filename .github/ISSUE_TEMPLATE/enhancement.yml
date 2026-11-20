@@ -1,0 +1,21 @@
+name: Request an enhancement
+description: Something you would like Farm Send to do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: want
+    attributes:
+      label: What do you want to do?
+      description: The job you are trying to get done, in your own words.
+    validations:
+      required: true
+  - type: textarea
+    id: today
+    attributes:
+      label: How do you do it today?
+      description: The steps you take now, in Farm Send or outside it.
+  - type: input
+    id: printers
+    attributes:
+      label: Your printers
+      description: Models and how many, for example "3 Snapmaker U1, 2 Centauri Carbon 2"

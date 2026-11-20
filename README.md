@@ -119,9 +119,9 @@ If you install both the Plugin Hub copy and a local file copy, only one can be a
 - **Access codes are stored as plain text** in `<OrcaSlicer config>/orca_plugins/plugin_data/farm_send/farm_send_printers.json`. The file is created readable only by your user account. Anyone with access to your account can read it, as with the printer presets OrcaSlicer itself stores.
 - Printers are reached over plain HTTP, MQTT and websocket on your local network, as the vendors' own slicers do. Use it on a network you trust.
 
-## Reporting a problem
+## Reporting a problem or requesting an enhancement
 
-Open an issue at https://github.com/mlugo-apx/orca-farm-send/issues. Click **Report a problem** at the bottom of the panel first: it collects the plugin version, your system, and each printer's model and state, ready to paste. Printer names, addresses and access codes are left out; messages can include file names, so read it before posting. Add your OrcaSlicer version, the printer's firmware version, what you clicked, and the exact message shown.
+Open an issue at https://github.com/mlugo-apx/orca-farm-send/issues and pick the form that fits. For an enhancement, describe what you want to do and how you do it today. For a problem, click **Report a problem or request an enhancement** at the bottom of the panel first: it collects the plugin version, your system, and each printer's model and state, ready to paste. Printer names, addresses and access codes are left out; messages can include file names, so read it before posting. Add your OrcaSlicer version, the printer's firmware version, what you clicked, and the exact message shown.
 
 ## Develop
 

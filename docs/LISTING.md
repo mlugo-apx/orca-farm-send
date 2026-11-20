@@ -4,7 +4,7 @@
 |---|---|
 | File | `dist/farm_send_any.py` |
 | Name | Farm Send |
-| Version | 0.3.0 |
+| Version | 0.3.1 |
 | Type | Script |
 | Min. OrcaSlicer version | 2.5.0 (the only choice the form offers) |
 | Icon | `docs/icon.png` (square; the hub stores it at 320 x 320) |
@@ -32,7 +32,7 @@ Farm Send is a docked panel for small print farms. Slice a plate once per printe
 
 Early release. Developed and tested on Linux with two Centauri Carbon 2s and three Snapmaker U1s (firmware 2.1.2). Windows and macOS are untested; reports welcome. It talks only to the printer addresses you save: no cloud, no telemetry.
 
-Found a problem? Click **Report a problem** at the bottom of the panel and open an issue at https://github.com/mlugo-apx/orca-farm-send/issues
+Found a problem, or want something added? Click **Report a problem or request an enhancement** at the bottom of the panel and open an issue at https://github.com/mlugo-apx/orca-farm-send/issues
 
 It starts real prints. Look at the bed before you confirm.
 

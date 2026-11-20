@@ -59,7 +59,7 @@
 <div class="box" id="storage" style="display:none;margin-top:14px"></div>
 <p id="empty" class="muted" style="display:none">No printers yet. Use Import to pull them from your printer presets, or Add.</p>
 
-<p class="small muted" style="margin-top:14px;text-align:right"><button type="button" class="linkish" id="btn-report" title="Collect the details a bug report needs">Report a problem</button></p>
+<p class="small muted" style="margin-top:14px;text-align:right"><button type="button" class="linkish" id="btn-report" title="Tell the developer what went wrong or what you would like added">Report a problem or request an enhancement</button></p>
 
 <div id="overlay"><div id="dialog"></div></div>
 
@@ -1010,9 +1010,9 @@
     else if (d.pick) { selected[d.pick] = t.checked; renderMulti(); renderPrinters(); }
   });
   $("btn-add").onclick = function () { editPrinter(null); };
-  // ---- trouble report: details to paste into a GitHub issue ------------------------------------
+  // ---- problem report or enhancement request: details to paste into a GitHub issue ------------------------------------
   function reportDialog(text) {
-    showDialog("<h4>Report a problem</h4><p class='small muted' style='margin:0'>Open an issue at <b>github.com/mlugo-apx/orca-farm-send/issues</b> and paste these details. " +
+    showDialog("<h4>Report a problem or request an enhancement</h4><p class='small muted' style='margin:0'>Open an issue at <b>github.com/mlugo-apx/orca-farm-send/issues</b> and pick the form that fits. For a problem, paste these details. " +
       "Printer names, addresses and access codes are left out. Messages can include file names, so read it before posting.</p>" +
       "<textarea id='r-text' readonly rows='10' style='width:100%;box-sizing:border-box;margin-top:8px;font-family:monospace;font-size:11px'>" + esc(text) + "</textarea>" +
       "<div class='row' style='margin-top:10px;justify-content:flex-end;gap:8px'><span id='r-note' class='small muted'></span>" +

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1
+
+- The link at the bottom of the panel now reads "Report a problem or request an enhancement", and the GitHub repository has a form for each.
+
 ## 0.3.0
 
 - **Print only some parts of a kept plate (Snapmaker U1).** The library send dialog has "Parts to print per printer". Below the full count, the printer is told to skip the other parts as it starts, and the panel waits for the printer to confirm before it reports the start. If the printer does not confirm, the print is cancelled. One full plate in the library now covers any quantity. It needs a plate whose parts are labelled one by one (OrcaSlicer's "Label objects", on by default for Klipper printers) and a parts count that matches. The time and grams shown stay those of the full plate. Verified on a U1 up to the printer confirming 26 of 28 parts skipped before any extrusion; a print of the remaining parts has not been run yet.

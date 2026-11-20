@@ -5,13 +5,13 @@ body:
   - type: markdown
     attributes:
       value: |
-        In the Farm Send panel, click **Report a problem** at the bottom and paste what it gives you into the first box.
+        In the Farm Send panel, click **Report a problem or request an enhancement** at the bottom and paste what it gives you into the first box.
         Never post a printer access code or API key.
   - type: textarea
     id: details
     attributes:
       label: Report details
-      description: Pasted from "Report a problem" in the panel (0.3.0 and later). On older versions, give the plugin version, your operating system, and each printer's model.
+      description: Pasted from the link at the bottom of the panel (0.3.0 and later). On older versions, give the plugin version, your operating system, and each printer's model.
       render: text
     validations:
       required: true
