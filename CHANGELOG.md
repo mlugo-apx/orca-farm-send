@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.3
+
+- The Sliced now / Library / Orders tabs no longer break onto two lines in a narrow panel.
+
 ## 0.3.2
 
 - **The panel opens by itself when OrcaSlicer starts.** OrcaSlicer has no run-at-start for plugins, so the plugin opens its panel on the first event OrcaSlicer sends it while starting. Once per session: close it and it stays closed. A checkbox at the bottom of the panel turns this off. If OrcaSlicer ever goes down while the panel is opening itself, the setting turns itself off on the next start.

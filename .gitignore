@@ -1,3 +1,4 @@
 dist/*.json
 __pycache__/
 *.pyc
+dist/last-test-run.log
