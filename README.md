@@ -116,6 +116,7 @@ If you install both the Plugin Hub copy and a local file copy, only one can be a
 
 - **Network**: only the printer addresses you save. The plugin contacts nothing else: no cloud, no telemetry, no update check.
 - **Files**: read access to OrcaSlicer's temp G-code folder, to copy each slice. Everything it writes stays in its own storage folder.
+- **Presets**: the panel reads which printer, process and filament presets are selected, and **Import** reads your own printer presets (name, model, nozzle size, address and API key) to offer them as printers. OrcaSlicer has no permission prompt for reading presets, so nothing asks you; nothing read this way leaves your computer except to reach the printer itself.
 - **Access codes are stored as plain text** in `<OrcaSlicer config>/orca_plugins/plugin_data/farm_send/farm_send_printers.json`. The file is created readable only by your user account. Anyone with access to your account can read it, as with the printer presets OrcaSlicer itself stores.
 - Printers are reached over plain HTTP, MQTT and websocket on your local network, as the vendors' own slicers do. Use it on a network you trust.
 
