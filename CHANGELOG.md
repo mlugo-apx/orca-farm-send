@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.5
+
+- Clicking **Bed cleared** now also removes the note about how the last print ended, so a free printer no longer shows its previous file.
+- Print history names the plate for a print sent straight from "Sliced now". It recorded the printer's name there.
+
 ## 0.3.4
 
 - **Print history.** Every print started from the panel is recorded: what, on which printer, when, how many parts, and how it ended (finished, cancelled, error, or stopped early). A good-parts count entered at "Bed cleared" is added to it. **Print history** at the bottom of the panel shows the list with a count per printer, and copies it as CSV. Prints started at the printer are not recorded, and an ending is only seen while the panel is open.

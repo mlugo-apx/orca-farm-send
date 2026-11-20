@@ -780,6 +780,26 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(shown["runs"][0]["good"], 22)
         self.assertEqual(shown["printers"], [{"name": "U1 #1", "started": 1, "finished": 1, "failed": 0}])
 
+    def test_run_log_names_a_plate_sent_straight_from_a_slice_and_bed_cleared_drops_the_note(self):
+        path = write(self.tmp.name, ".1.0.gcode", U1_GCODE)
+        self.app.on_slice_started(); self.app.on_gcode_exported(path, "")
+        job = self.app.jobs[0]
+        self.assertTrue(wait_for(lambda: job["ready"] or job["error"]))
+        self.app.handle({"command": "send", "printer_ids": [self.p_u1["id"]], "start": True, "options": {}})
+        self.assertTrue(wait_for(lambda: (self.app.sends.get(self.p_u1["id"]) or {}).get("started")))
+        run = self.app.runs.runs[-1]
+        self.assertEqual(run["item"], "rail clip")              # the plate, not the printer's name
+        self.assertEqual(run["source"], "sliced")
+        # a note about how the last print ended stays on the card until the bed is cleared
+        pid = self.p_u1["id"]
+        with self.app.lock:
+            self.app.notices[pid] = {"level": "info", "text": "U1 #1 finished x.gcode", "at": 1.0, "state": "idle"}
+            self.app.status[pid] = {"state": "idle", "notice": dict(self.app.notices[pid]), "needs_clearing": True}
+        self.app.handle({"command": "bed_cleared", "id": pid})
+        self.assertNotIn(pid, self.app.notices)
+        self.assertNotIn("notice", self.app.status[pid])
+        self.assertFalse(self.app.status[pid]["needs_clearing"])
+
     def test_run_result_reads_how_a_print_ended(self):
         printing = {"state": "printing", "progress": 40}
         self.assertEqual(core.run_result(printing, {"state": "idle", "last_result": "cancelled"}), "cancelled")
