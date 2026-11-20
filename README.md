@@ -59,12 +59,28 @@ In the Plates box, **Library** lists what you kept, grouped by folder, with sear
 A kept plate is the G-code exactly as sliced: printer type, nozzle, material and temperatures do not change. To change any of those, slice again and save a new plate.
 On Snapmaker U1s a one-filament plate can be printed from any toolhead, so one kept plate covers every color: choose the toolhead in the send dialog, which lists what each printer's toolheads hold.
 The same toolhead number is used on every printer you tick, so this assumes your printers keep the same color in the same position.
-A start is refused when that toolhead reports no filament or holds a different material. Color itself is not checked.
+A start is refused when that toolhead reports no filament or holds a different material. Printing as sliced is also refused when the toolhead reports a clearly different color than the plate was sliced with, until you confirm the loaded color in the dialog. When you pick another toolhead, the dialog shows what each printer holds there and warns if they differ.
 Verified on a U1 up to the point where the printer heats the chosen toolhead; a complete print through a remapped toolhead has not been run yet.
+
+**Printing part of a plate (Snapmaker U1)**
+
+In the library send dialog, **Parts to print per printer** defaults to the full plate. Enter less and the printer is told to skip the other parts as it starts; the panel reports the start only after the printer confirms, and cancels the print if it does not. So one full plate in the library covers any quantity.
+This works when the plate's parts are labelled one by one in the G-code and that number equals the parts count you entered. The kept parts are the first ones in the plate's own order. The time and grams shown are still those of the full plate.
+A Centauri Carbon 2 prints whole plates only, so keep a small plate for it if you want small quantities there.
+
+**Orders**
+
+For "I need 10 of these". In the Plates box open **Orders**, click **New order**, pick a library item and enter the quantity. Optionally pick the toolhead for Snapmaker printers and add a note.
+**Print next** splits what is left evenly over the printers that are free right now: idle, bed cleared, and no uncounted plate on them. Ten parts over five printers that can skip parts is two each. A printer that prints whole plates only gets the kept plate nearest its share, and is left out when that plate would be more than double the share. Edit any count, untick what you do not want, then **Start prints**.
+When a plate finishes, **Bed cleared** on that printer asks how many parts came out good. Only good parts count. The order line shows good, printing and still to start, and is remembered across restarts.
+
+**Several plates in one project**
+
+After **Slice all**, every plate is held for its printer type, each with its own **Save to library** button. One of them is marked as the one the printer cards send; click **send this one** on another to change it. Slicing a plate again replaces that plate only.
 
 **Toolhead names**
 
-**toolhead names** in the Library view lets you label the four toolhead positions (Black, White and so on) if you keep them the same on every printer. These are labels only: the plugin checks that the toolhead has filament of the right material, not its color.
+**toolhead names** in the Library view lets you label the four toolhead positions (Black, White and so on) if you keep them the same on every printer. These are labels only; the color check compares what the printer reports with what the plate was sliced with.
 
 **Stored files and cleanup**
 
@@ -102,6 +118,10 @@ If you install both the Plugin Hub copy and a local file copy, only one can be a
 - **Files**: read access to OrcaSlicer's temp G-code folder, to copy each slice. Everything it writes stays in its own storage folder.
 - **Access codes are stored as plain text** in `<OrcaSlicer config>/orca_plugins/plugin_data/farm_send/farm_send_printers.json`. The file is created readable only by your user account. Anyone with access to your account can read it, as with the printer presets OrcaSlicer itself stores.
 - Printers are reached over plain HTTP, MQTT and websocket on your local network, as the vendors' own slicers do. Use it on a network you trust.
+
+## Reporting a problem
+
+Open an issue at https://github.com/mlugo-apx/orca-farm-send/issues. Click **Report a problem** at the bottom of the panel first: it collects the plugin version, your system, and each printer's model and state, ready to paste. Printer names, addresses and access codes are left out; messages can include file names, so read it before posting. Add your OrcaSlicer version, the printer's firmware version, what you clicked, and the exact message shown.
 
 ## Develop
 

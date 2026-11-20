@@ -1,0 +1,44 @@
+name: Report a problem
+description: Something in Farm Send did not work
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        In the Farm Send panel, click **Report a problem** at the bottom and paste what it gives you into the first box.
+        Never post a printer access code or API key.
+  - type: textarea
+    id: details
+    attributes:
+      label: Report details
+      description: Pasted from "Report a problem" in the panel (0.3.0 and later). On older versions, give the plugin version, your operating system, and each printer's model.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: orca
+    attributes:
+      label: OrcaSlicer version
+      description: Help > About
+    validations:
+      required: true
+  - type: input
+    id: firmware
+    attributes:
+      label: Printer firmware version
+      description: Of the printer the problem happened on
+  - type: textarea
+    id: what
+    attributes:
+      label: What you did and what happened
+      description: Which button you clicked, what you expected, and the exact message the panel showed. A screenshot helps.
+    validations:
+      required: true
+  - type: dropdown
+    id: repeat
+    attributes:
+      label: Does it happen every time?
+      options:
+        - Every time
+        - Sometimes
+        - Happened once

@@ -2,13 +2,15 @@
 shell supplies post()/notify() and forwards panel messages and slicer events."""
 # BUNDLE-STRIP-BEGIN
 import os
+import re
+import sys
 import json
 import queue
 import threading
 import time
 import uuid
 
-from core import (file_stamp, OrderBook, plan_order, CC2_MANY_FILES, nozzle_mismatch, toolhead_problem, write_private, file_md5, STORE_FILE, KIND_CC2, WATCHED_STATES, BedLog, FarmError, bed_needs_clearing, files_to_clean, rule_text,
+from core import (toolhead_color_problem, count_objects, file_stamp, OrderBook, plan_order, CC2_MANY_FILES, nozzle_mismatch, toolhead_problem, write_private, file_md5, STORE_FILE, KIND_CC2, WATCHED_STATES, BedLog, FarmError, bed_needs_clearing, files_to_clean, rule_text,
                   storage_summary, PrinterStore, can_start, job_filename, make_client, model_key, model_matches,
                   parse_gcode_meta, preset_to_printer, presets_to_printers, set_shared_dir, status_event, strip_model_suffix, validate_printer)
 # BUNDLE-STRIP-END
@@ -106,6 +108,7 @@ class FarmApp:
         self.slice_dir = os.path.join(storage_dir, SLICE_DIR)
         self.library_dir = os.path.join(storage_dir, LIBRARY_DIR)
         self._library_cache, self._library_stamp = None, None
+        self.chosen = {}        # printer type key -> id of the sliced plate its cards send
         self._clear_slice_dir()
         self.slicing = False
         self.status = {}          # printer id -> normalized status
@@ -176,8 +179,11 @@ class FarmApp:
     def on_gcode_exported(self, path, name=""):
         if not path or not path.lower().endswith(".gcode"):
             return
+        # OrcaSlicer names each plate's file .<process id>.<plate index>.gcode, so "Slice all" on a
+        # project with several plates arrives as one export per plate.
+        match = re.search(r"\.(\d+)\.gcode$", os.path.basename(path), re.I)
         job = {"id": uuid.uuid4().hex[:10], "source": path, "path": "", "name": name or "", "captured_at": time.time(),
-               "ready": False, "error": "", "stale": False, "meta": {}, "key": ""}
+               "ready": False, "error": "", "stale": False, "meta": {}, "key": "", "plate": int(match.group(1)) + 1 if match else 1}
         with self.lock:
             self.slicing = False
             # Earlier failed or still-pending captures are superseded by this slice.
@@ -206,9 +212,12 @@ class FarmApp:
                     replaced.append(copy)
                 else:
                     job["path"], job["meta"], job["key"] = copy, meta, model_key(meta["printer_model"])
-                    # The newest slice for a printer type replaces the older one for that type only.
-                    replaced += [other["path"] for other in self.jobs if other is not job and other["key"] == job["key"]]
-                    self.jobs = [other for other in self.jobs if other is job or other["key"] != job["key"]]
+                    # The newest slice of a plate replaces the older slice of that same plate for that
+                    # printer type. Other plates of the project, and other printer types, are kept.
+                    same = lambda other: other is not job and other["key"] == job["key"] and other.get("plate") == job["plate"]
+                    replaced += [other["path"] for other in self.jobs if same(other)]
+                    self.jobs = [other for other in self.jobs if not same(other)]
+                    self.chosen[job["key"]] = job["id"]            # the plate just sliced is the one the cards send
                     job["ready"] = True
                     # Plates sliced earlier for other printer types are finished work. Re-arranging
                     # the bed for the next type is normal and must not flag them as out of date, so
@@ -250,11 +259,26 @@ class FarmApp:
         self.post_state()
 
     def _job_for(self, printer):
-        """The ready sliced plate for this printer's type, or None."""
-        for job in self.jobs:
-            if job["ready"] and model_matches(job["meta"].get("printer_model"), printer.get("model")):
+        """The sliced plate the printer's card sends: the one chosen for its type (the newest slice
+        unless the user picked another plate), or None."""
+        ready = [job for job in self.jobs if job["ready"] and model_matches(job["meta"].get("printer_model"), printer.get("model"))]
+        for job in ready:
+            if self.chosen.get(job["key"]) == job["id"]:
                 return job
-        return None
+        return ready[0] if ready else None
+
+    def _chosen_plate(self, key):
+        """Of the plates held for one printer type, the one its cards send."""
+        ready = [job for job in self.jobs if job["ready"] and job.get("key") == key]
+        return next((job for job in ready if self.chosen.get(key) == job["id"]), ready[0] if ready else None)
+
+    def _cmd_choose_plate(self, message):
+        """Several plates are held for one printer type: send this one from the printer cards."""
+        with self.lock:
+            job = next((j for j in self.jobs if j["id"] == message.get("id") and j["ready"]), None)
+            if job is not None:
+                self.chosen[job["key"]] = job["id"]
+        self.post_state()
 
     def _job_base_name(self, job):
         if not job["name"]:
@@ -280,6 +304,8 @@ class FarmApp:
             bits.append("%.1f MB" % (meta["size"] / 1048576.0))
         return {
             "id": job["id"], "ready": job["ready"], "error": job["error"], "stale": job["stale"], "key": job.get("key", ""),
+            "plate": job.get("plate", 1),
+            "chosen": job is self._chosen_plate(job.get("key")),
             "display_name": self._job_base_name(job), "summary": " · ".join(bits),
             "printer_model": meta.get("printer_model", ""), "sliced_at": _clock(job["captured_at"]),
             "post_process": bool((meta.get("post_process") or "").strip()),
@@ -387,6 +413,28 @@ class FarmApp:
         if self.refresh_current():
             self.post_state()
         self.poll()
+
+    def report_text(self):
+        """Facts worth pasting into a trouble report. No printer names, addresses, codes or keys."""
+        lines = ["Farm Send %s" % globals().get("PLUGIN_VERSION", "dev"), "System: %s" % sys.platform,
+                 "OrcaSlicer version: (Help > About)", ""]
+        with self.lock:
+            printers = [dict(p) for p in self.store.printers]
+            status, sends = dict(self.status), dict(self.sends)
+            lines.append("Library plates: %d, open orders: %d" % (len(self._library_views()), len(self.orders.orders)))
+        lines.append("Printers: %d" % len(printers))
+        for number, printer in enumerate(printers, 1):
+            state = status.get(printer["id"]) or {}
+            lines.append("%d. %s (%s): %s" % (number, printer.get("model") or "unknown model", printer.get("kind", ""),
+                                              state.get("state_text") or state.get("state") or "not checked yet"))
+            for label, text in (("error", state.get("error")), ("notice", (state.get("notice") or {}).get("text")),
+                                ("last send", (sends.get(printer["id"]) or {}).get("text"))):
+                if text:
+                    lines.append("   %s: %s" % (label, text))
+        return "\n".join(lines)
+
+    def _cmd_report(self, message):
+        self.post({"command": "report", "text": self.report_text()})
 
     def _cmd_bed_cleared(self, message):
         """The user took the finished print off this printer's bed."""
@@ -627,6 +675,20 @@ class FarmApp:
             if how == "standard":
                 # Only Snapmaker firmware takes start options. Say so instead of implying they applied.
                 note = ". This printer does not accept start options, so bed leveling and time-lapse follow its own settings"
+            if snapshot.get("keep"):
+                self._set_send(printer_id, True, "Started. Telling the printer to print %d part%s only..." % (
+                    snapshot["keep"], "" if snapshot["keep"] == 1 else "s"), percent=100)
+                try:
+                    kept, total = client.keep_parts(snapshot["keep"], cancelled=cancel.is_set)
+                except FarmError as error:
+                    # Unconfirmed skips would print the whole plate, so stop it here.
+                    try:
+                        client.cancel_print()
+                        stopped = "The print was cancelled."
+                    except FarmError:
+                        stopped = "CANCEL IT ON THE PRINTER: it may print the whole plate."
+                    raise FarmError("Could not limit the plate to %d parts (%s). %s" % (snapshot["keep"], error, stopped))
+                note = ": printing %d of %d parts%s" % (kept, total, note)
             if snapshot.get("order"):
                 # Recorded only once the printer accepted the start, so a failed send never counts.
                 self.orders.add_plate(snapshot["order"]["id"], printer_id, name, snapshot["order"]["parts"], remote)
@@ -670,6 +732,12 @@ class FarmApp:
                     continue
                 path = os.path.join(self.library_dir, name[:-5] + ".gcode")
                 if isinstance(entry, dict) and entry.get("id") == name[:-5] and os.path.isfile(path):
+                    if "objects" not in entry:          # kept before part counts were recorded: count once
+                        try:
+                            entry["objects"] = count_objects(path)
+                            write_private(os.path.join(self.library_dir, name), json.dumps(entry, indent=1))
+                        except OSError:
+                            entry.pop("objects", None)
                     entries.append(dict(entry, path=path))
             entries.sort(key=lambda entry: (str(entry.get("folder", "")).lower(), str(entry.get("item", "")).lower(),
                                             entry.get("parts") or 0))
@@ -762,6 +830,8 @@ class FarmApp:
                 bits.append("%d layers" % entry["layers"])
             views.append({"id": entry["id"], "item": entry.get("item", ""), "parts": entry.get("parts") or 0,
                           "folder": entry.get("folder", ""),
+                          # A part count can be chosen when every part is labelled on its own.
+                          "countable": bool(entry.get("parts")) and entry.get("objects") == entry.get("parts") and entry["parts"] > 1,
                           "key": entry.get("key", ""), "printer_model": entry.get("printer_model", ""),
                           "summary": " \u00b7 ".join(bits), "filaments": list(entry.get("filaments") or []),
                           "presets": entry.get("presets", ""), "saved_at": entry.get("saved_at") or 0,
@@ -823,7 +893,8 @@ class FarmApp:
                      "filament_g": meta.get("filament_g"), "layers": meta.get("layers"),
                      "filaments": list(meta.get("filaments") or []), "nozzle_diameter": meta.get("nozzle_diameter"),
                      "presets": " \u00b7 ".join(x for x in (meta.get("process_preset"), meta.get("filament_preset")) if x),
-                     "saved_at": time.time(), "size": os.path.getsize(target), "md5": file_md5(target)}
+                     "saved_at": time.time(), "size": os.path.getsize(target), "md5": file_md5(target),
+                     "objects": count_objects(target)}
             # The description is written last: a plate only counts as kept once it is complete.
             write_private(os.path.join(self.library_dir, entry_id + ".json"), json.dumps(entry, indent=1))
             self._library_cache = None
@@ -850,10 +921,18 @@ class FarmApp:
         toolhead instead of the one it was sliced for (Snapmaker only)."""
         entry = next((e for e in self.library() if e["id"] == message.get("id")), None)
         self._library_start(entry, message.get("printer_ids") or [], bool(message.get("start")),
-                            dict(message.get("options") or {}), message.get("toolhead"))
+                            dict(message.get("options") or {}), message.get("toolhead"), keep=message.get("keep"))
 
-    def _library_start(self, entry, printer_ids, start, options, toolhead=None, order_id=None):
+    def _library_start(self, entry, printer_ids, start, options, toolhead=None, order_id=None, keep=None):
+        """keep: print only this many parts of the plate (Snapmaker / Klipper printers; the rest are
+        skipped on the printer). None or the full count prints the whole plate."""
         work = []
+        try:
+            keep = int(keep) if keep is not None else None
+        except (TypeError, ValueError):
+            keep = None
+        if entry is not None and keep is not None and keep >= (entry.get("parts") or 0):
+            keep = None
         with self.lock:
             name = None
             for printer_id in printer_ids:
@@ -870,6 +949,12 @@ class FarmApp:
                 elif start and self.beds.get(printer_id) and self.status.get(printer_id, {}).get("state") == "idle":
                     problem = "Not started: clear the bed, then click Bed cleared."
                 mine = dict(options)
+                fewer = keep if (keep and printer.get("kind") != KIND_CC2) else None
+                if not problem and fewer:
+                    if not start:
+                        problem = "Not sent: a part count needs Start print, because the printer skips the other parts as it starts."
+                    elif fewer < 1 or entry.get("objects") != entry.get("parts"):
+                        problem = "Not started: this plate cannot print a part count."
                 if not problem and start:
                     used = entry.get("filaments") or []
                     tools = (self.status.get(printer_id) or {}).get("tools") or []
@@ -882,6 +967,13 @@ class FarmApp:
                     else:
                         for filament in used:   # printing as sliced: every toolhead it uses must be usable
                             problem = problem or toolhead_problem(tools, filament.get("slot"), filament.get("type"))
+                        if not problem and not mine.get("any_color"):
+                            # As sliced means the sliced color. A swapped spool is caught here unless the
+                            # user confirmed the loaded color in the dialog.
+                            for filament in used:
+                                problem = problem or toolhead_color_problem(tools, filament.get("slot"), filament.get("color"))
+                            if problem:
+                                problem += ". Pick the toolhead with the right color, or confirm the loaded color"
                     if problem and not problem.startswith("Not started"):
                         problem = "Not started: %s." % problem
                 if problem:
@@ -895,8 +987,10 @@ class FarmApp:
                 self._cancel[printer_id] = threading.Event()
                 self._set_send(printer_id, True, "Preparing...", percent=0)
                 snapshot = {"path": entry["path"], "name": name}
+                if fewer:
+                    snapshot["keep"] = fewer
                 if order_id and start:
-                    snapshot["order"] = {"id": order_id, "parts": entry.get("parts") or 0}
+                    snapshot["order"] = {"id": order_id, "parts": fewer or entry.get("parts") or 0}
                 work.append((dict(printer), snapshot, mine))
         for printer, snapshot, mine in work:
             self._spawn(self._send_worker, printer, snapshot, start, mine)
@@ -985,7 +1079,7 @@ class FarmApp:
                 continue
             free.discard(pick["printer_id"])
             self._library_start(entry, [pick["printer_id"]], True, dict(message.get("options") or {}),
-                                order.get("toolhead"), order_id=order["id"])
+                                order.get("toolhead"), order_id=order["id"], keep=pick.get("parts"))
 
     # ---- stored files and cleanup ------------------------------------------------------------------
     def check_storage(self, force=False, only=None):

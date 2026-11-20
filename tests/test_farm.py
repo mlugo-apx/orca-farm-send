@@ -612,16 +612,31 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(self.app.library(), [])
         self.assertFalse(os.path.exists(entry["path"]))
 
-    def test_plan_picks_plates_per_printer_and_allows_a_few_extras(self):
+    def test_plan_whole_plates_when_no_printer_can_skip_parts(self):
         big, small = {"id": "b", "parts": 24, "printer_model": "Snapmaker U1"}, {"id": "s", "parts": 6, "printer_model": "Snapmaker U1"}
         cc = {"id": "c", "parts": 12, "printer_model": "Centauri Carbon 2"}
-        u1 = lambda n: {"id": "u%d" % n, "model": "Snapmaker U1"}
-        plan = core.plan_order(30, [u1(1), u1(2), u1(3)], [big, small, cc])
-        self.assertEqual([(x["printer_id"], x["entry_id"]) for x in plan], [("u1", "b"), ("u2", "s")])
+        u1 = lambda n: {"id": "u%d" % n, "model": "Snapmaker U1", "kind": core.KIND_MOONRAKER}
+        plan = core.plan_order(30, [u1(1), u1(2), u1(3)], [big, small, cc])          # unlabelled plates: whole ones
+        self.assertEqual([(x["printer_id"], x["entry_id"], x["parts"]) for x in plan], [("u1", "b", 24), ("u2", "s", 6)])
         self.assertEqual([x["entry_id"] for x in core.plan_order(4, [u1(1)], [big, small])], ["s"])       # smallest overshoot
-        self.assertEqual([x["entry_id"] for x in core.plan_order(40, [{"id": "c1", "model": "Centauri Carbon 2"}, u1(1)], [big, cc])], ["c", "b"])
         self.assertEqual(core.plan_order(10, [{"id": "k", "model": "Kobra"}], [big]), [])
         self.assertEqual(core.plan_order(0, [u1(1)], [big]), [])
+
+    def test_plan_spreads_an_order_evenly_over_printers_that_can_skip_parts(self):
+        plate = {"id": "p", "parts": 28, "objects": 28, "printer_model": "Snapmaker U1"}
+        cc28 = {"id": "c28", "parts": 28, "printer_model": "Centauri Carbon 2"}
+        cc2 = {"id": "c2", "parts": 2, "printer_model": "Centauri Carbon 2"}
+        u1 = lambda n: {"id": "u%d" % n, "model": "Snapmaker U1", "kind": core.KIND_MOONRAKER}
+        cc = lambda n: {"id": "c%d" % n, "model": "Centauri Carbon 2", "kind": core.KIND_CC2}
+        counts = lambda plan: [(x["printer_id"], x["parts"]) for x in plan]
+        self.assertEqual(counts(core.plan_order(10, [u1(1), u1(2), u1(3)], [plate])), [("u1", 4), ("u2", 3), ("u3", 3)])
+        # A CC2 with only the full plate would print 28 for a share of 2: left out, the U1s take it all.
+        self.assertEqual(counts(core.plan_order(10, [cc(1), cc(2), u1(1), u1(2), u1(3)], [plate, cc28])), [("u1", 4), ("u2", 3), ("u3", 3)])
+        # With a small CC2 plate kept, it is two per printer.
+        self.assertEqual(counts(core.plan_order(10, [cc(1), cc(2), u1(1), u1(2), u1(3)], [plate, cc28, cc2])),
+                         [("c1", 2), ("c2", 2), ("u1", 2), ("u2", 2), ("u3", 2)])
+        self.assertEqual(counts(core.plan_order(100, [u1(1), u1(2)], [plate])), [("u1", 28), ("u2", 28)])   # capped by the plate
+        self.assertEqual(counts(core.plan_order(1, [u1(1), u1(2)], [plate])), [("u1", 1)])
 
     def test_order_is_worked_off_and_remembered(self):
         self._slice_and_save()                                        # Rail clip x24 for the U1
@@ -657,6 +672,15 @@ class LibraryTests(unittest.TestCase):
         self.assertTrue(wait_for(lambda: self.app.sends.get(self.p_u1["id"], {}).get("ok") is False))
         self.assertEqual(self.app.snapshot()["orders"][0]["printing"], 0)
         self.assertEqual(self.u1.started, [])
+
+    def test_report_details_leave_out_names_addresses_and_codes(self):
+        self.app.handle({"command": "report"})
+        text = [post for post in self.posts if post.get("command") == "report"][-1]["text"]
+        self.assertIn("Farm Send", text)
+        self.assertIn("Snapmaker U1", text)
+        self.assertIn("Centauri Carbon 2", text)
+        for secret in ("abc123", self.u1.address, self.cc2.address, "U1 #1", "CC1"):
+            self.assertNotIn(secret, text)
 
     def test_order_input_is_checked_and_toolhead_names_are_kept(self):
         for bad in ({"item": "", "quantity": 5}, {"item": "X", "quantity": 0}, {"item": "X", "quantity": "lots"}):
@@ -735,6 +759,113 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(FarmApp(self.folder.name, lambda message: None).snapshot()["folders"], ["Left"])
         self.assertEqual(FarmApp.folder_path("a/b/c/d/e/f"), "a / b / c / d")                    # depth is capped
         self.assertTrue(os.path.isfile(self.app.library()[0]["path"]))
+
+    def _save_labelled(self, parts=4):
+        """A U1 plate whose parts are labelled one by one, kept in the library."""
+        labels = "".join("EXCLUDE_OBJECT_DEFINE NAME=clip_%d CENTER=1,1 POLYGON=[[0,0]]\n" % n for n in range(parts))
+        path = write(self.tmp.name, ".1.0.gcode", labels + U1_GCODE)
+        self.app.on_slice_started(); self.app.on_gcode_exported(path, "")
+        job = self.app.jobs[0]
+        self.assertTrue(wait_for(lambda: job["ready"]))
+        self.app.handle({"command": "library_save", "job_id": job["id"], "item": "Clip", "parts": parts})
+        self.u1.objects = ["clip_%d" % n for n in range(parts)]
+        old = (core.KEEP_PARTS_POLL, core.KEEP_PARTS_WAIT)
+        core.KEEP_PARTS_POLL, core.KEEP_PARTS_WAIT = 0.01, 3
+        self.addCleanup(lambda: setattr(core, "KEEP_PARTS_POLL", old[0]) or setattr(core, "KEEP_PARTS_WAIT", old[1]))
+        self._status(self.p_u1)
+        return self.app.snapshot()["library"][0]
+
+    def test_print_only_some_parts_of_a_plate(self):
+        view = self._save_labelled(4)
+        self.assertTrue(view["countable"])
+        (sent,) = self._send(view["id"], [self.p_u1], keep=1)
+        self.assertTrue(sent["ok"], sent)
+        self.assertIn("printing 1 of 4 parts", sent["text"])
+        self.assertEqual(self.u1.excluded, ["clip_1", "clip_2", "clip_3"])     # the first part is kept
+        self.assertEqual(self.u1.cancels, 0)
+
+    def test_the_whole_plate_needs_no_skips(self):
+        view = self._save_labelled(4)
+        (sent,) = self._send(view["id"], [self.p_u1], keep=4)
+        self.assertTrue(sent["ok"], sent)
+        self.assertEqual(self.u1.excluded, [])
+        self.assertNotIn("parts", sent["text"])
+
+    def test_unconfirmed_skips_cancel_the_print(self):
+        view = self._save_labelled(4)
+        self.u1.ignore_skips = True                                            # the printer never confirms
+        (sent,) = self._send(view["id"], [self.p_u1], keep=2)
+        self.assertFalse(sent["ok"])
+        self.assertIn("The print was cancelled", sent["text"])
+        self.assertEqual(self.u1.cancels, 1)
+
+    def test_a_part_count_is_refused_where_it_cannot_work(self):
+        self._slice_and_save()                                                 # no labelled parts in this G-code
+        view = self.app.snapshot()["library"][0]
+        self.assertFalse(view["countable"])
+        self._status(self.p_u1)
+        (sent,) = self._send(view["id"], [self.p_u1], keep=2)
+        self.assertIn("cannot print a part count", sent["text"])
+        labelled = self._save_labelled(4)
+        (upload,) = self._send(labelled["id"], [self.p_u1], start=False, keep=2)
+        self.assertIn("needs Start print", upload["text"])
+        self.assertEqual(self.u1.started, [])
+
+    def test_an_order_prints_only_what_it_needs(self):
+        view = self._save_labelled(4)
+        self.app.handle({"command": "order_save", "item": "Clip", "quantity": 3})
+        order = self.app.snapshot()["orders"][0]
+        self.app.handle({"command": "order_plan", "id": order["id"]})
+        plan = [post for post in self.posts if post.get("command") == "order_plan"][-1]["plan"]
+        self.assertEqual([(x["parts"], x["plate"]) for x in plan], [(3, 4)])
+        self.app.handle({"command": "order_send", "id": order["id"], "picks": plan, "options": {}})
+        self.assertTrue(wait_for(lambda: self.app.snapshot()["orders"][0]["printing"] == 3))
+        self.assertEqual(self.u1.excluded, ["clip_3"])
+        self.assertEqual(self.app.snapshot()["order_plates"][self.p_u1["id"]]["parts"], 3)
+        self.assertEqual(self.app.snapshot()["orders"][0]["remaining"], 0)
+
+    def test_every_plate_of_a_project_is_held(self):
+        def export(plate, text):
+            path = os.path.join(self.tmp.name, ".4242.%d.gcode" % plate)
+            with open(path, "w") as handle:
+                handle.write(text)
+            self.app.on_slice_started(); self.app.on_gcode_exported(path, "")
+            job = self.app.jobs[0]
+            self.assertTrue(wait_for(lambda: job["ready"] or job["error"]), job)
+            return job
+        first = export(0, U1_GCODE)
+        second = export(1, U1_GCODE + "; second plate\n")                    # "Slice all": one export per plate
+        jobs = {view["plate"]: view for view in self.app.snapshot()["jobs"]}
+        self.assertEqual(sorted(jobs), [1, 2])
+        self.assertTrue(jobs[2]["chosen"] and not jobs[1]["chosen"])          # the cards send the newest slice
+        self.assertEqual(self.app.snapshot()["job_for"][self.p_u1["id"]], second["id"])
+        self.app.handle({"command": "choose_plate", "id": first["id"]})
+        self.assertEqual(self.app.snapshot()["job_for"][self.p_u1["id"]], first["id"])
+        self.app.handle({"command": "library_save", "job_id": first["id"], "item": "Left", "parts": 2})
+        self.app.handle({"command": "library_save", "job_id": second["id"], "item": "Right", "parts": 2})
+        self.assertEqual(sorted(view["item"] for view in self.app.snapshot()["library"]), ["Left", "Right"])
+        again = export(0, U1_GCODE + "; resliced\n")                          # re-slicing plate 1 replaces plate 1 only
+        self.assertEqual(sorted(view["plate"] for view in self.app.snapshot()["jobs"]), [1, 2])
+        self.assertFalse(os.path.exists(first["path"]))
+        self.assertTrue(os.path.exists(second["path"]) and os.path.exists(again["path"]))
+
+    def test_a_swapped_color_is_caught_unless_confirmed(self):
+        self._slice_and_save()                                               # sliced for toolhead 2, white
+        entry_id = self.app.library()[0]["id"]
+        self.u1.tools["filament_color_rgba"][1] = "FFD400FF"                 # someone loaded yellow there
+        self._status(self.p_u1)
+        (sent,) = self._send(entry_id, [self.p_u1])
+        self.assertIn("toolhead 2 holds a different color", sent["text"])
+        self.assertEqual(self.u1.started, [])
+        (sent,) = self._send(entry_id, [self.p_u1], options={"any_color": True})
+        self.assertTrue(sent["ok"], sent)
+        self.assertEqual(core.color_gap("#000000", "#101010"), 48)           # near-black still counts as black
+        self.assertEqual(core.color_gap("#FFFFFF", None), 0)
+
+    def test_a_print_cancelled_while_heating_leaves_the_bed_clear(self):
+        self.assertIsNone(core.bed_needs_clearing(False, {"state": "printing", "extruded_mm": 0.0}))
+        self.assertTrue(core.bed_needs_clearing(False, {"state": "printing", "extruded_mm": 12.5}))
+        self.assertTrue(core.bed_needs_clearing(False, {"state": "printing"}))               # not reported: assume a part
 
     def test_toolhead_map_table(self):
         self.assertEqual(core.toolhead_map_table(None), [[0, 0], [1, 1], [2, 2], [3, 3]])

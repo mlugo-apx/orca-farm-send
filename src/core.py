@@ -23,6 +23,8 @@ except ImportError:   # everything else
     msvcrt = None
 
 CHUNK = 1024 * 1024
+KEEP_PARTS_WAIT = 900.0   # seconds a start may take (leveling, heat-up) before the skip commands get through
+KEEP_PARTS_POLL = 1.0
 CC2_UPLOAD_TRIES = 5      # per piece, when the printer says busy (HTTP 429) or drops the connection
 CC2_UPLOAD_PAUSE = 3.0    # seconds before the first retry; grows with each one. The printer needed about 6 s.
 KIND_CC2 = "elegoo_cc2"
@@ -1266,8 +1268,59 @@ class Moonraker:
             raise FarmError("Printer refused to start the print: %s" % (result.get("message") or result.get("state")))
         return "snapmaker"
 
+    def cancel_print(self):
+        self._post("/printer/print/cancel", timeout=30)
+
+    def keep_parts(self, keep, cancelled=None, wait=None):
+        """Right after a start: print only the first `keep` labelled parts of the plate and skip the rest.
+
+        The printer lists the plate's parts a moment after the file starts. The skip commands then
+        wait in the printer's queue until its first heat-up pause ends, and take effect before
+        anything is extruded (seen on a U1: 26 of 28 skipped, 0 mm used). Returns (kept, total).
+        Raises FarmError when the skips cannot be confirmed; the caller must then stop the print."""
+        wait = KEEP_PARTS_WAIT if wait is None else wait
+        deadline = time.monotonic() + wait
+        query = "/printer/objects/query?exclude_object&print_stats=state"
+        names = []
+        while not names:
+            if cancelled is not None and cancelled():
+                raise FarmError("cancelled")
+            status = (self._get(query).get("result") or {}).get("status") or {}
+            names = [str(o.get("name")) for o in (status.get("exclude_object") or {}).get("objects") or [] if o.get("name")]
+            if names:
+                break
+            if (status.get("print_stats") or {}).get("state") not in ("printing", "paused") and time.monotonic() > deadline - wait + 20:
+                raise FarmError("the printer is not printing")
+            if time.monotonic() > deadline:
+                raise FarmError("the printer did not list the parts on this plate")
+            time.sleep(KEEP_PARTS_POLL)
+        total = len(names)
+        if not 1 <= keep <= total:
+            raise FarmError("the plate has %d parts" % total)
+        skip = names[keep:]
+        for start in range(0, len(skip), 20):          # a few at a time keeps each request short
+            script = "\n".join("EXCLUDE_OBJECT NAME=%s" % name for name in skip[start:start + 20])
+            self._post("/printer/gcode/script?script=%s" % urllib.parse.quote(script), timeout=max(30, deadline - time.monotonic()))
+        for _ in range(20):                            # the printer's own list is the proof
+            status = (self._get(query).get("result") or {}).get("status") or {}
+            if len((status.get("exclude_object") or {}).get("excluded_objects") or []) == len(skip):
+                return keep, total
+            time.sleep(KEEP_PARTS_POLL)
+        raise FarmError("the printer did not confirm the skipped parts")
+
 
 _MOONRAKER_ESTIMATES = {}
+
+
+def count_objects(path):
+    """How many separately labelled parts the G-code defines (Klipper EXCLUDE_OBJECT_DEFINE lines).
+    0 when the slicer did not label objects, as on a Centauri Carbon 2."""
+    found = 0
+    with open(path, "rb") as handle:
+        for line in handle:
+            if line.startswith(b"EXCLUDE_OBJECT_DEFINE"):
+                found += 1
+    return found
 
 
 def moonraker_remaining(progress, elapsed, estimated_time=None):
@@ -1301,6 +1354,8 @@ def normalize_moonraker_status(status, klippy_info=None, estimated_time=None):
     out = {"state": state, "state_text": text, "filename": stats.get("filename") or "", "progress": None,
            "remaining_s": None, "nozzle": None, "bed": _temp(status.get("heater_bed")), "errors": [],
            "last_result": result}
+    if isinstance(stats.get("filament_used"), (int, float)):
+        out["extruded_mm"] = float(stats["filament_used"])      # 0 while a print is still heating
     # Report the hottest tool: on a tool changer the parked tools sit near ambient.
     tools = [_temp(status.get(name)) for name in ("extruder", "extruder1", "extruder2", "extruder3")]
     tools = [tool for tool in tools if tool]
@@ -1387,6 +1442,27 @@ def toolhead_map_table(mapping, count=4):
         if 1 <= slot <= count and 1 <= tool <= count:
             table[slot - 1] = [slot - 1, tool - 1]
     return table
+
+
+COLOR_GAP = 90     # summed RGB difference above which two colors count as different (black vs dark gray passes)
+
+
+def color_gap(a, b):
+    """How far apart two #RRGGBB colors are, 0 when either is missing or unreadable."""
+    values = []
+    for color in (a, b):
+        if not isinstance(color, str) or not re.match(r"^#[0-9a-fA-F]{6}", color):
+            return 0
+        values.append([int(color[i:i + 2], 16) for i in (1, 3, 5)])
+    return sum(abs(x - y) for x, y in zip(*values))
+
+
+def toolhead_color_problem(tools, tool, color):
+    """Why this toolhead would print the wrong color, judged from what the printer reports, or ""."""
+    match = [entry for entry in tools or [] if entry.get("slot") == tool]
+    if match and match[0].get("loaded") and color_gap(match[0].get("color"), color) > COLOR_GAP:
+        return "toolhead %s holds a different color than the plate was sliced with" % tool
+    return ""
 
 
 def toolhead_problem(tools, tool, material):
@@ -1582,24 +1658,63 @@ def file_stamp(path):
 
 
 def plan_order(remaining, printers, entries):
-    """Which kept plate to start on which free printer to work off `remaining` parts.
+    """What to start on which free printer to work off `remaining` parts, spread evenly.
 
     printers: free printers in the order to fill them. entries: the kept plates of the item.
-    Per printer, among the plates sliced for it: the largest that does not overshoot, or, when all
-    overshoot, the smallest (a few extras are fine). Stops once the remainder is covered."""
-    plan = []
-    for printer in printers:
-        if remaining <= 0:
-            break
-        fits = [e for e in entries if model_matches(e.get("printer_model"), printer.get("model"))
+    A printer that can skip parts (not a Centauri Carbon 2, plate labelled part by part) prints
+    exactly its share, so ten parts over five such printers is two each. A printer that can only
+    print whole plates gets the kept plate nearest its share, and is left out when that plate would
+    be more than double the share. With no part-skipping printer at all, whole plates are handed
+    out one printer after another until the order is covered (a few extras possible).
+    Each pick: printer_id, entry_id, parts (to print there), plate (parts on that kept plate)."""
+    def fitting(printer):
+        return [e for e in entries if model_matches(e.get("printer_model"), printer.get("model"))
                 and not nozzle_mismatch(e.get("nozzle_diameter"), printer.get("nozzle")) and (e.get("parts") or 0) > 0]
-        if not fits:
+
+    def countable(printer):
+        if printer.get("kind") == KIND_CC2:
+            return []
+        return [e for e in fitting(printer) if e.get("objects") == e.get("parts") and e["parts"] > 1]
+
+    usable = [p for p in printers if fitting(p)]
+    flexible = [p for p in usable if countable(p)]
+    plan = []
+    if remaining <= 0 or not usable:
+        return plan
+    if not flexible:
+        for printer in usable:
+            if remaining <= 0:
+                break
+            fits = fitting(printer)
+            under = [e for e in fits if e["parts"] <= remaining]
+            pick = max(under, key=lambda e: e["parts"]) if under else min(fits, key=lambda e: e["parts"])
+            plan.append({"printer_id": printer["id"], "entry_id": pick["id"], "parts": pick["parts"], "plate": pick["parts"]})
+            remaining -= pick["parts"]
+        return plan
+    share = -(-remaining // len(usable))
+    for printer in usable:
+        if printer in flexible or remaining <= 0:
             continue
-        under = [e for e in fits if e["parts"] <= remaining]
-        pick = max(under, key=lambda e: e["parts"]) if under else min(fits, key=lambda e: e["parts"])
-        plan.append({"printer_id": printer["id"], "entry_id": pick["id"], "parts": pick["parts"]})
-        remaining -= pick["parts"]
-    return plan
+        fits = fitting(printer)
+        over = [e for e in fits if share <= e["parts"] <= 2 * share]
+        under = [e for e in fits if e["parts"] < share]
+        pick = min(over, key=lambda e: e["parts"]) if over else (max(under, key=lambda e: e["parts"]) if under else None)
+        if pick is not None:
+            plan.append({"printer_id": printer["id"], "entry_id": pick["id"], "parts": pick["parts"], "plate": pick["parts"]})
+            remaining -= pick["parts"]
+    while remaining > 0 and flexible:
+        base, extra = divmod(remaining, len(flexible))
+        for index, printer in enumerate(list(flexible)):
+            want = base + (1 if index < extra else 0)
+            plates = countable(printer)
+            pick = min([e for e in plates if e["parts"] >= want] or [max(plates, key=lambda e: e["parts"])], key=lambda e: e["parts"])
+            count = min(want, pick["parts"])
+            if count > 0:
+                plan.append({"printer_id": printer["id"], "entry_id": pick["id"], "parts": count, "plate": pick["parts"]})
+                remaining -= count
+        break       # one plate per printer: whatever is still left waits for the next round
+    order = {p["id"]: n for n, p in enumerate(printers)}
+    return sorted(plan, key=lambda pick: order[pick["printer_id"]])
 
 
 class OrderBook:
@@ -1754,7 +1869,9 @@ def bed_needs_clearing(known, status):
     assumed to still hold it; after the user says the bed is clear, only a new print sets it again."""
     state = status.get("state")
     if state in ("printing", "paused"):
-        return True
+        # A print that has not extruded anything yet (heating, leveling) has put nothing on the
+        # bed, so cancelling it there leaves the bed as it was. Unknown counts as something.
+        return None if status.get("extruded_mm") == 0 else True
     if state == "idle" and known is None:
         return bool(status.get("last_result"))
     return None

@@ -59,6 +59,8 @@
 <div class="box" id="storage" style="display:none;margin-top:14px"></div>
 <p id="empty" class="muted" style="display:none">No printers yet. Use Import to pull them from your printer presets, or Add.</p>
 
+<p class="small muted" style="margin-top:14px;text-align:right"><button type="button" class="linkish" id="btn-report" title="Collect the details a bug report needs">Report a problem</button></p>
+
 <div id="overlay"><div id="dialog"></div></div>
 
 <script>
@@ -284,8 +286,20 @@
 
   // ---- rendering ---------------------------------------------------------------------------
   // Plates: one row per printer type, with the plate held for it or a way to slice one.
-  function plateFor(type) {
-    return state.jobs.filter(function (j) { return j.ready && j.key === type.key; })[0] || null;
+  function platesFor(type) {
+    return state.jobs.filter(function (j) { return j.ready && j.key === type.key; })
+                     .sort(function (a, b) { return a.plate - b.plate; });
+  }
+  // Several plates of one project held for a type: each is shown, and one of them is what the cards send.
+  function platesHtml(jobs) {
+    if (jobs.length === 1) return plateHtml(jobs[0]);
+    return jobs.map(function (job) {
+      return "<div style='margin-top:6px;padding-left:8px;border-left:2px solid " + (job.chosen ? "var(--orca-accent, #009688)" : "var(--orca-border)") + "'>" +
+        "<div class='row spread small' style='gap:8px'><b>Plate " + esc(job.plate) + "</b>" +
+        (job.chosen ? "<span class='ok'>the cards send this one</span>"
+                    : "<button type='button' class='linkish' data-choose-plate='" + esc(job.id) + "'>send this one</button>") + "</div>" +
+        plateHtml(job) + "</div>";
+    }).join("");
   }
   function plateHtml(job) {
     return "<div class='job-name'>" + esc(job.display_name) + "</div>" +
@@ -300,9 +314,8 @@
 
   // ---- library: plates kept for reprinting ---------------------------------------------------
   var plateView = "now", libQuery = "", libNote = null, libLastFolder = "";
-  // Orders are switched off for now: whole-plate planning did not match how orders are split
-  // (a few parts per printer). The code stays; set this to true to show the tab again.
-  var ORDERS_ENABLED = false;
+  // Set to false to hide the Orders tab; nothing else depends on it.
+  var ORDERS_ENABLED = true;
   function libraryListHtml() {
     var words = libQuery.toLowerCase().split(/\s+/).filter(Boolean);
     var entries = state.library.filter(function (e) {
@@ -411,7 +424,7 @@
       (state.library.length ? "" : " disabled") + ">New order</button>" +
       "<button type='button' class='linkish' data-tool-names='1' title='Name what each toolhead position holds, e.g. Black'>toolhead names</button></div>";
     if (!state.library.length) return html + "<div class='muted small' style='margin-top:6px'>Orders print plates from the library. Save a plate there first.</div>";
-    if (!state.orders.length) return html + "<div class='muted small' style='margin-top:6px'>No open orders. An order is a quantity of one library item; the panel proposes plates for the free printers and keeps count.</div>";
+    if (!state.orders.length) return html + "<div class='muted small' style='margin-top:6px'>No open orders. An order is a quantity of one library item. The panel splits it evenly over the free printers and keeps count.</div>";
     return html + state.orders.map(function (o) {
       var done = o.remaining === 0 && o.printing === 0;
       var bits = [o.good + " good"];
@@ -475,8 +488,11 @@
     showDialog("<h4>" + esc(o.item) + ": " + esc(message.remaining) + " to start</h4>" +
       message.plan.map(function (x, i) {
         var e = entry(x.entry_id), p = state.printers.filter(function (q) { return q.id === x.printer_id; })[0] || {};
+        var can = e.countable && kind(x.printer_id) === "moonraker";       // this printer can print any number of the plate's parts
         return "<div class='check' style='align-items:flex-start;margin-top:7px'><input type='checkbox' checked data-pick='" + i + "' id='pk-" + i + "' style='margin-top:2px'>" +
-          "<label for='pk-" + i + "' style='min-width:0'>" + esc(name(x.printer_id)) + " <span class='muted small'>x" + esc(x.parts) + " \u00b7 " + esc(e.summary || "") + "</span>" + toolsHtml(p) + "</label></div>";
+          "<label for='pk-" + i + "' style='min-width:0;flex:1'>" + esc(name(x.printer_id)) + " <span class='muted small'>" +
+            (can ? "of a x" + esc(x.plate) + " plate" : "x" + esc(x.parts) + " \u00b7 whole plate") + "</span>" + toolsHtml(p) + "</label>" +
+          (can ? "<input type='number' data-count='" + i + "' min='1' max='" + esc(x.plate) + "' value='" + esc(x.parts) + "' style='width:58px;flex:none' title='Parts to print on this printer'>" : "") + "</div>";
       }).join("") +
       (anyU1 && o.toolhead ? "<p class='small' style='margin:10px 0 0'>Snapmaker printers print from toolhead " + esc(toolLabel(o.toolhead)) + ".</p>" : "") +
       (anyOther ? "<p class='small warn' style='margin:6px 0 0'>Other printers print from whatever is loaded. Check the color yourself.</p>" : "") +
@@ -484,19 +500,27 @@
       (anyU1 ? "<div class='check'><input type='checkbox' id='opt-flow'><label for='opt-flow'>Flow calibration (Snapmaker)</label></div>" : "") +
       "<div class='check'><input type='checkbox' id='opt-lapse'><label for='opt-lapse'>Time-lapse</label></div>" +
       "<p class='small' id='l-total' style='margin:10px 0 0'></p>" +
-      "<p class='small muted' style='margin:4px 0 0'>Each print starts immediately. Make sure each bed is clear.</p>" +
+      "<p class='small muted' style='margin:4px 0 0'>Each print starts immediately. Make sure each bed is clear. Where a count is below the plate, the printer skips the other parts as it starts.</p>" +
       "<div class='dialog-actions'><button type='button' class='quiet' id='dlg-cancel'>Cancel</button><button type='button' class='danger' id='dlg-ok'>Start prints</button></div>");
     function picks() {
+      var counts = {};
+      Array.prototype.forEach.call($("dialog").querySelectorAll("input[data-count]"), function (c) { counts[c.dataset.count] = parseInt(c.value, 10); });
       return Array.prototype.filter.call($("dialog").querySelectorAll("input[data-pick]"), function (b) { return b.checked; })
-        .map(function (b) { return message.plan[parseInt(b.dataset.pick, 10)]; });
+        .map(function (b) {
+          var x = message.plan[parseInt(b.dataset.pick, 10)], typed = counts[b.dataset.pick];
+          var parts = typed === undefined ? x.parts : (typed >= 1 && typed <= x.plate ? typed : 0);
+          return { printer_id: x.printer_id, entry_id: x.entry_id, parts: parts, plate: x.plate };
+        });
     }
     function total() {
       var chosen = picks(), parts = chosen.reduce(function (sum, x) { return sum + x.parts; }, 0), left = message.remaining - parts;
-      $("l-total").textContent = chosen.length ? parts + " parts on " + chosen.length + " printer" + (chosen.length === 1 ? "" : "s") + ". " +
-        (left > 0 ? left + " still to start after this." : left < 0 ? (-left) + " extra." : "That covers the order.") : "Tick at least one printer.";
-      $("dlg-ok").disabled = !chosen.length;
+      var bad = chosen.some(function (x) { return !x.parts; });
+      $("l-total").textContent = !chosen.length ? "Tick at least one printer." : bad ? "Each count must be between 1 and the parts on its plate." :
+        parts + " parts on " + chosen.length + " printer" + (chosen.length === 1 ? "" : "s") + ". " +
+        (left > 0 ? left + " still to start after this." : left < 0 ? (-left) + " extra." : "That covers the order.");
+      $("dlg-ok").disabled = !chosen.length || bad;
     }
-    $("dialog").onchange = total; total();
+    $("dialog").onchange = total; $("dialog").oninput = total; total();
     $("dlg-cancel").onclick = hideDialog;
     $("dlg-ok").onclick = function () {
       send("order_send", { id: o.id, picks: picks(), options: { bed_leveling: $("opt-level").checked,
@@ -566,11 +590,14 @@
         [1, 2, 3, 4].filter(function (n) { return n !== sliced; }).map(function (n) { return "<option value='" + n + "'>" + esc(toolLabel(n)) + "</option>"; }).join("") +
         "</select></label><p class='small muted' style='margin:4px 0 0'>The color is whatever that toolhead holds; each printer's toolheads are listed above. Material and temperatures stay as sliced.</p>";
     }
+    var count = (e.countable && anyU1) ? "<label class='field'>Parts to print per printer<input id='l-keep' type='number' min='1' max='" + esc(e.parts) + "' value='" + esc(e.parts) + "'></label>" +
+      "<p class='small muted' style='margin:4px 0 0'>Fewer than " + esc(e.parts) + ": the printer skips the other parts as it starts. The time and grams shown are for the full plate.</p>" : "";
     showDialog("<h4>Send " + esc(e.item) + " x" + esc(e.parts) + "</h4>" +
-      "<div class='muted small'>" + esc(e.summary) + " \u00b7 for " + esc(e.printer_model) + "</div>" + filamentLines(e) + rows + pick +
+      "<div class='muted small'>" + esc(e.summary) + " \u00b7 for " + esc(e.printer_model) + "</div>" + filamentLines(e) + rows + count + pick +
       "<div class='check' style='margin-top:10px'><input type='checkbox' id='opt-level' checked><label for='opt-level'>Bed leveling before print</label></div>" +
       (anyU1 ? "<div class='check'><input type='checkbox' id='opt-flow'><label for='opt-flow'>Flow calibration (Snapmaker)</label></div>" : "") +
       "<div class='check'><input type='checkbox' id='opt-lapse'><label for='opt-lapse'>Time-lapse</label></div>" +
+      "<div id='l-color'></div>" +
       "<p class='small' id='l-total' style='margin:10px 0 0'></p>" +
       "<p class='small muted' style='margin:4px 0 0'>Each print starts immediately. Make sure each bed is clear.</p>" +
       "<div class='dialog-actions'><button type='button' class='quiet' id='dlg-cancel'>Cancel</button>" +
@@ -578,17 +605,48 @@
     function picked() {
       return Array.prototype.filter.call($("dialog").querySelectorAll("input[data-lp]"), function (b) { return b.checked; }).map(function (b) { return b.dataset.lp; });
     }
+    // The color each ticked Snapmaker would print in, and whether that is a surprise: a toolhead whose
+    // color differs from the sliced one (printing as sliced), or printers that disagree with each other.
+    var colorSeen = "";
+    function colorCheck() {
+      if (!single) return true;
+      var tool = $("l-tool") && $("l-tool").value ? parseInt($("l-tool").value, 10) : sliced, wanted = e.filaments[0].color, lines = [], first = null;
+      picked().forEach(function (pid) {
+        var p = printers.filter(function (q) { return q.id === pid; })[0];
+        if (!p || p.kind !== "moonraker") return;
+        var held = ((state.status[pid] || {}).tools || []).filter(function (t) { return t.slot === tool; })[0];
+        if (!held || !held.loaded) return;
+        if (first === null) first = held.color;
+        var off = (tool === sliced && colorGap(held.color, wanted) > 90) || colorGap(held.color, first) > 90;
+        if (off) lines.push(esc(p.name) + ": toolhead " + tool + " holds " + swatch(held.color) +
+          (tool === sliced ? ", the plate was sliced as " + swatch(wanted) : ", the first printer holds " + swatch(first)));
+      });
+      var key = lines.join("|");
+      if (key !== colorSeen) {          // redraw only when the finding changes, so the tick is not lost while typing
+        colorSeen = key;
+        $("l-color").innerHTML = lines.length ? "<div class='small warn' style='margin-top:10px'>" + lines.join("<br>") + "</div>" +
+          "<div class='check'><input type='checkbox' id='l-anycolor'><label for='l-anycolor'>Print in the loaded color" + (lines.length > 1 ? "s" : "") + " anyway</label></div>" : "";
+      }
+      return !lines.length || ($("l-anycolor") && $("l-anycolor").checked);
+    }
+    function keepCount() {
+      var k = $("l-keep") ? parseInt($("l-keep").value, 10) : e.parts;
+      return (k >= 1 && k <= e.parts) ? k : 0;
+    }
     function total() {
-      var n = picked().length;
-      $("l-total").textContent = n ? n + " printer" + (n === 1 ? "" : "s") + " \u00d7 " + e.parts + " = " + (n * e.parts) + " parts" : "Tick at least one printer.";
-      $("dlg-ok").disabled = $("dlg-upload").disabled = !n;
+      var n = picked().length, k = keepCount();
+      $("l-total").textContent = !n ? "Tick at least one printer." : !k ? "Enter 1 to " + e.parts + " parts." :
+        n + " printer" + (n === 1 ? "" : "s") + " \u00d7 " + k + " = " + (n * k) + " parts";
+      $("dlg-ok").disabled = !n || !k || !colorCheck();
+      $("dlg-upload").disabled = !n || k !== e.parts;      // a part count is applied at the start, so it cannot be upload-only
     }
     function go(start) {
-      send("library_send", { id: id, printer_ids: picked(), start: start, toolhead: $("l-tool") && $("l-tool").value ? parseInt($("l-tool").value, 10) : null,
-        options: { bed_leveling: $("opt-level").checked, flow_calibrate: $("opt-flow") ? $("opt-flow").checked : false, timelapse: $("opt-lapse").checked } });
+      send("library_send", { id: id, printer_ids: picked(), start: start, keep: keepCount() < e.parts ? keepCount() : null, toolhead: $("l-tool") && $("l-tool").value ? parseInt($("l-tool").value, 10) : null,
+        options: { bed_leveling: $("opt-level").checked, flow_calibrate: $("opt-flow") ? $("opt-flow").checked : false, timelapse: $("opt-lapse").checked,
+                   any_color: !!($("l-anycolor") && $("l-anycolor").checked) } });
       hideDialog();
     }
-    $("dialog").onchange = total; total();
+    $("dialog").onchange = total; $("dialog").oninput = total; total();
     $("dlg-cancel").onclick = hideDialog;
     $("dlg-upload").onclick = function () { go(false); };
     $("dlg-ok").onclick = function () { go(true); };
@@ -622,7 +680,7 @@
               "Every slice is kept here until you send it.</div>";
     }
     html += "<div style='margin-top:7px'>" + state.types.map(function (type) {
-      var job = plateFor(type), combo = type.combo, action = "";
+      var jobs = platesFor(type), job = jobs[0], combo = type.combo, action = "";
       if (combo && combo.active) action = "<span class='ok small'>in use</span>";
       else if (combo) action = "<button type='button' class='quiet' data-combo-load='" + esc(type.key) + "'" +
                                (busy || !state.can_switch ? " disabled" : "") +
@@ -630,7 +688,7 @@
       else if (type.selected) action = "<span class='muted small'>selected</span>";
       return "<div class='type'><div class='row spread' style='gap:8px'>" +
         "<div class='file'><b>" + esc(type.label) + "</b></div><div class='row' style='flex:none'>" + action + "</div></div>" +
-        (job ? plateHtml(job) : "<div class='muted small'>Not sliced yet" +
+        (job ? platesHtml(jobs) : "<div class='muted small'>Not sliced yet" +
                (combo ? (combo.active ? ". Slice the plate." : "") : ". Select its presets in OrcaSlicer and slice.") + "</div>") +
         "<div class='row spread small muted' style='gap:8px'><span class='file'>" +
           (type.printers.length ? esc(type.printers.join(", ")) : "no printers of this type") + "</span>" +
@@ -679,6 +737,7 @@
       $("dlg-cancel").onclick = hideDialog;
       $("dlg-ok").onclick = function () { send("order_delete", { id: d.orderDel }); hideDialog(); };
     }
+    else if (d.choosePlate) send("choose_plate", { id: d.choosePlate });
     else if (d.libSave) saveToLibrary(d.libSave);
     else if (d.libEdit) editLibrary(d.libEdit);
     else if (d.folderNew !== undefined) folderDialog("", d.folderNew);
@@ -951,6 +1010,22 @@
     else if (d.pick) { selected[d.pick] = t.checked; renderMulti(); renderPrinters(); }
   });
   $("btn-add").onclick = function () { editPrinter(null); };
+  // ---- trouble report: details to paste into a GitHub issue ------------------------------------
+  function reportDialog(text) {
+    showDialog("<h4>Report a problem</h4><p class='small muted' style='margin:0'>Open an issue at <b>github.com/mlugo-apx/orca-farm-send/issues</b> and paste these details. " +
+      "Printer names, addresses and access codes are left out. Messages can include file names, so read it before posting.</p>" +
+      "<textarea id='r-text' readonly rows='10' style='width:100%;box-sizing:border-box;margin-top:8px;font-family:monospace;font-size:11px'>" + esc(text) + "</textarea>" +
+      "<div class='row' style='margin-top:10px;justify-content:flex-end;gap:8px'><span id='r-note' class='small muted'></span>" +
+      "<button type='button' class='quiet' id='r-close'>Close</button><button type='button' id='r-copy'>Copy</button></div>");
+    $("r-close").onclick = hideDialog;
+    $("r-copy").onclick = function () {
+      var box = $("r-text"), done = false;
+      box.focus(); box.select();
+      try { done = document.execCommand("copy"); } catch (e) { done = false; }
+      $("r-note").textContent = done ? "Copied" : "Select the text and copy it";
+    };
+  }
+  $("btn-report").onclick = function () { send("report"); };
   $("btn-refresh").onclick = function () { refresh(state.printers.map(function (p) { return p.id; })); recount(); };
   $("btn-import").onclick = function () { send("import_presets"); };
 
@@ -966,6 +1041,8 @@
       state.status[message.id] = message.status; renderMulti(); renderPrinters(); renderStorage();
     } else if (message.command === "order_plan") {
       showPlan(message);
+    } else if (message.command === "report") {
+      reportDialog(message.text || "");
     } else if (message.command === "library_result") {
       if (message.ok) { hideDialog(); libNote = message.text ? { ok: true, text: message.text } : null; plateView = "library"; renderJob(); }
       else if ($("l-result")) { $("l-result").className = "small err"; $("l-result").textContent = message.text; }

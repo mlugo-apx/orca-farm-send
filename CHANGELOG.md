@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0
+
+- **Print only some parts of a kept plate (Snapmaker U1).** The library send dialog has "Parts to print per printer". Below the full count, the printer is told to skip the other parts as it starts, and the panel waits for the printer to confirm before it reports the start. If the printer does not confirm, the print is cancelled. One full plate in the library now covers any quantity. It needs a plate whose parts are labelled one by one (OrcaSlicer's "Label objects", on by default for Klipper printers) and a parts count that matches. The time and grams shown stay those of the full plate. Verified on a U1 up to the printer confirming 26 of 28 parts skipped before any extrusion; a print of the remaining parts has not been run yet.
+- **Orders are back, split evenly.** An order of 10 over five free printers is 2 each on printers that can skip parts. A printer that prints whole plates only, such as a Centauri Carbon 2, gets the kept plate nearest its share and is left out when that plate would be more than double the share. Each count can be edited before starting.
+- **Every plate of a project is held.** After Slice all, each plate has its own row and Save to library button, and you choose which one the printer cards send. Re-slicing a plate replaces that plate only.
+- A print cancelled before it extruded anything (still heating or leveling) no longer flags the bed as needing to be cleared. Klipper printers only; a Centauri Carbon 2 does not report this.
+- **Color check for library sends.** Printing as sliced is refused when the toolhead reports a clearly different color than the plate was sliced with, until you confirm the loaded color in the dialog. The dialog also warns when the ticked printers hold different colors in the chosen toolhead.
+- **Report a problem.** A link at the bottom of the panel collects the plugin version, system, and each printer's model and state for a GitHub issue. Printer names, addresses and access codes are left out.
+
 ## 0.2.3
 
 - **Fixes "HTTP 429 from printer" when sending to a Centauri Carbon 2.** Any plate larger than about 3 MB failed partway through the upload. The plugin opened a new connection for every 1 MB piece, and the printer refuses a burst of connections. The upload now uses one kept-open connection, as OrcaSlicer's own Elegoo uploader does, and a busy reply or dropped connection is retried instead of failing the send. A 23 MB plate that failed before now uploads in about 5 seconds.

@@ -16,6 +16,7 @@ class FakeMoonraker:
         self.file_times = {}   # file name -> modified time, for cleanup tests
         self.estimated_time, self.metadata_calls = None, 0   # slicer estimate served as file metadata
         self.snapmaker, self.start_options = snapmaker, []
+        self.objects, self.excluded, self.ignore_skips, self.cancels = [], [], False, 0   # labelled parts and skips
         self.tools = {"filament_color_rgba": ["000000FF", "FFFFFFFF", "6F4C2FFF", "FEE5A5FF"], "filament_type": ["PETG"] * 4,
                       "filament_exist": [True, True, True, False]}
         outer = self
@@ -94,6 +95,8 @@ class FakeMoonraker:
                         "heater_bed": {"temperature": 60.0, "target": 60.0},
                         "extruder": {"temperature": 25.0, "target": 0.0},
                         "extruder1": {"temperature": 220.0, "target": 220.0},
+                        "exclude_object": {"objects": [{"name": name} for name in (outer.objects if printing else [])],
+                                           "excluded_objects": list(outer.excluded)},
                         **({"print_task_config": outer.tools} if outer.snapmaker else {})}}})
                 elif self.path.startswith("/server/files/metadata") and outer.estimated_time is not None:
                     outer.metadata_calls += 1
@@ -125,6 +128,17 @@ class FakeMoonraker:
                         outer.started.append(filename)
                     outer.files[filename] = data
                     self._json(201, {"result": {"item": {"path": filename, "root": "gcodes"}}})
+                elif self.path.startswith("/printer/gcode/script"):
+                    script = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)["script"][0]
+                    for line in script.splitlines():
+                        match = re.match(r"EXCLUDE_OBJECT NAME=(\S+)", line)
+                        if match and not outer.ignore_skips:
+                            outer.excluded.append(match.group(1))
+                    self._json(200, {"result": "ok"})
+                elif self.path.startswith("/printer/print/cancel"):
+                    outer.cancels += 1
+                    outer.state = "standby"
+                    self._json(200, {"result": "ok"})
                 elif self.path.startswith("/printer/print/start"):
                     filename = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)["filename"][0]
                     if filename not in outer.files:
