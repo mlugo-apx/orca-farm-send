@@ -1835,6 +1835,108 @@ class OrderBook:
         return good, printing, max(0, order["quantity"] - good - printing)
 
 
+RUN_LOG_LIMIT = 2000
+
+
+def run_result(before, now):
+    """How a print ended, read from two status reads, or None while nothing ended.
+    finished, cancelled, error, or stopped (ended early with no reason reported)."""
+    if not before or now.get("state") not in WATCHED_STATES:
+        return None
+    was, state = before.get("state"), now.get("state")
+    if state == "error" and was in ("printing", "paused"):
+        return "error"
+    if state == "idle" and was in ("printing", "paused"):
+        if (now.get("last_result") or "") == "cancelled":
+            return "cancelled"
+        progress = before.get("progress")
+        if now.get("last_result") == "complete" or (isinstance(progress, (int, float)) and progress >= 99):
+            return "finished"
+        return "stopped"
+    return None
+
+
+class RunLog:
+    """Every print the panel started: what, on which printer, when, and how it ended. Kept in one
+    file that all OrcaSlicer windows share, newest last, capped at RUN_LOG_LIMIT entries."""
+
+    def __init__(self, path):
+        self.path, self._stamp, self.runs = path, None, []
+        self._lock = threading.RLock()      # starts and endings arrive from different worker threads
+        self.sync()
+
+    def sync(self):
+        with self._lock:
+            self._sync()
+
+    def _sync(self):
+        stamp = file_stamp(self.path)
+        if stamp == self._stamp:
+            return
+        self._stamp, self.runs = stamp, []
+        try:
+            with open(self.path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            self.runs = [run for run in data.get("runs", []) if isinstance(run, dict) and run.get("printer_id")]
+        except (OSError, ValueError, AttributeError):
+            pass
+
+    def _save(self):
+        try:
+            write_private(self.path + ".tmp", json.dumps({"version": 1, "runs": self.runs[-RUN_LOG_LIMIT:]}, indent=1))
+            os.replace(self.path + ".tmp", self.path)
+            self._stamp = file_stamp(self.path)
+        except OSError:
+            pass                    # a history that cannot be written must never stop a print
+
+    def start(self, printer, filename, item="", parts=None, kept=None, source="sliced", toolhead=None):
+        with self._lock:
+            return self._start(printer, filename, item, parts, kept, source, toolhead)
+
+    def _start(self, printer, filename, item, parts, kept, source, toolhead):
+        self._sync()
+        run = {"id": uuid.uuid4().hex[:10], "started_at": time.time(), "printer_id": printer.get("id"),
+               "printer": printer.get("name", ""), "model": printer.get("model", ""), "file": filename,
+               "item": item or "", "parts": parts, "kept": kept, "source": source, "toolhead": toolhead,
+               "ended_at": None, "result": None, "good": None}
+        self.runs = (self.runs + [run])[-RUN_LOG_LIMIT:]
+        self._save()
+        return run["id"]
+
+    def _open_run(self, printer_id):
+        return next((run for run in reversed(self.runs) if run.get("printer_id") == printer_id), None)
+
+    def end(self, printer_id, result, filename=""):
+        """Close the newest run of this printer if it is still open and was this file."""
+        with self._lock:
+            return self._end(printer_id, result, filename)
+
+    def _end(self, printer_id, result, filename):
+        self._sync()
+        run = self._open_run(printer_id)
+        if run is None or run.get("result"):
+            return False
+        ours, theirs = os.path.basename(run.get("file") or ""), os.path.basename(filename or "")
+        if ours and theirs and ours != theirs:
+            return False            # the printer was printing something the panel did not start
+        run["result"], run["ended_at"] = result, time.time()
+        self._save()
+        return True
+
+    def good(self, printer_id, count):
+        with self._lock:
+            return self._good(printer_id, count)
+
+    def _good(self, printer_id, count):
+        self._sync()
+        run = self._open_run(printer_id)
+        if run is None or run.get("good") is not None:
+            return False
+        run["good"] = max(0, int(count))
+        self._save()
+        return True
+
+
 class BedLog:
     """One small value per printer, kept in a file so it survives restarting OrcaSlicer and is the
     same in every OrcaSlicer window. Used for two things, each in its own file:

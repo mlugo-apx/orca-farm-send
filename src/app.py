@@ -10,7 +10,7 @@ import threading
 import time
 import uuid
 
-from core import (toolhead_color_problem, count_objects, file_stamp, OrderBook, plan_order, CC2_MANY_FILES, nozzle_mismatch, toolhead_problem, write_private, file_md5, STORE_FILE, KIND_CC2, WATCHED_STATES, BedLog, FarmError, bed_needs_clearing, files_to_clean, rule_text,
+from core import (RunLog, run_result, toolhead_color_problem, count_objects, file_stamp, OrderBook, plan_order, CC2_MANY_FILES, nozzle_mismatch, toolhead_problem, write_private, file_md5, STORE_FILE, KIND_CC2, WATCHED_STATES, BedLog, FarmError, bed_needs_clearing, files_to_clean, rule_text,
                   storage_summary, PrinterStore, can_start, job_filename, make_client, model_key, model_matches,
                   parse_gcode_meta, preset_to_printer, presets_to_printers, set_shared_dir, status_event, strip_model_suffix, validate_printer)
 # BUNDLE-STRIP-END
@@ -90,6 +90,7 @@ class FarmApp:
         set_shared_dir(storage_dir)   # every OrcaSlicer window shares one client slot per CC2
         self.beds = BedLog(os.path.join(storage_dir, "farm_send_beds.json"))
         self.orders = OrderBook(os.path.join(storage_dir, "farm_send_orders.json"))
+        self.runs = RunLog(os.path.join(storage_dir, "farm_send_runs.json"))
         self.cleaned = BedLog(os.path.join(storage_dir, "farm_send_cleaned.json"))   # last automatic cleanup per printer
         self.storage = {}         # printer id -> {count, bytes, oldest, removable, many, error}
         self._storage_at = {}
@@ -472,6 +473,27 @@ class FarmApp:
                     lines.append("   %s: %s" % (label, text))
         return "\n".join(lines)
 
+    def _cmd_runs(self, message):
+        """The history of prints the panel started, newest first, with a count per printer."""
+        self.runs.sync()
+        rows, totals = [], {}
+        for run in reversed(self.runs.runs[-300:]):
+            took = (run["ended_at"] - run["started_at"]) if run.get("ended_at") else None
+            rows.append({"when": time.strftime("%b %d %H:%M", time.localtime(run.get("started_at") or 0)),
+                         "printer": run.get("printer", ""), "item": run.get("item") or run.get("file", ""),
+                         "parts": run.get("kept") or run.get("parts"), "of": run.get("parts") if run.get("kept") else None,
+                         "result": run.get("result") or "open", "good": run.get("good"),
+                         "took": _short_duration(took) if took else "", "source": run.get("source", "")})
+        for run in self.runs.runs:
+            row = totals.setdefault(run.get("printer") or "?", {"started": 0, "finished": 0, "failed": 0})
+            row["started"] += 1
+            if run.get("result") == "finished":
+                row["finished"] += 1
+            elif run.get("result") in ("cancelled", "error", "stopped"):
+                row["failed"] += 1
+        self.post({"command": "runs", "runs": rows, "total": len(self.runs.runs),
+                   "printers": [dict(name=name, **row) for name, row in sorted(totals.items())]})
+
     def _cmd_report(self, message):
         self.post({"command": "report", "text": self.report_text()})
 
@@ -486,6 +508,7 @@ class FarmApp:
             if message.get("good") is not None:     # this bed held a plate of an order: how many came out good
                 try:
                     counted = self.orders.count(printer_id, int(message.get("good")))
+                    self.runs.good(printer_id, int(message.get("good")))
                 except (TypeError, ValueError):
                     pass
             status = self.status.get(printer_id)
@@ -732,6 +755,9 @@ class FarmApp:
                 # Recorded only once the printer accepted the start, so a failed send never counts.
                 self.orders.add_plate(snapshot["order"]["id"], printer_id, name, snapshot["order"]["parts"], remote)
                 self.post_state()
+            self.runs.start(printer, remote, item=snapshot.get("item") or name, parts=snapshot.get("parts"),
+                            kept=snapshot.get("keep"), source=snapshot.get("source", "sliced"),
+                            toolhead=snapshot.get("toolhead"))
             self._set_send(printer_id, False, "Started %s%s" % (remote, note), ok=True, started=True)
             self._notify("info", "Farm Send: %s started printing %s" % (name, remote))
         except FarmError as error:
@@ -1074,7 +1100,9 @@ class FarmApp:
                     name = job_filename(label)
                 self._cancel[printer_id] = threading.Event()
                 self._set_send(printer_id, True, "Preparing...", percent=0)
-                snapshot = {"path": entry["path"], "name": name}
+                snapshot = {"path": entry["path"], "name": name, "item": entry.get("item", ""),
+                            "parts": entry.get("parts"), "source": "order" if order_id else "library",
+                            "toolhead": int(toolhead) if toolhead and printer.get("kind") != KIND_CC2 else None}
                 if fewer:
                     snapshot["keep"] = fewer
                 if order_id and start:
@@ -1358,6 +1386,7 @@ class FarmApp:
         except Exception as error:
             status = {"state": "offline", "state_text": "Error", "detail": str(error), "filename": "", "progress": None,
                       "remaining_s": None, "nozzle": None, "bed": None, "errors": []}
+        ended, ended_file = None, ""
         with self.lock:
             self._status_busy.discard(printer_id)
             self._status_at[printer_id] = time.monotonic()
@@ -1368,6 +1397,8 @@ class FarmApp:
             if status.get("state") in WATCHED_STATES:
                 name = (self.store.get(printer_id) or printer).get("name") or "Printer"
                 event = status_event(self._watched.get(printer_id), status, name)
+                ended = run_result(self._watched.get(printer_id), status)
+                ended_file = (self._watched.get(printer_id) or {}).get("filename") or ""
                 self._watched[printer_id] = status
                 note = self.notices.get(printer_id)
                 if event:
@@ -1393,6 +1424,8 @@ class FarmApp:
                 del self.sends[printer_id]
         if stale:
             self.post({"command": "send", "id": printer_id, "send": None})
+        if ended:
+            self.runs.end(printer_id, ended, ended_file)
         if event:
             self._notify(event[0], "Farm Send: %s" % event[1])
         self.post({"command": "status", "id": printer_id, "status": status})

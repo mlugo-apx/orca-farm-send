@@ -759,6 +759,38 @@ class LibraryTests(unittest.TestCase):
         self.assertFalse(os.path.exists(first["path"]))
         self.assertFalse(os.path.exists(self.app.slice_dir))
 
+    def test_run_log_records_a_started_print_and_how_it_ended(self):
+        self._slice_and_save(parts=24)
+        entry = self.app.library()[0]
+        self._send(entry["id"], [self.p_u1])
+        self.assertTrue(wait_for(lambda: (self.app.sends.get(self.p_u1["id"]) or {}).get("started")))
+        run = self.app.runs.runs[-1]
+        self.assertEqual((run["printer"], run["item"], run["parts"], run["source"]), ("U1 #1", "Rail clip", 24, "library"))
+        self.assertIsNone(run["result"])
+        # another window sees it, and an ending is matched by printer and file
+        other = core.RunLog(self.app.runs.path)
+        self.assertEqual(len(other.runs), 1)
+        self.assertFalse(other.end(self.p_u1["id"], "finished", "something_else.gcode"))
+        self.assertTrue(other.end(self.p_u1["id"], "finished", run["file"]))
+        self.assertFalse(other.end(self.p_u1["id"], "cancelled", run["file"]))      # already closed
+        self.assertTrue(self.app.runs.good(self.p_u1["id"], 22))
+        self.app.handle({"command": "runs"})
+        shown = [post for post in self.posts if post.get("command") == "runs"][-1]
+        self.assertEqual(shown["runs"][0]["result"], "finished")
+        self.assertEqual(shown["runs"][0]["good"], 22)
+        self.assertEqual(shown["printers"], [{"name": "U1 #1", "started": 1, "finished": 1, "failed": 0}])
+
+    def test_run_result_reads_how_a_print_ended(self):
+        printing = {"state": "printing", "progress": 40}
+        self.assertEqual(core.run_result(printing, {"state": "idle", "last_result": "cancelled"}), "cancelled")
+        self.assertEqual(core.run_result(printing, {"state": "idle", "last_result": "complete"}), "finished")
+        self.assertEqual(core.run_result({"state": "printing", "progress": 100}, {"state": "idle"}), "finished")
+        self.assertEqual(core.run_result(printing, {"state": "idle"}), "stopped")
+        self.assertEqual(core.run_result(printing, {"state": "error"}), "error")
+        self.assertIsNone(core.run_result(printing, {"state": "printing", "progress": 41}))
+        self.assertIsNone(core.run_result(None, {"state": "idle"}))
+        self.assertIsNone(core.run_result({"state": "idle"}, {"state": "idle"}))
+
     def test_report_details_leave_out_names_addresses_and_codes(self):
         self.app.handle({"command": "report"})
         text = [post for post in self.posts if post.get("command") == "report"][-1]["text"]

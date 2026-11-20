@@ -4,7 +4,7 @@
 |---|---|
 | File | `dist/farm_send_any.py` |
 | Name | Farm Send |
-| Version | 0.3.3 |
+| Version | 0.3.4 |
 | Type | Script |
 | Min. OrcaSlicer version | 2.5.0 (the only choice the form offers) |
 | Icon | `docs/icon.png` (square; the hub stores it at 320 x 320) |
@@ -29,6 +29,7 @@ Farm Send is a docked panel for small print farms. Slice a plate once per printe
 - Print only some parts of a kept plate on a Snapmaker U1: the printer skips the rest, so one full plate covers any quantity.
 - Orders: enter a quantity and it is split evenly over the free printers, with a count of good parts.
 - Every plate of a multi-plate project is held after Slice all.
+- Print history: what was started on which printer and how it ended, with a CSV copy.
 
 Early release. Developed and tested on Linux with two Centauri Carbon 2s and three Snapmaker U1s (firmware 2.1.2). Windows and macOS are untested; reports welcome. It talks only to the printer addresses you save: no cloud, no telemetry.
 

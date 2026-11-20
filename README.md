@@ -120,6 +120,10 @@ If you install both the Plugin Hub copy and a local file copy, only one can be a
 - **Access codes are stored as plain text** in `<OrcaSlicer config>/orca_plugins/plugin_data/farm_send/farm_send_printers.json`. The file is created readable only by your user account. Anyone with access to your account can read it, as with the printer presets OrcaSlicer itself stores.
 - Printers are reached over plain HTTP, MQTT and websocket on your local network, as the vendors' own slicers do. Use it on a network you trust.
 
+## Print history
+
+**Print history** at the bottom of the panel lists every print started from the panel: the item, the printer, when, how many parts, how long it took and how it ended (finished, cancelled, error, or stopped early), plus the good-parts count if you entered one at **Bed cleared**. A line per printer counts started, finished and not finished. **Copy as CSV** puts the list on the clipboard for a spreadsheet. It is kept in `farm_send_runs.json` in the plugin's storage folder, newest 2000 prints. Prints started at the printer are not recorded, and an ending is only noticed while the panel is open.
+
 ## Reporting a problem or requesting an enhancement
 
 Open an issue at https://github.com/mlugo-apx/orca-farm-send/issues and pick the form that fits. For an enhancement, describe what you want to do and how you do it today. For a problem, click **Report a problem or request an enhancement** at the bottom of the panel first: it collects the plugin version, your system, and each printer's model and state, ready to paste. Printer names, addresses and access codes are left out; messages can include file names, so read it before posting. Add your OrcaSlicer version, the printer's firmware version, what you clicked, and the exact message shown.

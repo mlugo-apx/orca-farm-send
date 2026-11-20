@@ -60,7 +60,8 @@
 <p id="empty" class="muted" style="display:none">No printers yet. Use Import to pull them from your printer presets, or Add.</p>
 
 <p class="small muted" style="margin-top:14px"><label title="Open this panel by itself when OrcaSlicer starts or a project is opened. Off: open it from the Plugins dialog."><input type="checkbox" id="auto-open"> Open this panel when OrcaSlicer starts</label></p>
-<p class="small muted" style="margin-top:6px;text-align:right"><button type="button" class="linkish" id="btn-report" title="Tell the developer what went wrong or what you would like added">Report a problem or request an enhancement</button></p>
+<p class="small muted" style="margin-top:6px;text-align:right"><button type="button" class="linkish" id="btn-runs" title="Every print this panel started, and how it ended">Print history</button></p>
+<p class="small muted" style="margin-top:3px;text-align:right"><button type="button" class="linkish" id="btn-report" title="Tell the developer what went wrong or what you would like added">Report a problem or request an enhancement</button></p>
 
 <div id="overlay"><div id="dialog"></div></div>
 
@@ -347,8 +348,9 @@
     var row = function (e) {
       var saved = e.saved_at ? new Date(e.saved_at * 1000).toLocaleDateString([], { month: "short", day: "numeric" }) : "";
       return "<div class='type'><div class='row spread' style='gap:8px'>" +
-        "<div class='file'><b>" + esc(e.item) + "</b> <span class='muted'>x" + esc(e.parts) + "</span>" +
-          (modelTag(e.printer_model) ? " <span class='small' style='border:1px solid var(--orca-border);border-radius:3px;padding:0 4px' title='" + esc(e.printer_model) + "'>" + esc(modelTag(e.printer_model)) + "</span>" : "") + "</div>" +
+        "<div class='row' style='gap:5px;min-width:0'>" +
+          (modelTag(e.printer_model) ? "<span class='small' style='flex:none;border:1px solid var(--orca-border);border-radius:3px;padding:0 4px' title='" + esc(e.printer_model) + "'>" + esc(modelTag(e.printer_model)) + "</span>" : "") +
+          "<div class='file' title='" + esc(e.item) + "'><b>" + esc(e.item) + "</b> <span class='muted'>x" + esc(e.parts) + "</span></div></div>" +
         "<div class='row' style='flex:none'><button type='button' class='quiet' data-lib-send='" + esc(e.id) + "'" +
           (e.printers.length ? "" : " disabled") + ">Send</button>" + iconButton("edit", "data-lib-edit", e.id, "Rename, change the count or move to a folder") +
           iconButton("trash", "data-lib-del", e.id, "Remove from the library") + "</div></div>" +
@@ -1128,6 +1130,40 @@
     };
   }
   $("btn-report").onclick = function () { send("report"); };
+  $("btn-runs").onclick = function () { send("runs"); };
+  // ---- print history: what the panel started and how it ended ---------------------------------
+  function runsDialog(message) {
+    var runs = message.runs || [], printers = message.printers || [];
+    var mark = { finished: "ok", cancelled: "warn", error: "err", stopped: "warn", open: "muted" };
+    var csv = "started,printer,item,parts,of,result,good,took,source\n" + runs.map(function (r) {
+      return [r.when, r.printer, r.item, r.parts == null ? "" : r.parts, r.of == null ? "" : r.of, r.result,
+              r.good == null ? "" : r.good, r.took, r.source].map(function (v) {
+        return '"' + String(v).replace(/"/g, '""') + '"'; }).join(",");
+    }).join("\n");
+    showDialog("<h4>Print history</h4>" +
+      (runs.length ? "" : "<p class='small muted' style='margin:0'>Nothing yet. Prints started from this panel are listed here, with how they ended. Prints started at the printer are not.</p>") +
+      (printers.length ? "<div class='small' style='margin-bottom:8px'>" + printers.map(function (p) {
+        return "<div class='row spread'><b class='file'>" + esc(p.name) + "</b><span class='muted' style='flex:none'>" + p.started + " started \u00b7 " +
+               p.finished + " finished \u00b7 " + p.failed + " not finished</span></div>"; }).join("") + "</div>" : "") +
+      runs.map(function (r) {
+        var count = r.parts == null ? "" : " x" + r.parts + (r.of ? " of " + r.of : "");
+        return "<div class='type small'><div class='row spread' style='gap:8px'><span class='file'><b>" + esc(r.item) + "</b>" + esc(count) + "</span>" +
+          "<span class='" + (mark[r.result] || "muted") + "' style='flex:none'>" + esc(r.result === "open" ? "printing or not seen ending" : r.result) + "</span></div>" +
+          "<div class='muted'>" + esc(r.when) + " \u00b7 " + esc(r.printer) + (r.took ? " \u00b7 " + esc(r.took) : "") +
+          (r.good == null ? "" : " \u00b7 " + esc(r.good) + " good") + "</div></div>";
+      }).join("") +
+      (message.total > runs.length ? "<p class='small muted'>Showing the newest " + runs.length + " of " + message.total + ".</p>" : "") +
+      "<textarea id='r-text' readonly style='position:absolute;left:-9999px'>" + esc(csv) + "</textarea>" +
+      "<div class='row' style='margin-top:10px;justify-content:flex-end;gap:8px'><span id='r-note' class='small muted'></span>" +
+      "<button type='button' class='quiet' id='r-close'>Close</button>" + (runs.length ? "<button type='button' id='r-copy'>Copy as CSV</button>" : "") + "</div>");
+    $("r-close").onclick = hideDialog;
+    if ($("r-copy")) $("r-copy").onclick = function () {
+      var box = $("r-text"), done = false;
+      box.focus(); box.select();
+      try { done = document.execCommand("copy"); } catch (e) { done = false; }
+      $("r-note").textContent = done ? "Copied" : "Could not copy";
+    };
+  }
   $("auto-open").onchange = function () { send("set_auto_open", { on: this.checked }); };
   $("btn-refresh").onclick = function () { refresh(state.printers.map(function (p) { return p.id; })); recount(); };
   $("btn-import").onclick = function () { send("import_presets"); };
@@ -1145,6 +1181,8 @@
       state.status[message.id] = message.status; renderMulti(); renderPrinters(); renderStorage();
     } else if (message.command === "order_plan") {
       showPlan(message);
+    } else if (message.command === "runs") {
+      runsDialog(message);
     } else if (message.command === "report") {
       reportDialog(message.text || "");
     } else if (message.command === "library_result") {

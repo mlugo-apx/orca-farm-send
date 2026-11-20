@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.4
+
+- **Print history.** Every print started from the panel is recorded: what, on which printer, when, how many parts, and how it ended (finished, cancelled, error, or stopped early). A good-parts count entered at "Bed cleared" is added to it. **Print history** at the bottom of the panel shows the list with a count per printer, and copies it as CSV. Prints started at the printer are not recorded, and an ending is only seen while the panel is open.
+- The printer tag on a library row now sits in front of the name, where a long name cannot push it out of view.
+
 ## 0.3.3
 
 - **Fix: a second OrcaSlicer window no longer removes the first window's sliced plates.** The copies of sliced plates were kept in one shared folder that every window emptied when its panel started, and since 0.3.2 the panel starts by itself. Sending or saving a plate from the first window then failed until it was sliced again. Each window now keeps its own copies.
