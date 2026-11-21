@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.19
+
+- The Stored box is a table: one row per printer, with columns for files (or recordings), size, oldest and how many are old under the rule.
+
 ## 0.3.18
 
 - The orange "↻ 0.3.x" label is now a button: clicking it shows the steps to load the newer Farm Send. The hint on hover stays.

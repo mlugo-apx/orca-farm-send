@@ -5,7 +5,7 @@ import os
 import re
 import sys
 
-VERSION = "0.3.18"
+VERSION = "0.3.19"
 HERE = os.path.dirname(os.path.abspath(__file__))
 HEADER = '''# /// script
 # requires-python = ">=3.12"
