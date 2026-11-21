@@ -22,4 +22,15 @@ if [ ! -f "$TARGET" ]; then
 fi
 cp dist/farm_send/farm_send.py "$TARGET"
 echo "Updated $TARGET"
+# Tell OrcaSlicer windows still running an older build that this one is installed.
+STORE="$(dirname "$(dirname "$TARGET")")/plugin_data/farm_send"
+if [ -d "$STORE" ]; then
+  VERSION="$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' build.py)"
+  python3 - "$STORE" "$VERSION" <<'PY'
+import os, sys
+sys.path.insert(0, "src")
+import core
+core.record_version(sys.argv[1], sys.argv[2])
+PY
+fi
 echo "In OrcaSlicer: Plugins > untick and re-tick Farm Send to load the new build."

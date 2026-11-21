@@ -2340,6 +2340,36 @@ def bed_needs_clearing(known, status):
 STORE_FILE = "farm_send_printers.json"
 
 
+VERSION_FILE = "farm_send_version.json"
+
+
+def version_key(text):
+    """(0, 3, 13) from "0.3.13"; () when it is not a version, so "dev" never counts as newer."""
+    parts = str(text or "").strip().split(".")
+    return tuple(int(part) for part in parts) if parts and all(part.isdigit() for part in parts) else ()
+
+
+def newest_installed(storage_dir):
+    """The newest Farm Send version recorded in the shared storage folder, or "". Every window
+    records its own version there when it starts, and install.sh records the one it installs."""
+    try:
+        with open(os.path.join(storage_dir, VERSION_FILE), "r", encoding="utf-8") as handle:
+            value = json.load(handle).get("version")
+    except (OSError, ValueError, AttributeError):
+        return ""
+    return str(value) if version_key(value) else ""
+
+
+def record_version(storage_dir, version):
+    """Note this version in the storage folder unless a newer one is already there."""
+    if not version_key(version) or version_key(newest_installed(storage_dir)) >= version_key(version):
+        return
+    try:
+        write_private(os.path.join(storage_dir, VERSION_FILE), json.dumps({"version": version}))
+    except OSError:
+        pass
+
+
 def data_dir_of(path):
     """OrcaSlicer's data folder, found from any path inside its orca_plugins folder.
 

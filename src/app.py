@@ -10,7 +10,7 @@ import threading
 import time
 import uuid
 
-from core import (videos_to_clean, RunLog, run_result, toolhead_color_problem, count_objects, file_stamp, OrderBook, plan_order, CC2_MANY_FILES, nozzle_mismatch, toolhead_problem, write_private, file_md5, STORE_FILE, KIND_CC2, WATCHED_STATES, BedLog, FarmError, bed_needs_clearing, files_to_clean, rule_text,
+from core import (videos_to_clean, newest_installed, record_version, version_key, RunLog, run_result, toolhead_color_problem, count_objects, file_stamp, OrderBook, plan_order, CC2_MANY_FILES, nozzle_mismatch, toolhead_problem, write_private, file_md5, STORE_FILE, KIND_CC2, WATCHED_STATES, BedLog, FarmError, bed_needs_clearing, files_to_clean, rule_text,
                   storage_summary, PrinterStore, can_start, job_filename, make_client, model_key, model_matches,
                   parse_gcode_meta, preset_to_printer, presets_to_printers, set_shared_dir, status_event, strip_model_suffix, validate_printer)
 # BUNDLE-STRIP-END
@@ -20,6 +20,7 @@ SLICE_KEEP_S = 12 * 3600      # sliced copies of a window that is gone are dropp
 SLICE_TOUCH_S = 600
 LIBRARY_DIR = "library"   # kept plates: <id>.gcode plus <id>.json describing it
 STATUS_MIN_INTERVAL = 3.0
+NEWER_CHECK_INTERVAL = 60.0    # seconds between looks for a newer installed Farm Send
 STATUS_MIN_INTERVAL_CC2 = 8.0   # each CC2 poll is a full MQTT connect + register; be gentle
 STORAGE_INTERVAL = 600.0        # how often each printer's stored files are counted
 AUTO_CLEAN_INTERVAL = 86400.0   # automatic cleanup runs at most once a day per printer
@@ -88,6 +89,10 @@ class FarmApp:
                  read_presets=None, apply_presets=None, list_presets=None):
         self.store = PrinterStore(os.path.join(storage_dir, STORE_FILE))
         set_shared_dir(storage_dir)   # every OrcaSlicer window shares one client slot per CC2
+        self.storage_dir = storage_dir
+        self.newer = ""           # a newer Farm Send recorded in the storage folder than this window runs
+        self._newer_at = 0.0
+        record_version(storage_dir, self.version())
         self.beds = BedLog(os.path.join(storage_dir, "farm_send_beds.json"))
         self.orders = OrderBook(os.path.join(storage_dir, "farm_send_orders.json"))
         self.runs = RunLog(os.path.join(storage_dir, "farm_send_runs.json"))
@@ -384,7 +389,8 @@ class FarmApp:
                 "storage": dict(self.storage),
                 "cleanup": dict(self.store.cleanup, text=rule_text(self.store.cleanup)),
                 "video_cleanup": dict(self.store.video_cleanup, text=rule_text(self.store.video_cleanup)),
-                "version": str(globals().get("PLUGIN_VERSION", "dev")),
+                "version": self.version(),
+                "newer": self.newer,
                 "current": dict(self.current) if self.current else None,
                 "combo_note": dict(self.combo_note),
                 "can_switch": self._apply_presets is not None,
@@ -1443,6 +1449,22 @@ class FarmApp:
             self._cancel.pop(printer_id, None)
 
     # ---- status polling --------------------------------------------------------------------------
+    @staticmethod
+    def version():
+        return str(globals().get("PLUGIN_VERSION", "dev"))
+
+    def check_newer(self, now=None):
+        """Look, at most once a minute, for a newer Farm Send installed since this window loaded it."""
+        now = time.monotonic() if now is None else now
+        if self._newer_at and now - self._newer_at < NEWER_CHECK_INTERVAL:
+            return
+        self._newer_at = now
+        found = newest_installed(self.storage_dir)
+        newer = found if version_key(found) > version_key(self.version()) and version_key(self.version()) else ""
+        if newer != self.newer:
+            self.newer = newer
+            self.post_state()
+
     def poll(self, force=False, only=None):
         now = time.monotonic()
         todo = []
@@ -1462,6 +1484,7 @@ class FarmApp:
             self._spawn(self._status_worker, printer)
         if only is None:
             self.check_storage()
+            self.check_newer(now)
 
     def _status_worker(self, printer):
         printer_id = printer["id"]

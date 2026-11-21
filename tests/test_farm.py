@@ -593,6 +593,27 @@ class LibraryTests(unittest.TestCase):
             self.assertEqual(handle.read(), U1_GCODE)
         self.assertEqual(entry["md5"], core.file_md5(entry["path"]))
 
+    def test_a_newer_install_is_announced_and_an_older_one_is_not(self):
+        own = tempfile.TemporaryDirectory(); self.addCleanup(own.cleanup)
+        folder = self.app.storage_dir = own.name   # empty: the app recorded its own version in self.folder
+        self.assertEqual(core.version_key("0.3.13"), (0, 3, 13))
+        self.assertEqual(core.version_key("dev"), ())
+        self.assertGreater(core.version_key("0.3.10"), core.version_key("0.3.9"))   # not compared as text
+        core.record_version(folder, "0.3.13")
+        core.record_version(folder, "0.3.12")            # an older window starting later changes nothing
+        self.assertEqual(core.newest_installed(folder), "0.3.13")
+        self.app.version = lambda: "0.3.12"
+        self.app.check_newer(now=1000.0)
+        self.assertEqual(self.app.snapshot()["newer"], "0.3.13")
+        self.app.version = lambda: "0.3.13"
+        self.app.check_newer(now=1010.0)                  # asked again within the minute: not looked at
+        self.assertEqual(self.app.newer, "0.3.13")
+        self.app.check_newer(now=1100.0)
+        self.assertEqual(self.app.newer, "")
+        self.app.version = lambda: "dev"                  # a source checkout never claims to be outdated
+        self.app.check_newer(now=1200.0)
+        self.assertEqual(self.app.newer, "")
+
     def test_cc2_prints_a_kept_plate_from_the_roll_picked_in_the_dialog(self):
         self.assertTrue(self._slice_and_save(gcode=CC2_GCODE)["ok"])
         (entry,) = self.app.library()

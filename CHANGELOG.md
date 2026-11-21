@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.14
+
+- When a newer Farm Send has been installed while an OrcaSlicer window still runs the older one, the panel says so at the top, with how to load it: Plugins > Refresh, untick and tick Farm Send, then run it. Each window notes its version in the plugin's storage folder when it starts, and the panel looks there about once a minute; nothing is sent anywhere.
+
 ## 0.3.13
 
 - **Fixed: time-lapse clean-up on Snapmaker U1s did nothing.** A U1 keeps its recordings in a folder the file API can only read, so every removal failed with "HTTP 405 Method Not Allowed". Recordings are now removed through Snapmaker's own camera service, the way Snapmaker's app does it; tried on a U1, the video, picture and cover all went. Earlier notes said this had been checked on real U1s: it had only been checked against the test printer, which allowed it.

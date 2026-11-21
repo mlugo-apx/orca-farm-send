@@ -71,6 +71,7 @@
     <button type="button" class="quiet" id="btn-add" title="Add a printer by address">Add</button>
   </div>
 </div>
+<p class="small warn" id="newer" style="display:none;margin:4px 0 8px"></p>
 
 <div class="box" id="job"></div>
 <div id="multi" class="box" style="display:none"></div>
@@ -1249,6 +1250,10 @@
     if (message.command === "state") {
       ["printers", "jobs", "job_for", "slicing", "combos", "types", "library", "folders", "orders", "order_plates", "toolhead_names", "current", "combo_note", "can_switch", "storage", "cleanup", "video_cleanup"].forEach(function (key) { if (key in message) state[key] = message[key]; });
       if (message.version) $("version").textContent = (/^\d/.test(message.version) ? "v" : "") + message.version;
+      if ("newer" in message) {
+        $("newer").style.display = message.newer ? "" : "none";
+        $("newer").textContent = message.newer ? "Farm Send " + message.newer + " is installed. To use it: Plugins > Refresh, untick and tick Farm Send, then run it." : "";
+      }
       if (message.status) state.status = message.status;
       if (message.sends) state.sends = message.sends;
       if ("auto_open" in message) $("auto-open").checked = !!message.auto_open;
