@@ -1414,7 +1414,7 @@ class AppTests(unittest.TestCase):
                                  and "videos" in self.app.storage.get(self.p_cc2["id"], {})))
         videos = self.app.storage[self.p_u1["id"]]["videos"]
         self.assertEqual((videos["count"], videos["removable_bytes"]), (3, 5003000 + 5001000))
-        self.assertIsNone(self.app.storage[self.p_cc2["id"]]["videos"])          # a CC2 keeps none to list
+        self.assertEqual(self.app.storage[self.p_cc2["id"]]["videos"]["count"], 0)   # the fake CC2's history is empty
         self.assertFalse(self.app.store.video_cleanup["auto"])                   # recordings are never removed automatically
         self.app.handle({"command": "cleanup", "kind": "videos", "printer_ids": [self.p_u1["id"]]})
         self.assertTrue(wait_for(lambda: not self.app.sends.get(self.p_u1["id"], {"active": True})["active"]))
@@ -1435,6 +1435,70 @@ class AppTests(unittest.TestCase):
         self.assertTrue(wait_for(lambda: not self.app.sends.get(self.p_u1["id"], {"active": True})["active"]))
         self.assertIn("Removed 1 old recording ", self.app.sends[self.p_u1["id"]]["text"])
         self.assertEqual(sorted(self.u1.camera), ["busy_20250101.jpg", "busy_20250101.mp4", "busy_20250101_cover.jpg"])
+
+    def _cc2_film(self, name, days, exported=False, status=1):
+        """One finished print with time-lapse frames in the fake CC2's history, optionally exported."""
+        when = int(time.time() - days * 86400)
+        self.cc2.history.append({"task_id": "id-" + name, "task_name": name, "begin_time": when - 600, "end_time": when,
+                                 "task_status": status, "time_lapse_video_status": 2 if exported else 1,
+                                 "time_lapse_video_url": ("video/%s.mp4" if exported else "picture/%s") % name,
+                                 "time_lapse_video_size": 1000000 if exported else 0, "time_lapse_video_duration": 1})
+        self.cc2.media.update("picture/%s/%04d.jpeg" % (name, index) for index in range(3))
+        if exported:
+            self.cc2.media.add("video/%s.mp4" % name)
+
+    def test_cc2_recordings_come_from_the_history_and_unsafe_names_are_left_out(self):
+        tasks = [{"task_id": "a", "task_status": 1, "end_time": 50, "time_lapse_video_status": 1, "time_lapse_video_url": "picture/part.gcode2026"},
+                 {"task_id": "b", "task_status": 1, "end_time": 60, "time_lapse_video_status": 2, "time_lapse_video_url": "video/done.gcode2026.mp4", "time_lapse_video_size": 7},
+                 {"task_id": "c", "task_status": 4, "end_time": 70, "time_lapse_video_status": 1, "time_lapse_video_url": "picture/printing"},
+                 {"task_id": "d", "task_status": 1, "end_time": 80, "time_lapse_video_status": 0, "time_lapse_video_url": ""},
+                 {"task_id": "e", "task_status": 1, "end_time": 90, "time_lapse_video_status": 1, "time_lapse_video_url": "picture/../../gcode/local"},
+                 {"task_id": "f", "task_status": 1, "end_time": 90, "time_lapse_video_status": 1, "time_lapse_video_url": "picture/a/b"},
+                 {"task_id": "g", "task_status": 1, "end_time": 90, "time_lapse_video_status": 1, "time_lapse_video_url": "elsewhere/x"}]
+        found = core.cc2_recordings(tasks)
+        self.assertEqual([(item["name"], item["video"], item["size"], item["task"]) for item in found],
+                         [("part.gcode2026", False, 0, "a"), ("done.gcode2026", True, 7, "b")])
+        for bad in ("", "..", "a..b", "a/b", "a\\b", "x/../y", ".hidden", "a\nb"):
+            self.assertEqual(core.cc2_safe_name(bad), "", bad)
+        self.assertEqual(core.cc2_safe_name("ECC2_0.4_clip Rapid PETG _0.2_1h.gcode20261120"), "ECC2_0.4_clip Rapid PETG _0.2_1h.gcode20261120")
+
+    def test_cc2_video_cleanup_removes_video_frames_and_history_line(self):
+        self._cc2_film("new.gcode20261119", 3)
+        self._cc2_film("old.gcode20261001", 50)
+        self._cc2_film("exported.gcode20260901", 80, exported=True)
+        self._stock(self.cc2, [1, 90])
+        self._read(self.p_cc2)
+        self.app.handle({"command": "save_cleanup", "kind": "videos", "rule": {"mode": "age", "days": 30}})
+        self.assertTrue(wait_for(lambda: (self.app.storage.get(self.p_cc2["id"], {}).get("videos") or {}).get("removable") == 2))
+        self.assertEqual(self.app.storage[self.p_cc2["id"]]["videos"]["count"], 3)
+        self.app.handle({"command": "cleanup", "kind": "videos", "printer_ids": [self.p_cc2["id"]]})
+        self.assertTrue(wait_for(lambda: not self.app.sends.get(self.p_cc2["id"], {"active": True})["active"]))
+        result = self.app.sends[self.p_cc2["id"]]
+        self.assertTrue(result["ok"], result)
+        self.assertIn("Removed 2 old recordings", result["text"])
+        self.assertEqual(sorted(self.cc2.media), ["picture/new.gcode20261119/%04d.jpeg" % index for index in range(3)])
+        self.assertEqual([task["task_name"] for task in self.cc2.history], ["new.gcode20261119"])
+        self.assertEqual(len(self.cc2.files), 2)      # the G-code is untouched
+
+    def test_cc2_video_cleanup_keeps_the_history_line_when_the_video_would_not_go(self):
+        self._cc2_film("exported.gcode20260901", 80, exported=True)
+        self.cc2.media_stuck.add("video/exported.gcode20260901.mp4")
+        self._read(self.p_cc2)
+        self.app.handle({"command": "cleanup", "kind": "videos", "printer_ids": [self.p_cc2["id"]]})
+        self.assertTrue(wait_for(lambda: not self.app.sends.get(self.p_cc2["id"], {"active": True})["active"]))
+        result = self.app.sends[self.p_cc2["id"]]
+        self.assertFalse(result["ok"], result)
+        self.assertIn("1 could not be removed", result["text"])
+        self.assertEqual(len(self.cc2.history), 1)
+
+    def test_cc2_video_cleanup_waits_for_an_idle_printer(self):
+        self._cc2_film("old.gcode20261001", 50)
+        self._read(self.p_cc2)
+        self.cc2.status_code = 2
+        self.app.handle({"command": "cleanup", "kind": "videos", "printer_ids": [self.p_cc2["id"]]})
+        self.assertTrue(wait_for(lambda: not self.app.sends.get(self.p_cc2["id"], {"active": True})["active"]))
+        self.assertFalse(self.app.sends[self.p_cc2["id"]]["ok"])
+        self.assertEqual(len(self.cc2.history), 1)
 
     def test_video_rule_is_saved_apart_from_the_gcode_rule(self):
         self.app.handle({"command": "save_cleanup", "rule": {"mode": "count", "keep": 12}})

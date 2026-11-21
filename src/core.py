@@ -580,6 +580,16 @@ CC2_GET_BASIC_INFO = 1002
 CC2_START_PRINT = 1020
 CC2_GET_FILE_LIST = 1044
 CC2_GET_CANVAS = 2005     # the rolls in the Canvas unit
+CC2_GET_HISTORY = 1036    # the last prints, each with the state of its time-lapse
+CC2_DELETE_HISTORY = 1038
+CC2_FRAME_LIMIT = 3000    # frames asked to be removed per recording (one frame per layer)
+CC2_FRAME_BATCH = 50
+# The printer keeps G-code in /opt/usr/gcode/local, finished videos in /opt/usr/video and the
+# frames of each print in /opt/usr/picture/<name>/0000.jpeg. Its delete-file command does not keep
+# to the G-code folder, which is the only way to reach the other two over the network. Verified
+# on two printers on 2026-11-21; a firmware update may close it.
+CC2_VIDEO_PATH = "../../video/%s.mp4"
+CC2_FRAME_PATH = "../../picture/%s/%04d.jpeg"
 CC2_GET_FILE_DETAIL = 1046
 CC2_DELETE_FILE = 1047
 CC2_DELETE_BATCH = 10      # files per delete request
@@ -767,6 +777,57 @@ class ElegooCC2:
             reply = session.request(CC2_DELETE_FILE, {"storage_media": "local", "file_path": [filename]})
         _cc2_check(reply, "Could not delete file")
 
+    def list_videos(self):
+        """The time-lapses the printer holds, one per finished print in its history that has frames
+        or a video: [{name, modified, size, video, task}]. size is 0 until a video was exported."""
+        with self._session() as session:
+            reply = session.request(CC2_GET_HISTORY, {}, timeout=15)
+        _cc2_check(reply, "Could not read the print history")
+        return cc2_recordings(reply.get("history_task_list") or [])
+
+    def _video_served(self, name):
+        """True when the printer hands out the exported video of this recording. A missing file
+        gets no answer at all, so this waits out the timeout."""
+        url = "http://%s/download?X-Token=%s&file_name=%s" % (
+            self.address, urllib.parse.quote(self.token), urllib.parse.quote("video/%s.mp4" % name))
+        try:
+            status, body = http_request(url, headers={"Accept": "*/*"}, timeout=8)
+        except FarmError:
+            return False
+        return status == 200 and len(body) > 0
+
+    def delete_videos(self, items, progress=None, cancelled=None):
+        """Remove each recording: its exported video, its frames, then its line in the history.
+
+        The names come from the printer's own history and were checked by cc2_recordings, because
+        the paths reach outside the G-code folder. The printer answers "ok" whether or not it
+        deleted anything, so an exported video is asked for again afterwards; when it is still
+        there, the history line is kept and the recording stays listed."""
+        items, done = list(items), 0
+        for item in items:
+            if cancelled is not None and cancelled():
+                break
+            name = cc2_safe_name(item.get("name"))
+            if not name or not item.get("task"):
+                continue
+            with self._session() as session:
+                if item.get("video"):
+                    session.request(CC2_DELETE_FILE, {"storage_media": "local", "file_path": [CC2_VIDEO_PATH % name]}, timeout=20)
+                for start in range(0, CC2_FRAME_LIMIT, CC2_FRAME_BATCH):
+                    if cancelled is not None and cancelled():
+                        break
+                    session.request(CC2_DELETE_FILE, {"storage_media": "local", "file_path": [
+                        CC2_FRAME_PATH % (name, index) for index in range(start, start + CC2_FRAME_BATCH)]}, timeout=20)
+            if cancelled is not None and cancelled():
+                break
+            if not (item.get("video") and self._video_served(name)):
+                with self._session() as session:
+                    _cc2_check(session.request(CC2_DELETE_HISTORY, {"list": [item["task"]]}, timeout=20), "Could not remove the history entry")
+            done += 1
+            if progress is not None:
+                progress(done, len(items))
+        return done
+
     def start_print(self, filename, options=None):
         """Start a file already on the printer. Returns which rolls it was told to print from
         ("roll 1"), or "" when none were named.
@@ -799,6 +860,43 @@ class ElegooCC2:
 
 
 _CC2_NO_ROLLS = set()
+
+
+def cc2_safe_name(name):
+    """The recording name when it is safe to put into a path on the printer, else "".
+
+    Nothing that could point anywhere but one entry of the video or picture folder: no folder
+    separators, no ".." and no control characters."""
+    name = str(name or "")
+    if not name or "/" in name or "\\" in name or ".." in name or name.startswith(".") or any(ord(char) < 32 for char in name):
+        return ""
+    return name
+
+
+def cc2_recordings(tasks):
+    """Time-lapses from a CC2 print history: finished prints that have frames or an exported video.
+
+    The printer reports "picture/<name>" for frames waiting to be exported and "video/<name>.mp4"
+    once exported. A print that is running or paused, or whose name is not safe, is left out."""
+    out = []
+    for task in tasks:
+        if not isinstance(task, dict) or task.get("task_status") not in (1, 2, 3):
+            continue
+        state, url = task.get("time_lapse_video_status"), str(task.get("time_lapse_video_url") or "")
+        if state not in (1, 2, 3) or "/" not in url:
+            continue
+        folder, name = url.split("/", 1)
+        if folder == "video" and name.lower().endswith(".mp4"):
+            name = name[:-4]
+        elif folder != "picture":
+            continue
+        name = cc2_safe_name(name)
+        if not name or not task.get("task_id"):
+            continue
+        out.append({"name": name, "modified": float(task.get("end_time") or task.get("begin_time") or 0),
+                    "size": int(task.get("time_lapse_video_size") or 0) if state == 2 else 0,
+                    "video": state == 2, "task": str(task["task_id"]), "parts": []})
+    return out
 
 
 def cc2_rolls(reply):

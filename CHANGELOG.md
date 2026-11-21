@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.10
+
+- **Clean up time-lapses on a Centauri Carbon 2.** The Videos tab now lists the time-lapses each CC2 holds (the frames of each finished print, plus its video if you exported one) and removes old ones under the same rule as the Snapmaker recordings, only when you click Clean up and only while the printer is idle. Removing one also removes that print from the printer's history list. This reaches the files through a path the printer does not officially offer, so a firmware update may stop it; an exported video is checked to be gone, frame deletions cannot be checked, and prints over 3000 layers keep their later frames.
+- Every button has an outline like the cards, including Upload and print. Details and Cancel on a card are small buttons where they were underlined text.
+- "In use" on a printer type is a label like "Idle". The stored-files box has a pencil next to refresh for changing the rule, and Clean up sits at the bottom of the box.
+
 ## 0.3.9
 
 - **Clean up time-lapse recordings (Snapmaker U1).** The stored-files box has two tabs, G-code and Videos. Videos counts the recordings each printer keeps and removes the old ones with their pictures. It has its own rule (newer than N days, or the newest N), separate from the one for G-code. Recordings are only removed when you click Clean up, never automatically; the dialog shows how many and how much space per printer first. The recording of a print that is running and the camera's live picture are always kept.

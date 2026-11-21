@@ -1279,7 +1279,10 @@ class FarmApp:
         try:
             client = make_client(printer, timeout=8)
             files = client.list_stored()
-            videos = client.list_videos() if hasattr(client, "list_videos") else None
+            try:
+                videos = client.list_videos() if hasattr(client, "list_videos") else None
+            except FarmError:
+                videos = None      # the G-code count still stands
             entry = self._set_storage(printer, files, videos=videos)
         except FarmError as error:
             self._set_storage(printer, error=str(error))
@@ -1349,6 +1352,8 @@ class FarmApp:
             if not hasattr(client, "list_videos"):
                 raise FarmError("Not cleaned: this printer's recordings cannot be listed.")
             status = client.status()      # asked now: the recording of the running print must be kept
+            if printer.get("kind") == KIND_CC2 and status.get("state") != "idle":
+                raise FarmError("Not cleaned: the printer is %s." % str(status.get("state_text") or status.get("state")).lower())
             videos = client.list_videos()
             if videos is None:
                 raise FarmError("Not cleaned: this printer's recordings cannot be listed.")

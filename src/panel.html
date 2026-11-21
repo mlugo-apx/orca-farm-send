@@ -13,10 +13,11 @@
   .spread { justify-content: space-between; }
   .muted { color: var(--orca-muted); }
   .small { font-size: 12px; }
-  button { cursor: pointer; }
-  button.quiet { background: transparent; color: var(--orca-fg); border: 1px solid var(--orca-border); }
+  button { cursor: pointer; border: 1px solid var(--fs-line); }   /* every button is outlined like the cards */
+  button.quiet { background: var(--fs-card); color: var(--orca-fg); border: 1px solid var(--fs-line); }
+  button.mini { padding: 1px 8px; font-size: 12px; flex: none; }
   button.danger { background: #c0392b; border-color: #c0392b; color: #fff; }
-  button:disabled { opacity: .45; cursor: default; }
+  button:disabled { opacity: .55; cursor: default; }
   .box { border: 1px solid var(--fs-line); background: var(--fs-card); border-radius: 6px; padding: 8px 10px; margin-top: 8px; }
   .card { border-left: 3px solid #999; }
   .card.st-idle { border-left-color: #2a9d55; } .card.st-printing { border-left-color: #2f7de1; }
@@ -777,7 +778,7 @@
     var anyCurrent = held.some(function (t) { return t.selected || (t.combo && t.combo.active); });
     html += "<div style='margin-top:7px'>" + state.types.map(function (type) {
       var jobs = platesFor(type), job = jobs[0], combo = type.combo, action = "";
-      if (combo && combo.active) action = "<span class='ok small'>in use</span>";
+      if (combo && combo.active) action = "<span class='pill st-idle' title='OrcaSlicer is set to these presets'>In use</span>";
       else if (combo) action = "<button type='button' class='quiet' data-combo-load='" + esc(type.key) + "'" +
                                (busy || !state.can_switch ? " disabled" : "") +
                                " title='Switch OrcaSlicer to the printer, process and filament remembered for this type'>Use presets</button>";
@@ -988,7 +989,7 @@
     if (sending) {
       if (sending.active) {
         sendLine = "<div class='small'>" + esc(sending.text) + "</div><div class='bar'><i style='width:" + Math.round(sending.percent || 0) + "%'></i></div>" +
-                   "<button type='button' class='linkish' data-cancel='" + esc(p.id) + "'>cancel</button>";
+                   "<button type='button' class='quiet mini' data-cancel='" + esc(p.id) + "'>Cancel</button>";
       } else {
         sendLine = "<div class='small " + (sending.ok ? "ok" : "err") + "'>" + esc(sending.text) + "</div>";
       }
@@ -1018,8 +1019,8 @@
         "<button type='button' class='quiet' data-upload='" + esc(p.id) + "'" + (uploadWhy ? " disabled" : "") + ">Upload</button>" +
         "<button type='button' data-start='" + esc(p.id) + "'" + (startWhy ? " disabled" : "") + ">Upload and print</button></div>") +
       "<div class='row spread small muted' style='margin-top:4px;gap:8px'><span>" + (group === "busy" && uploadWhy && startWhy ? "" : esc(hint)) + "</span>" +
-        (details ? "<button type='button' class='linkish' style='flex:none' data-details='" + esc(p.id) + "' title='Temperatures, loaded filament and the time of the last check'>" +
-                   (detailsOpen[p.id] ? "hide details" : "details") + "</button>" : "") + "</div>" +
+        (details ? "<button type='button' class='quiet mini' data-details='" + esc(p.id) + "' title='Temperatures, loaded filament and the time of the last check'>" +
+                   (detailsOpen[p.id] ? "Hide details" : "Details") + "</button>" : "") + "</div>" +
       "</div>";
   }
   function renderPrinters() {
@@ -1082,7 +1083,7 @@
     var rows = state.printers.map(function (p) {
       var st = storeOf(p), whole = state.storage[p.id];
       var detail;
-      if (st === null) detail = "<span class='muted'>" + (p.kind === "elegoo_cc2" ? "none: made on request only" : "none kept") + "</span>";
+      if (st === null) detail = "<span class='muted'>none to list</span>";
       else if (!st || st.count == null) detail = "<span class='muted'>" + esc(whole && whole.error ? whole.error : "counting...") + "</span>";
       else {
         removable += st.removable || 0;
@@ -1101,10 +1102,11 @@
         "</div><div class='row'>" +
         "<span class='small muted'>" + (counting ? "Counting..." : "") + "</span>" +
         "<button type='button' class='icon' id='clean-refresh' title='Count the stored files on every printer again' aria-label='Count the stored files again'>" + svg("refresh") + "</button>" +
-        "<button type='button' class='quiet' id='clean-open'" + (removable ? "" : " disabled") + ">Clean up" + (removable ? " (" + removable + ")" : "") + "</button></div></div>" +
+        "<button type='button' class='icon' id='clean-rule' title='Change which files are kept' aria-label='Change which files are kept'>" + svg("edit") + "</button></div></div>" +
       "<div class='row spread small muted' style='gap:8px;margin-top:2px'><span class='file'>Rule: " + esc(storeRule().text) +
         (storeRule().auto ? " \u00b7 automatic" : "") + "</span>" +
-        "<button type='button' class='linkish' style='flex:none' id='clean-rule'>change</button></div>" + rows;
+        "</div>" + rows +
+      "<div class='actions' style='justify-content:flex-end'><button type='button' class='quiet' id='clean-open'" + (removable ? "" : " disabled") + ">Clean up" + (removable ? " (" + removable + ")" : "") + "</button></div>";
     Array.prototype.forEach.call($("storage").querySelectorAll("button[data-store]"), function (button) {
       button.onclick = function () { storeView = button.dataset.store; renderStorage(); };
     });
@@ -1148,6 +1150,8 @@
     showDialog("<h4>" + (videos ? "Remove old time-lapse recordings from the printers?" : "Remove old files from the printers?") + "</h4>" +
       "<p class='small' style='margin:0 0 8px'>Rule: " + esc(storeRule().text) + ". " +
         (videos ? "Each recording goes with its pictures. The recording of a print that is running is always kept." : "The file a printer is printing is always kept.") + "</p>" + rows +
+      (videos && state.printers.some(function (p) { return p.kind === "elegoo_cc2" && (storeOf(p) || {}).removable; })
+        ? "<p class='small muted' style='margin:8px 0 0'>On a Centauri Carbon 2 a recording is the frames of one print, plus its video if you exported one. Removing it also removes that print from the printer's history list. The printer does not confirm frame deletions, and this uses a path the printer does not officially offer.</p>" : "") +
       "<p class='small warn' style='margin:10px 0 0'>" + (videos ? "Deleted recordings cannot be brought back. Copy any you want to keep off the printer first." : "Deleted files cannot be brought back.") + "</p>" +
       "<div class='dialog-actions'><button type='button' class='quiet' id='dlg-cancel'>Cancel</button>" +
       "<button type='button' class='danger' id='dlg-ok'" + (total ? "" : " disabled") + ">" + (videos ? "Delete old recordings" : "Delete old files") + "</button></div>");

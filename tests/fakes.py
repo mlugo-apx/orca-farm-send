@@ -193,6 +193,9 @@ class FakeCC2:
         self.start_requests = []
         # rolls in the Canvas unit as (color, type); [] = no Canvas connected; None = the printer never answers
         self.rolls = [("#000000", "PETG"), ("#FFFFFF", "PETG"), ("#898989", "PETG"), ("#F88D36", "PETG")]
+        self.history = []      # print history entries, as the printer lists them
+        self.media = set()     # files outside the G-code folder: "video/<name>.mp4", "picture/<name>/0000.jpeg"
+        self.media_stuck = set()   # media files the printer keeps although it answers "ok"
         self.roll_calls = 0
         outer = self
 
@@ -214,6 +217,18 @@ class FakeCC2:
                     self.send_response(401)
                     self.send_header("Content-Length", "0")
                     self.end_headers()
+                    return
+                if self.path.startswith("/download"):
+                    name = query.get("file_name", [""])[0]
+                    if name in outer.media:
+                        self.send_response(200)
+                        self.send_header("Content-Length", "4")
+                        self.end_headers()
+                        self.wfile.write(b"ftyp")
+                    else:      # the real printer gives no answer at all; a quick 404 keeps the tests fast
+                        self.send_response(404)
+                        self.send_header("Content-Length", "0")
+                        self.end_headers()
                     return
                 self._json(200, {"error_code": 0, "system_info": {"sn": outer.serial, "hostname": "FAKE", "machine_model": "Centauri Carbon 2",
                                                                     "software_version": {"ota_version": "1.0"}}})
@@ -364,6 +379,12 @@ class FakeCC2:
             result = {"error_code": 0, "machine_status": {"status": self.status_code, "progress": self.progress if self.progress is not None else (40 if printing else 0), "exception_status": []},
                       "print_status": {"filename": "busy.gcode" if printing else "", "remaining_time_sec": 1200, "state": "printing" if printing else ""},
                       "extruder": {"temperature": 250, "target": 250}, "heater_bed": {"temperature": 70, "target": 70}}
+        elif method == 1036:
+            result = {"error_code": 0, "history_task_list": list(self.history)}
+        elif method == 1038:
+            gone = set(params.get("list") or [])
+            self.history = [task for task in self.history if task["task_id"] not in gone]
+            result = {"error_code": 0}
         elif method == 2005:
             self.roll_calls += 1
             if self.rolls is None:
@@ -398,7 +419,10 @@ class FakeCC2:
             else:
                 self.delete_calls += 1
                 for path in paths:
-                    if path not in self.stuck:   # the real printer says "ok" even when it keeps a file
+                    if path.startswith("../../"):   # the real printer follows this out of the G-code folder
+                        if path[6:] not in self.media_stuck:
+                            self.media.discard(path[6:])
+                    elif path not in self.stuck:   # the real printer says "ok" even when it keeps a file
                         self.files.pop(path, None)
                 result = {"error_code": 0}
         else:
