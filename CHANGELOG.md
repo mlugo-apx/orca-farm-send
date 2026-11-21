@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.18
+
+- The orange "↻ 0.3.x" label is now a button: clicking it shows the steps to load the newer Farm Send. The hint on hover stays.
+
 ## 0.3.17
 
 - When a newer Farm Send is installed, the panel shows a small orange "↻ 0.3.x" label next to its title instead of a line of text. Hover over it to see how to load it.

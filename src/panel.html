@@ -64,7 +64,7 @@
 </style>
 
 <div class="row spread">
-  <h3 style="white-space:nowrap">Farm Send <span id="version" class="tiny muted" style="font-weight:normal" title="The Farm Send version this window is running"></span> <span id="newer" class="pill st-busy" style="display:none;font-weight:normal;cursor:help"></span></h3>
+  <h3 style="white-space:nowrap">Farm Send <span id="version" class="tiny muted" style="font-weight:normal" title="The Farm Send version this window is running"></span> <span id="newer" class="pill st-busy" role="button" tabindex="0" style="display:none;font-weight:normal;cursor:pointer"></span></h3>
   <div class="row">
     <button type="button" class="quiet" id="btn-refresh" title="Ask every printer for its status now">Refresh</button>
     <button type="button" class="quiet" id="btn-import" title="Add printers from your OrcaSlicer printer presets">Import</button>
@@ -194,6 +194,18 @@
   // ---- dialogs -----------------------------------------------------------------------------
   function showDialog(html) { $("dialog").innerHTML = html; $("overlay").className = "show"; }
   function hideDialog() { $("overlay").className = ""; $("dialog").innerHTML = ""; }
+  // The "newer version installed" pill: a click shows how to load it.
+  var newerInfo = null;
+  function showNewer() {
+    if (!newerInfo) return;
+    showDialog("<h4>Farm Send " + esc(newerInfo.installed) + " is installed</h4>" +
+      "<p class='small muted' style='margin:0'>This window still runs " + esc(newerInfo.running) + ". To load the new one:</p>" +
+      "<ol class='small' style='margin:8px 0 0;padding-left:20px'><li>Menu &gt; Plugins</li><li>Refresh</li>" +
+      "<li>Untick Farm Send, then tick it again</li><li>Run it with the arrow</li></ol>" +
+      "<p class='small muted' style='margin:8px 0 0'>Plates sliced in this window are dropped by the reload; slice again afterwards.</p>" +
+      "<div class='dialog-actions'><button type='button' class='quiet' id='dlg-cancel'>Close</button></div>");
+    $("dlg-cancel").onclick = hideDialog;
+  }
   $("overlay").addEventListener("click", function (event) { if (event.target === $("overlay")) hideDialog(); });
 
   function jobOf(printer) {
@@ -1247,6 +1259,8 @@
   $("auto-open").onchange = function () { send("set_auto_open", { on: this.checked }); };
   $("btn-refresh").onclick = function () { refresh(state.printers.map(function (p) { return p.id; })); recount(); };
   $("btn-import").onclick = function () { send("import_presets"); };
+  $("newer").onclick = showNewer;
+  $("newer").onkeydown = function (event) { if (event.key === "Enter" || event.key === " ") showNewer(); };
 
   orca.onMessage(function (message) {
     if (!message) return;
@@ -1257,7 +1271,8 @@
         $("newer").style.display = message.newer ? "" : "none";
         $("newer").textContent = message.newer ? "\u21bb " + message.newer : "";
         $("newer").title = message.newer ? "This window runs Farm Send " + (message.version || "") + "; " + message.newer + " is installed. To use it: Plugins > Refresh, untick and tick Farm Send, then run it." : "";
-        $("version").style.display = message.newer ? "none" : "";      // the pill takes its place: the header row has no room for both
+        $("version").style.display = message.newer ? "none" : "";
+        newerInfo = message.newer ? { installed: message.newer, running: message.version || "" } : null;      // the pill takes its place: the header row has no room for both
       }
       if (message.status) state.status = message.status;
       if (message.sends) state.sends = message.sends;
