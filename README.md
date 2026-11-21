@@ -2,13 +2,13 @@
 
 A docked panel for small print farms: slice a plate once per printer type, then upload it and start it on several printers at once, with live status for every printer.
 
-![Farm Send panel](docs/panel.png)
+<img src="docs/panel.png" alt="Farm Send panel: a 3DBenchy sliced for both printer types, five idle printers, two of them with Details open" width="362">
 
 - **Elegoo Centauri Carbon 2**: upload and start the print. Stock OrcaSlicer can upload to a Centauri Carbon 2 but cannot start it.
 - **Snapmaker U1**: upload and start the print, with bed leveling, flow calibration and time-lapse options.
 - **Other Moonraker / Klipper printers**: upload and a plain start. Not tested beyond the U1.
 
-Each printer card shows state, progress, time left with the expected finish time, temperatures and when it was last checked. Status updates on its own every few seconds; **Refresh** in the header asks every printer now, and the refresh icon on a card asks that one.
+Each printer card shows its state, and while printing its progress, time left and expected finish time. **Details** on a card adds temperatures, when it was last checked, and what is loaded: the rolls of a Centauri Carbon 2's Canvas unit or the four toolheads of a U1, as small tags with color and material. Status updates on its own every few seconds; **Refresh** in the header asks every printer now, and the refresh icon on a card asks that one. The version is shown next to the panel title.
 
 While the panel is open, OrcaSlicer shows a notification when a print finishes, is cancelled, pauses, or a printer stops with an error. The same note stays on the printer card until the printer moves on. Nothing is reported while OrcaSlicer is closed, and the notification appears inside OrcaSlicer, not as a system notification.
 
@@ -32,7 +32,7 @@ The printer protocols were worked out from the vendors' own clients, not from pu
 The panel reads top to bottom in the order you work:
 
 1. **Plates** has one row per printer type. Each row shows the plate held for that type (time, grams, layers, toolhead and color), or "Not sliced yet". Slice once for each type you want to print on.
-2. The printer list is grouped: **Needs attention** (paused, error, offline, or a finished print still on the bed), **Available** (idle with a clear bed) and **Busy** (one line each; click a line for details).
+2. The printer list is grouped: **Needs attention** (paused, error, offline, or a finished print still on the bed), **Available** (idle with a clear bed) and **Busy** (one line each; click a line for details). Each group folds with the arrow in front of its name, and each card folds with the arrow in its corner.
 3. On a printer card click **Upload**, or **Upload and print**, and confirm. The printer gets the plate sliced for its type.
 
 To send everything at once, click **select all available**, then **Upload and print on all**.
@@ -50,6 +50,8 @@ If a preset has unsaved edits, OrcaSlicer shows its normal save or discard dialo
 The plugin cannot press Slice for you.
 
 **Library**
+
+<img src="docs/library.png" alt="Library view: folders of kept plates, each with its printer type, time, grams and a Send button" width="346">
 
 For parts you print again and again. On a sliced plate's row click **Save**, name the item and enter how many parts are on the plate (the count is filled in when the G-code labels its parts). A plate already in the library shows **saved**.
 The plate is kept on this computer, in the plugin's own data folder, and survives closing the project and restarting OrcaSlicer.
@@ -86,11 +88,17 @@ After **Slice all**, every plate is held for its printer type, one line each; cl
 
 **Stored files and cleanup**
 
-The **Stored files** box at the bottom lists every printer with its file count, size and oldest file, and how many files count as old under your rule.
-**change** sets the rule: keep files newer than N days, or keep the newest N files. **Clean up** shows what will be removed per printer and asks before deleting.
+<img src="docs/videos.png" alt="Stored box on its Videos tab: recordings per printer, how many are old under the rule, and Clean up" width="346">
+
+The **Stored** box at the bottom lists every printer with its file count, size and oldest file, and how many files count as old under your rule.
+The pencil next to refresh sets the rule: keep files newer than N days, or keep the newest N files. **Clean up** shows what will be removed per printer and asks before deleting.
 The file a printer is printing is always kept. A Centauri Carbon 2 is only cleaned while idle. Deleted files cannot be brought back.
 
-The **Videos** tab of the same box does this for time-lapse recordings on Snapmaker U1s, with its own rule. Each recording is removed together with its pictures, only when you click Clean up. The recording of a print that is running and the camera's live picture are kept. On a Centauri Carbon 2 a recording is the frames of one finished print, plus its video if one was exported. Removing it also removes that print from the printer's history list, works only while the printer is idle, and relies on a path the printer does not officially offer (verified on two printers on 2026-11-21); a firmware update may stop it.
+The **Videos** tab of the same box does this for time-lapse recordings, with its own rule. Recordings are removed only when you click Clean up, never automatically.
+
+- **Snapmaker U1**: each recording is removed together with its pictures. The recording of a print that is running and the camera's live picture are kept.
+- **Centauri Carbon 2**: a recording is the frames of one finished print (one per layer), plus its video if one was exported. Farm Send reads the print's layer count from its G-code file and removes just those frames, usually in one request; when the G-code is already gone from the printer it removes the first 3000 frames. Removing a recording also removes that print from the printer's history list. It works only while the printer is idle and relies on a path the printer does not officially offer (verified on two printers on 2026-11-21), so a firmware update may stop it. Frame deletions cannot be checked one by one: the printer answers "ok" either way.
+
 "Clean automatically, once a day" is off by default and only runs while the panel is open, so it does not replace a scheduled job for an unattended farm.
 A Centauri Carbon 2 holding 250 or more files shows a warning on its card: uploads began failing on printers holding 355 and 516 files.
 
@@ -154,9 +162,9 @@ python3 tests/hardware_check.py --upload "U1 #2"   # 1 KB upload, list, delete. 
 
 ## What has been verified, and how
 
-Tested 2026-11-18 and 19 on OrcaSlicer 2.5.1 (Linux) with two Centauri Carbon 2s ("CC1", "CC2") and three Snapmaker U1s.
+Tested 2026-11-18 to 21 on OrcaSlicer 2.5.1 (Linux) with two Centauri Carbon 2s (called "CC1" and "CC2" in the older rows, "CC2-1" and "CC2-2" now) and three Snapmaker U1s.
 
-In-app checks ran in an OrcaSlicer instance on a hidden virtual display (Xvfb), started through the desktop launcher.
+The first in-app checks ran in an OrcaSlicer instance on a hidden virtual display (Xvfb), started through the desktop launcher. Since 2026-11-20 they run in a visible OrcaSlicer window.
 
 | What | How it was verified |
 |---|---|
@@ -182,3 +190,7 @@ In-app checks ran in an OrcaSlicer instance on a hidden virtual display (Xvfb), 
 | Slice for U1, switch presets, slice for CC2, both plates kept | Inside OrcaSlicer 2.5.1 |
 | "Use presets" switching printer, filament slots and process, both directions | Inside OrcaSlicer 2.5.1 |
 | Select all available, grouped confirmation | Inside OrcaSlicer 2.5.1, cancelled before sending |
+| CC2 prints from the roll the slicer names | Real CC2-1 and CC2-2: started with filament 1 sent to roll 1, both switched from roll 2 to roll 1 before the first layer (2026-11-20) |
+| U1 time-lapse clean-up | Real U1s, from the panel (2026-11-21) |
+| CC2 time-lapse clean-up | Real CC2-1: 24 recordings down to 21, G-code untouched (2026-11-21) |
+| CC2 frames end at the layer count | Real CC2-1: frames 0 to 41 of a 37-layer print removed in one request; asking the printer to export it afterwards made no video (2026-11-21) |
