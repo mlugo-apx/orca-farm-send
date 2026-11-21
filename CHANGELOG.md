@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.7
+
+- **Clearer printer cards.** Cards have a visible gray outline and a lighter fill, a colored edge and a state label for the printer's state (green idle, blue printing, amber needs attention, red error), and lighter text for the details. The finish time stands on its own at the right, and a folded busy printer shows a thin progress line. The rolls of a Centauri Carbon 2 are shown as small tags.
+- **Less on each card.** Temperatures, the rolls and the time of the last check are behind a "details" link on the card. A printer that is printing and cannot take a file no longer shows the two greyed-out send buttons.
+
 ## 0.3.6
 
 - **Fix: a Centauri Carbon 2 now prints from the roll the plate was sliced with.** Filament 1 prints from roll 1, filament 2 from roll 2, and so on. Before, the start named no roll and the printer reused the roll of its previous print, so a plate sliced with filament 1 could print from roll 2. The start message says which roll was named.

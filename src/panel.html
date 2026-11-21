@@ -1,5 +1,13 @@
 <style>
-  body { margin: 0; padding: 10px 12px 16px; font-size: 13px; line-height: 1.35; }
+  body { margin: 0; padding: 10px 12px 16px; font-size: 13px; line-height: 1.35;
+         --fs-line: var(--orca-border); --fs-card: transparent; --fs-soft: var(--orca-muted); }
+  /* Outline, card fill and secondary text are mixed from the theme's text color, so they follow light and dark. */
+  @supports (color: color-mix(in srgb, red 50%, blue)) {
+    body { --fs-line: color-mix(in srgb, var(--orca-fg) 26%, transparent); --fs-card: color-mix(in srgb, var(--orca-fg) 5%, transparent);
+           --fs-soft: color-mix(in srgb, var(--orca-fg) 72%, transparent); }
+  }
+  .soft { color: var(--fs-soft); }
+  .tiny { font-size: 11px; }
   h3 { margin: 0; font-size: 14px; }
   .row { display: flex; align-items: center; gap: 6px; }
   .spread { justify-content: space-between; }
@@ -9,7 +17,15 @@
   button.quiet { background: transparent; color: var(--orca-fg); border: 1px solid var(--orca-border); }
   button.danger { background: #c0392b; border-color: #c0392b; color: #fff; }
   button:disabled { opacity: .45; cursor: default; }
-  .box { border: 1px solid var(--orca-border); border-radius: 6px; padding: 8px 10px; margin-top: 8px; }
+  .box { border: 1px solid var(--fs-line); background: var(--fs-card); border-radius: 6px; padding: 8px 10px; margin-top: 8px; }
+  .card { border-left: 3px solid #999; }
+  .card.st-idle { border-left-color: #2a9d55; } .card.st-printing { border-left-color: #2f7de1; }
+  .card.st-paused, .card.st-attention, .card.st-busy { border-left-color: #c77700; } .card.st-error { border-left-color: #d0392b; }
+  .pill { font-size: 11px; padding: 1px 7px; border-radius: 9px; border: 1px solid var(--fs-line); color: var(--fs-soft); white-space: nowrap; }
+  .pill.st-idle { color: #2a9d55; border-color: #2a9d55; } .pill.st-printing { color: #5a9bec; border-color: #2f7de1; }
+  .pill.st-paused, .pill.st-attention, .pill.st-busy { color: #c77700; border-color: #c77700; } .pill.st-error { color: #d0392b; border-color: #d0392b; }
+  .chip { display: inline-block; border: 1px solid var(--fs-line); border-radius: 4px; padding: 0 5px; margin: 3px 4px 0 0; white-space: nowrap; }
+  .facts { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 2px 10px; margin-top: 2px; }
   .job-name { font-weight: 600; word-break: break-all; }
   .warn { color: #c77700; }
   .err { color: #d0392b; }
@@ -18,11 +34,13 @@
   .dot.idle { background: #2a9d55; } .dot.printing { background: #2f7de1; } .dot.paused { background: #c77700; }
   .dot.error { background: #d0392b; } .dot.offline { background: #888; } .dot.busy { background: #c77700; }
   .card-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .bar { height: 5px; background: var(--orca-border); border-radius: 3px; overflow: hidden; margin: 5px 0 3px; }
+  .bar { height: 5px; background: var(--fs-line); border-radius: 3px; overflow: hidden; margin: 5px 0 3px; }
+  .bar.thin { height: 3px; margin: 5px 0 0; }
   .bar > i { display: block; height: 100%; background: var(--orca-accent); width: 0; }
   .actions { display: flex; gap: 6px; margin-top: 7px; flex-wrap: wrap; }
   .file { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .group { margin: 14px 0 0; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--orca-muted); }
+  .group { margin: 14px 0 0; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--fs-soft); display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+  .group::after { content: ''; flex: 1; height: 1px; background: var(--fs-line); }
   .group + .box { margin-top: 5px; }
   .slim { padding: 6px 10px; cursor: pointer; }
   .type + .type { margin-top: 9px; padding-top: 9px; border-top: 1px solid var(--orca-border); }
@@ -73,6 +91,7 @@
   var selected = {};
   var expanded = {};   // busy printers shown as a full card instead of one line
   var groupShut = {};  // printer groups folded to their heading
+  var detailsOpen = {}; // printers whose card shows temperatures, rolls and the time of the last check
   var $ = function (id) { return document.getElementById(id); };
 
   function esc(value) {
@@ -915,13 +934,15 @@
     return (pct ? pct + " \u00b7 " : "") + (status.state === "paused" ? duration(status.remaining_s) + " left" : finishAt(status.remaining_s));
   }
   function slimCard(p, status) {
-    return "<div class='box slim' data-expand='" + esc(p.id) + "' title='Show details'>" +
+    var slimPct = status.state === "printing" && status.progress != null ? Math.round(status.progress) : null;
+    return "<div class='box slim card st-" + esc(status.state) + "' data-expand='" + esc(p.id) + "' title='Show details'>" +
       "<div class='row spread' data-expand='" + esc(p.id) + "'><div class='row' style='min-width:0' data-expand='" + esc(p.id) + "'>" +
         "<span class='dot " + esc(status.state) + "'></span><span class='card-title' data-expand='" + esc(p.id) + "'>" + esc(p.name) + "</span></div>" +
       "<div class='row' style='flex:none' data-expand='" + esc(p.id) + "'>" +
-      "<span class='small muted' style='white-space:nowrap' data-expand='" + esc(p.id) + "'>" +
+      "<span class='small soft' style='white-space:nowrap' data-expand='" + esc(p.id) + "'>" +
         esc(refreshing[p.id] ? "Checking..." : (status.state === "printing" ? progressText(status) || "Printing" : (status.state_text || status.state))) +
-      "</span><span class='chev' data-expand='" + esc(p.id) + "'>" + svg("down") + "</span></div></div></div>";
+      "</span><span class='chev' data-expand='" + esc(p.id) + "'>" + svg("down") + "</span></div></div>" +
+      (slimPct == null ? "" : "<div class='bar thin' data-expand='" + esc(p.id) + "'><i style='width:" + slimPct + "%'></i></div>") + "</div>";
   }
   function fullCard(p, status, group) {
     var sending = state.sends[p.id];
@@ -931,18 +952,22 @@
       var pct = status.progress == null ? null : Math.round(status.progress);
       lines += "<div class='file small' title='" + esc(status.filename) + "'>" + esc(status.filename) + "</div>" +
                "<div class='bar'><i style='width:" + (pct || 0) + "%'></i></div>" +
-               "<div class='row spread small muted'><span>" + (pct == null ? "" : pct + "%") + "</span><span>" +
-               (status.remaining_s == null ? "" : duration(status.remaining_s) + " left \u00b7 " +
-                 (status.state === "paused" ? "paused" : finishAt(status.remaining_s))) + "</span></div>";
+               "<div class='facts small'><span>" + (pct == null ? "" : "<b>" + pct + "%</b>") +
+               (status.remaining_s == null ? "" : "<span class='soft'> \u00b7 " + duration(status.remaining_s) + " left</span>") + "</span><span>" +
+               (status.remaining_s == null ? "" : (status.state === "paused" ? "paused" : finishAt(status.remaining_s))) + "</span></div>";
     }
-    var temps = [];
+    var main = lines, temps = [];
+    lines = "";
     if (status.nozzle) temps.push("Nozzle " + temp(status.nozzle));
     if (status.bed) temps.push("Bed " + temp(status.bed));
     var checked = status.checked_at ? "checked " + clock(new Date(status.checked_at * 1000), true) : "";
-    if (temps.length || checked) lines += "<div class='row spread small muted' style='flex-wrap:wrap'><span>" + temps.join(" \u00b7 ") +
-                                          "</span><span style='white-space:nowrap'>" + checked + "</span></div>";
+    if (temps.length || checked) lines += "<div class='facts small soft'><span>" + temps.join(" \u00b7 ") +
+                                          "</span><span class='tiny muted' style='white-space:nowrap'>" + checked + "</span></div>";
     if (p.kind === "elegoo_cc2" && (status.tools || []).length)   // the rolls in its Canvas unit, as the printer reports them
-      lines += "<div class='small muted'>Rolls: " + status.tools.map(function (t) { return t.slot + " " + swatch(t.color) + esc(t.type || ""); }).join(" \u00b7 ") + "</div>";
+      lines += "<div class='small soft'>" + status.tools.map(function (t) {
+        return "<span class='chip' title='Roll " + t.slot + "'>" + t.slot + " " + swatch(t.color) + esc(t.type || "") + "</span>"; }).join("") + "</div>";
+    var details = lines;
+    lines = main + (detailsOpen[p.id] ? details : "");
     if (status.notice) lines += "<div class='small " + (status.notice.level === "error" ? "err" : "ok") + "'>" + esc(status.notice.text) +
                                 " \u00b7 " + clock(new Date(status.notice.at * 1000), false) + "</div>";
     if (status.state === "offline" && status.detail) lines += "<div class='small muted'>" + esc(status.detail) + "</div>";
@@ -970,20 +995,24 @@
     // open, because the tick box only exists on the full card.
     var fold = group === "busy" && !selected[p.id] && !(sending && sending.active)
       ? " data-collapse='" + esc(p.id) + "' style='cursor:pointer' title='Collapse'" : "";
-    return "<div class='box'>" +
+    var look = status.needs_clearing ? "attention" : status.state;
+    return "<div class='box card st-" + esc(look) + "'>" +
       "<div class='row spread'><div class='row' style='min-width:0'>" +
         "<input type='checkbox' data-pick='" + esc(p.id) + "'" + (selected[p.id] ? " checked" : "") + " title='Select for sending to several printers'>" +
         "<span class='dot " + esc(status.needs_clearing ? "paused" : status.state) + "'" + fold + "></span>" +
         "<span class='card-title'" + fold + ">" + esc(p.name) + "</span></div>" +
-        "<div class='row'><span class='small muted'" + fold + ">" + esc(stateText) + "</span>" +
+        "<div class='row'><span class='pill st-" + esc(look) + "'" + fold + ">" + esc(stateText) + "</span>" +
         (fold ? iconButton("up", "data-collapse", p.id, "Collapse") : "") +
         iconButton("refresh", "data-refresh", p.id, "Refresh: ask this printer for its status now") +
         iconButton("edit", "data-edit", p.id, "Edit this printer") + "</div></div>" +
       lines + sendLine +
-      "<div class='actions'>" +
+      // A printer that is printing and cannot take anything shows no dead buttons.
+      (group === "busy" && uploadWhy && startWhy ? "" : "<div class='actions'>" +
         "<button type='button' class='quiet' data-upload='" + esc(p.id) + "'" + (uploadWhy ? " disabled" : "") + ">Upload</button>" +
-        "<button type='button' data-start='" + esc(p.id) + "'" + (startWhy ? " disabled" : "") + ">Upload and print</button></div>" +
-      (hint ? "<div class='small muted' style='margin-top:4px'>" + esc(hint) + "</div>" : "") +
+        "<button type='button' data-start='" + esc(p.id) + "'" + (startWhy ? " disabled" : "") + ">Upload and print</button></div>") +
+      "<div class='row spread small muted' style='margin-top:4px;gap:8px'><span>" + (group === "busy" && uploadWhy && startWhy ? "" : esc(hint)) + "</span>" +
+        (details ? "<button type='button' class='linkish' style='flex:none' data-details='" + esc(p.id) + "' title='Temperatures, loaded filament and the time of the last check'>" +
+                   (detailsOpen[p.id] ? "hide details" : "details") + "</button>" : "") + "</div>" +
       "</div>";
   }
   function renderPrinters() {
@@ -1110,7 +1139,8 @@
 
   $("printers").addEventListener("click", function (event) {
     var t = event.target, d = t.dataset || {};
-    if (d.groupToggle) { groupShut[d.groupToggle] = !groupShut[d.groupToggle]; renderPrinters(); }
+    if (d.details) { detailsOpen[d.details] = !detailsOpen[d.details]; renderPrinters(); }
+    else if (d.groupToggle) { groupShut[d.groupToggle] = !groupShut[d.groupToggle]; renderPrinters(); }
     else if (d.upload) confirmSend([byId(d.upload)], false);
     else if (d.start) confirmSend([byId(d.start)], true);
     else if (d.refresh) refresh([d.refresh]);
