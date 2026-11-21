@@ -10,7 +10,7 @@ import threading
 import time
 import uuid
 
-from core import (RunLog, run_result, toolhead_color_problem, count_objects, file_stamp, OrderBook, plan_order, CC2_MANY_FILES, nozzle_mismatch, toolhead_problem, write_private, file_md5, STORE_FILE, KIND_CC2, WATCHED_STATES, BedLog, FarmError, bed_needs_clearing, files_to_clean, rule_text,
+from core import (videos_to_clean, RunLog, run_result, toolhead_color_problem, count_objects, file_stamp, OrderBook, plan_order, CC2_MANY_FILES, nozzle_mismatch, toolhead_problem, write_private, file_md5, STORE_FILE, KIND_CC2, WATCHED_STATES, BedLog, FarmError, bed_needs_clearing, files_to_clean, rule_text,
                   storage_summary, PrinterStore, can_start, job_filename, make_client, model_key, model_matches,
                   parse_gcode_meta, preset_to_printer, presets_to_printers, set_shared_dir, status_event, strip_model_suffix, validate_printer)
 # BUNDLE-STRIP-END
@@ -383,6 +383,7 @@ class FarmApp:
                 "toolhead_names": list(self.orders.toolhead_names),
                 "storage": dict(self.storage),
                 "cleanup": dict(self.store.cleanup, text=rule_text(self.store.cleanup)),
+                "video_cleanup": dict(self.store.video_cleanup, text=rule_text(self.store.video_cleanup)),
                 "current": dict(self.current) if self.current else None,
                 "combo_note": dict(self.combo_note),
                 "can_switch": self._apply_presets is not None,
@@ -1244,18 +1245,30 @@ class FarmApp:
             return "printer is busy; it is cleaned when idle"
         return ""
 
-    def _set_storage(self, printer, files=None, error=""):
+    def _video_summary(self, printer_id, videos):
+        """Counts for a printer's time-lapse recordings; None when it keeps none we can list."""
+        if videos is None:
+            return None
+        old = videos_to_clean(videos, self.store.video_cleanup, (self.status.get(printer_id) or {}).get("filename"))
+        return dict(storage_summary(videos), removable=len(old), removable_bytes=sum(item.get("size") or 0 for item in old))
+
+    def _set_storage(self, printer, files=None, error="", videos=False):
+        """videos: the printer's recordings, None when it has none to list, False = unchanged."""
         printer_id = printer["id"]
         with self.lock:
             if self.store.get(printer_id) is None:
                 return None
+            before = self.storage.get(printer_id) or {}
             if files is None:
-                entry = dict(self.storage.get(printer_id) or {}, error=error)
+                entry = dict(before, error=error)
             else:
                 entry = storage_summary(files)
+                entry["videos"] = before.get("videos")
                 entry["removable"] = len(files_to_clean(files, self.store.cleanup, self._protected(printer_id)))
                 entry["many"] = printer.get("kind") == KIND_CC2 and entry["count"] >= CC2_MANY_FILES
                 entry["error"] = ""
+            if videos is not False:
+                entry["videos"] = self._video_summary(printer_id, videos)
             self.storage[printer_id] = entry
         self.post({"command": "storage", "id": printer_id, "storage": entry})
         return entry
@@ -1264,7 +1277,10 @@ class FarmApp:
         printer_id = printer["id"]
         entry = None
         try:
-            entry = self._set_storage(printer, make_client(printer, timeout=8).list_stored())
+            client = make_client(printer, timeout=8)
+            files = client.list_stored()
+            videos = client.list_videos() if hasattr(client, "list_videos") else None
+            entry = self._set_storage(printer, files, videos=videos)
         except FarmError as error:
             self._set_storage(printer, error=str(error))
         except Exception:
@@ -1287,7 +1303,10 @@ class FarmApp:
 
     def _cmd_save_cleanup(self, message):
         try:
-            self.store.set_cleanup(message.get("rule"))
+            if message.get("kind") == "videos":
+                self.store.set_video_cleanup(message.get("rule"))
+            else:
+                self.store.set_cleanup(message.get("rule"))
         except OSError as error:
             self._notify("error", "Farm Send: could not save the cleanup rule: %s" % (error.strerror or error))
         self.post_state()
@@ -1319,7 +1338,48 @@ class FarmApp:
                 self._set_send(printer_id, True, "Checking stored files...", percent=0)
                 work.append(dict(printer))
         for printer in work:
-            self._spawn(self._cleanup_worker, printer)
+            self._spawn(self._video_cleanup_worker if message.get("kind") == "videos" else self._cleanup_worker, printer)
+
+    def _video_cleanup_worker(self, printer):
+        """Remove the time-lapse recordings the video rule marks as old. Only ever started by hand."""
+        printer_id = printer["id"]
+        cancel = self._cancel.get(printer_id) or threading.Event()
+        try:
+            client = make_client(printer, timeout=8)
+            if not hasattr(client, "list_videos"):
+                raise FarmError("Not cleaned: this printer's recordings cannot be listed.")
+            status = client.status()      # asked now: the recording of the running print must be kept
+            videos = client.list_videos()
+            if videos is None:
+                raise FarmError("Not cleaned: this printer's recordings cannot be listed.")
+            chosen = videos_to_clean(videos, self.store.video_cleanup, status.get("filename"))
+            if not chosen:
+                self._set_send(printer_id, False, "No recordings to remove: %s." % rule_text(self.store.video_cleanup), ok=True)
+                self._set_storage(printer, videos=videos)
+                return
+
+            def progress(done, total):
+                self._set_send(printer_id, True, "Removing old recordings: %d of %d" % (done, total), percent=100.0 * done / max(1, total))
+
+            progress(0, len(chosen))
+            client.delete_videos(chosen, progress=progress, cancelled=cancel.is_set)
+            left = client.list_videos() or []     # count what is really gone
+            still = {item["name"] for item in left}
+            gone = [item for item in chosen if item["name"] not in still]
+            freed = sum(item.get("size") or 0 for item in gone) / 1048576.0
+            text = "Removed %d old recording%s (%.0f MB)" % (len(gone), "" if len(gone) == 1 else "s", freed)
+            if len(gone) < len(chosen):
+                text += ", %d could not be removed" % (len(chosen) - len(gone)) if not cancel.is_set() else ", stopped early"
+            self._set_send(printer_id, False, text, ok=len(gone) == len(chosen) or cancel.is_set())
+            self._set_storage(printer, videos=left)
+        except FarmError as error:
+            self._set_send(printer_id, False, str(error), ok=False)
+        except PermissionError:
+            self._set_send(printer_id, False, BLOCKED_TEXT, ok=False)
+        except Exception as error:
+            self._set_send(printer_id, False, "Unexpected error: %s" % error, ok=False)
+        finally:
+            self._cancel.pop(printer_id, None)
 
     def _cleanup_worker(self, printer, automatic=False):
         printer_id, name = printer["id"], printer["name"]

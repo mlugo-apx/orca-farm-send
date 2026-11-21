@@ -1248,6 +1248,29 @@ class Moonraker:
         http_json("http://%s/server/files/gcodes/%s" % (self.address, urllib.parse.quote(filename)), method="DELETE",
                   headers=self._headers(), timeout=self.timeout)
 
+    def list_videos(self):
+        """The time-lapse recordings a Snapmaker keeps, one entry per recording (see video_sets).
+        None when the printer has no camera folder to list."""
+        try:
+            reply = self._get("/server/files/list?root=camera", timeout=20)
+        except FarmError:
+            return None
+        return video_sets(reply.get("result") or [])
+
+    def delete_videos(self, items, progress=None, cancelled=None):
+        """Remove each recording with its pictures. Returns how many recordings were worked through."""
+        items, done = list(items), 0
+        for item in items:
+            if cancelled is not None and cancelled():
+                break
+            for part in item.get("parts") or []:
+                http_json("http://%s/server/files/camera/%s" % (self.address, urllib.parse.quote(part)), method="DELETE",
+                          headers=self._headers(), timeout=self.timeout)
+            done += 1
+            if progress is not None:
+                progress(done, len(items))
+        return done
+
     def upload(self, path, filename, progress=None, cancelled=None):
         size = os.path.getsize(path)
         if size <= 0:
@@ -1604,6 +1627,7 @@ class PrinterStore:
         self.printers = []
         self.combos = {}
         self.cleanup = dict(DEFAULT_CLEANUP)
+        self.video_cleanup = dict(DEFAULT_CLEANUP)
         self.auto_open = True
         self._stamp = None
         self.load()
@@ -1621,6 +1645,12 @@ class PrinterStore:
         self.cleanup = clean_rule(rule)
         self.save()
 
+    def set_video_cleanup(self, rule):
+        """The rule for time-lapse recordings. Recordings are only ever removed by hand."""
+        self.sync()
+        self.video_cleanup = dict(clean_rule(rule), auto=False)
+        self.save()
+
     def set_auto_open(self, value):
         self.sync()
         self.auto_open = bool(value)
@@ -1629,6 +1659,7 @@ class PrinterStore:
     def load(self):
         self.combos = {}
         self.cleanup = dict(DEFAULT_CLEANUP)
+        self.video_cleanup = dict(DEFAULT_CLEANUP)
         self.auto_open = True
         self._stamp = file_stamp(self.path)
         try:
@@ -1639,6 +1670,7 @@ class PrinterStore:
             if isinstance(combos, dict):
                 self.combos = {key: value for key, value in combos.items() if isinstance(value, dict) and value.get("printer")}
             self.cleanup = clean_rule(data.get("cleanup"))
+            self.video_cleanup = dict(clean_rule(data.get("video_cleanup")), auto=False)
             self.auto_open = data.get("auto_open") is not False
         except (OSError, ValueError, AttributeError):
             self.printers = []
@@ -1649,7 +1681,8 @@ class PrinterStore:
             # Created owner-only in one step: the file holds access codes, so it must never exist
             # with wider permissions, and O_NOFOLLOW refuses a symlink planted at the temp name.
             write_private(temp, json.dumps({"version": 1, "printers": self.printers, "combos": self.combos,
-                                            "cleanup": self.cleanup, "auto_open": self.auto_open}, indent=2))
+                                            "cleanup": self.cleanup, "video_cleanup": self.video_cleanup,
+                                            "auto_open": self.auto_open}, indent=2))
             os.replace(temp, self.path)
             self._stamp = file_stamp(self.path)
 
@@ -1741,6 +1774,44 @@ def files_to_clean(files, rule, protect=(), now=None):
         chosen = [item for item in newest_first if 0 < (item.get("modified") or 0) < limit]
     chosen = [item for item in chosen if os.path.basename(item["name"]) not in protected]
     return sorted(chosen, key=lambda item: item.get("modified") or 0)
+
+
+VIDEO_TYPES = (".mp4", ".jpg", ".jpeg", ".png")
+VIDEO_LIVE = ("monitor",)      # the camera's live picture: never a recording
+
+
+def video_sets(entries):
+    """Group a camera folder listing into recordings: [{name, modified, size, parts, video}].
+
+    A Snapmaker U1 writes each time-lapse as <print>_<time>.mp4 with <print>_<time>.jpg and
+    <print>_<time>_cover.jpg next to it; they are kept or removed together. Pictures whose video
+    is already gone form a recording of their own. The live camera picture is left out."""
+    sets = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        path = str(entry.get("path") or "")
+        base, kind = os.path.splitext(path)
+        if kind.lower() not in VIDEO_TYPES:
+            continue
+        stem = base[:-len("_cover")] if base.endswith("_cover") else base
+        if os.path.basename(stem).lower() in VIDEO_LIVE:
+            continue
+        item = sets.setdefault(stem, {"name": stem, "modified": 0.0, "size": 0, "parts": [], "video": False})
+        item["parts"].append(path)
+        item["size"] += int(entry.get("size") or 0)
+        item["modified"] = max(item["modified"], float(entry.get("modified") or 0))
+        item["video"] = item["video"] or kind.lower() == ".mp4"
+    return list(sets.values())
+
+
+def videos_to_clean(items, rule, running="", now=None):
+    """The recordings a rule removes, oldest first. The recording of the print that is running
+    (its name starts with the name of the file being printed) is never chosen."""
+    stem = os.path.splitext(os.path.basename(str(running or "")))[0]
+    if stem:
+        items = [item for item in items if not os.path.basename(item["name"]).startswith(stem)]
+    return files_to_clean(items, rule, (), now)
 
 
 def storage_summary(files):

@@ -89,6 +89,8 @@ After **Slice all**, every plate is held for its printer type, one line each; cl
 The **Stored files** box at the bottom lists every printer with its file count, size and oldest file, and how many files count as old under your rule.
 **change** sets the rule: keep files newer than N days, or keep the newest N files. **Clean up** shows what will be removed per printer and asks before deleting.
 The file a printer is printing is always kept. A Centauri Carbon 2 is only cleaned while idle. Deleted files cannot be brought back.
+
+The **Videos** tab of the same box does this for time-lapse recordings on Snapmaker U1s, with its own rule. Each recording is removed together with its pictures, only when you click Clean up. The recording of a print that is running and the camera's live picture are kept. A Centauri Carbon 2 makes a video only on request, so it has none to clean.
 "Clean automatically, once a day" is off by default and only runs while the panel is open, so it does not replace a scheduled job for an unattended farm.
 A Centauri Carbon 2 holding 250 or more files shows a warning on its card: uploads began failing on printers holding 355 and 516 files.
 

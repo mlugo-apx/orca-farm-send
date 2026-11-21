@@ -1376,6 +1376,74 @@ class AppTests(unittest.TestCase):
         self.assertEqual(core.rule_text({"mode": "count", "keep": 20}), "keep the newest 20 files")
         self.assertEqual(core.storage_summary(files)["count"], 5)
 
+    def _film(self, fake, name, days, cover=True):
+        """Put one time-lapse recording of the given age into a fake printer's camera folder."""
+        when = time.time() - days * 86400
+        fake.camera = fake.camera or {}
+        fake.camera[name + ".mp4"] = (when, 5000000)
+        fake.camera[name + ".jpg"] = (when, 1000)
+        if cover:
+            fake.camera[name + "_cover.jpg"] = (when, 2000)
+
+    def test_recordings_are_grouped_and_the_running_one_is_kept(self):
+        now = 1000 * 86400.0
+        sets = core.video_sets([{"path": "a_1.mp4", "modified": now - 50 * 86400, "size": 10},
+                                {"path": "a_1.jpg", "modified": now - 50 * 86400, "size": 1},
+                                {"path": "a_1_cover.jpg", "modified": now - 49 * 86400, "size": 2},
+                                {"path": "b_2.jpg", "modified": now - 70 * 86400, "size": 3},      # pictures left after its video went
+                                {"path": "monitor.jpg", "modified": now - 90 * 86400, "size": 4},  # the live picture
+                                {"path": "notes.txt", "modified": now - 90 * 86400, "size": 5}])
+        byname = {item["name"]: item for item in sets}
+        self.assertEqual(sorted(byname), ["a_1", "b_2"])
+        self.assertEqual((byname["a_1"]["size"], sorted(byname["a_1"]["parts"]), byname["a_1"]["video"]),
+                         (13, ["a_1.jpg", "a_1.mp4", "a_1_cover.jpg"], True))
+        self.assertEqual(byname["a_1"]["modified"], now - 49 * 86400)
+        rule = {"mode": "age", "days": 30}
+        self.assertEqual([item["name"] for item in core.videos_to_clean(sets, rule, now=now)], ["b_2", "a_1"])
+        self.assertEqual([item["name"] for item in core.videos_to_clean(sets, rule, running="a.gcode", now=now)], ["b_2"])
+
+    def test_video_cleanup_removes_old_recordings_and_leaves_gcode_alone(self):
+        self._stock(self.u1, [40, 90])
+        self._film(self.u1, "new_part_20260101", 2)
+        self._film(self.u1, "old_part_20250101", 45)
+        self._film(self.u1, "older_part_20240101", 120, cover=False)
+        self.u1.camera["monitor.jpg"] = (time.time() - 300 * 86400, 9000)
+        self._read(self.p_u1), self._read(self.p_cc2)
+        self.app.handle({"command": "save_cleanup", "kind": "videos", "rule": {"mode": "age", "days": 30, "auto": True}})
+        self.assertTrue(wait_for(lambda: (self.app.storage.get(self.p_u1["id"], {}).get("videos") or {}).get("removable") == 2
+                                 and "videos" in self.app.storage.get(self.p_cc2["id"], {})))
+        videos = self.app.storage[self.p_u1["id"]]["videos"]
+        self.assertEqual((videos["count"], videos["removable_bytes"]), (3, 5003000 + 5001000))
+        self.assertIsNone(self.app.storage[self.p_cc2["id"]]["videos"])          # a CC2 keeps none to list
+        self.assertFalse(self.app.store.video_cleanup["auto"])                   # recordings are never removed automatically
+        self.app.handle({"command": "cleanup", "kind": "videos", "printer_ids": [self.p_u1["id"]]})
+        self.assertTrue(wait_for(lambda: not self.app.sends.get(self.p_u1["id"], {"active": True})["active"]))
+        result = self.app.sends[self.p_u1["id"]]
+        self.assertTrue(result["ok"], result)
+        self.assertIn("Removed 2 old recordings (10 MB)", result["text"])
+        self.assertEqual(sorted(self.u1.camera), ["monitor.jpg", "new_part_20260101.jpg", "new_part_20260101.mp4", "new_part_20260101_cover.jpg"])
+        self.assertEqual(len(self.u1.files), 2)                                  # the G-code is untouched
+        self.assertEqual(self.app.storage[self.p_u1["id"]]["videos"]["removable"], 0)
+        self.assertEqual(self.app.storage[self.p_u1["id"]]["removable"], 2)      # and still counted under its own rule
+
+    def test_video_cleanup_keeps_the_recording_of_the_running_print(self):
+        self._film(self.u1, "busy_20250101", 60)       # the fake prints busy.gcode
+        self._film(self.u1, "other_20250101", 60)
+        self.u1.state = "printing"
+        self._read(self.p_u1)
+        self.app.handle({"command": "cleanup", "kind": "videos", "printer_ids": [self.p_u1["id"]]})
+        self.assertTrue(wait_for(lambda: not self.app.sends.get(self.p_u1["id"], {"active": True})["active"]))
+        self.assertIn("Removed 1 old recording ", self.app.sends[self.p_u1["id"]]["text"])
+        self.assertEqual(sorted(self.u1.camera), ["busy_20250101.jpg", "busy_20250101.mp4", "busy_20250101_cover.jpg"])
+
+    def test_video_rule_is_saved_apart_from_the_gcode_rule(self):
+        self.app.handle({"command": "save_cleanup", "rule": {"mode": "count", "keep": 12}})
+        self.app.handle({"command": "save_cleanup", "kind": "videos", "rule": {"mode": "age", "days": 7}})
+        other = FarmApp(self.folder.name, lambda message: None)
+        self.assertEqual((other.store.cleanup["mode"], other.store.cleanup["keep"]), ("count", 12))
+        self.assertEqual((other.store.video_cleanup["mode"], other.store.video_cleanup["days"]), ("age", 7))
+        self.assertEqual(self.app.snapshot()["video_cleanup"]["text"], "keep files newer than 7 days")
+
     def test_cleanup_rule_is_saved(self):
         self.app.handle({"command": "save_cleanup", "rule": {"mode": "count", "keep": 12}})
         other = FarmApp(self.folder.name, lambda message: None)

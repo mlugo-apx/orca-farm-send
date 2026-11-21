@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.9
+
+- **Clean up time-lapse recordings (Snapmaker U1).** The stored-files box has two tabs, G-code and Videos. Videos counts the recordings each printer keeps and removes the old ones with their pictures. It has its own rule (newer than N days, or the newest N), separate from the one for G-code. Recordings are only removed when you click Clean up, never automatically; the dialog shows how many and how much space per printer first. The recording of a print that is running and the camera's live picture are always kept.
+- A Centauri Carbon 2 keeps no finished videos to clean: it makes one only when asked to.
+
 ## 0.3.8
 
 - A Snapmaker card now lists what each toolhead holds, as small tags under "details", the same way a Centauri Carbon 2 card lists its rolls. An empty toolhead says so.

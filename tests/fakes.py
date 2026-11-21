@@ -14,6 +14,7 @@ class FakeMoonraker:
     def __init__(self, api_key="", snapmaker=False):
         self.files, self.started, self.state, self.api_key = {}, [], "standby", api_key
         self.file_times = {}   # file name -> modified time, for cleanup tests
+        self.camera = None     # camera folder: file name -> (modified, size); None = the printer has no such folder
         self.estimated_time, self.metadata_calls = None, 0   # slicer estimate served as file metadata
         self.snapmaker, self.start_options = snapmaker, []
         self.objects, self.excluded, self.ignore_skips, self.cancels = [], [], False, 0   # labelled parts and skips
@@ -101,6 +102,12 @@ class FakeMoonraker:
                 elif self.path.startswith("/server/files/metadata") and outer.estimated_time is not None:
                     outer.metadata_calls += 1
                     self._json(200, {"result": {"estimated_time": outer.estimated_time}})
+                elif self.path.startswith("/server/files/list?root=camera"):
+                    if outer.camera is None:
+                        self._json(400, {"error": {"message": "Invalid root"}})
+                    else:
+                        self._json(200, {"result": [{"path": name, "modified": when, "size": size}
+                                                    for name, (when, size) in outer.camera.items()]})
                 elif self.path.startswith("/server/files/list"):
                     self._json(200, {"result": [{"path": name, "modified": outer.file_times.get(name, 0), "size": len(data)}
                                                 for name, data in outer.files.items()]})
@@ -154,7 +161,10 @@ class FakeMoonraker:
 
             def do_DELETE(self):
                 name = urllib.parse.unquote(self.path.rsplit("/", 1)[1])
-                outer.files.pop(name, None)
+                if "/files/camera/" in self.path:
+                    (outer.camera or {}).pop(name, None)
+                else:
+                    outer.files.pop(name, None)
                 self._json(200, {"result": {}})
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
