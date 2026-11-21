@@ -315,6 +315,50 @@ class CC2Tests(unittest.TestCase):
         self.assertNotIn("bedlevel_force", first["config"])
         self.assertTrue(second["config"]["bedlevel_force"])
 
+    def test_start_names_the_roll_of_each_filament(self):
+        self.fake.files["a.gcode"] = b"x"
+        self.assertEqual(self.client.start_print("a.gcode", {"filament_slots": [1]}), "roll 1")
+        self.assertEqual(self.fake.start_requests[-1]["config"]["slot_map"], [{"t": 0, "canvas_id": 0, "tray_id": 0}])
+        self.fake.status_code = 1
+        self.assertEqual(self.client.start_print("a.gcode", {"filament_slots": [3, 2]}), "rolls 2, 3")
+        self.assertEqual(self.fake.start_requests[-1]["config"]["slot_map"],
+                         [{"t": 1, "canvas_id": 0, "tray_id": 1}, {"t": 2, "canvas_id": 0, "tray_id": 2}])
+        self.fake.status_code = 1
+        self.assertEqual(self.client.start_print("a.gcode", {"filament_slots": [1], "toolhead_map": {1: 2}}), "roll 2")
+        self.assertEqual(self.fake.start_requests[-1]["config"]["slot_map"], [{"t": 0, "canvas_id": 0, "tray_id": 1}])
+
+    def test_start_without_rolls_names_none(self):
+        self.fake.files["a.gcode"] = b"x"
+        self.assertEqual(self.client.start_print("a.gcode"), "")                  # file with unknown filaments
+        self.assertNotIn("slot_map", self.fake.start_requests[-1]["config"])
+        self.fake.status_code, self.fake.rolls = 1, []                             # no Canvas unit
+        self.assertEqual(self.client.start_print("a.gcode", {"filament_slots": [1]}), "")
+        self.assertNotIn("slot_map", self.fake.start_requests[-1]["config"])
+
+    def test_start_refuses_a_filament_without_a_roll(self):
+        self.fake.files["a.gcode"] = b"x"
+        self.fake.rolls = self.fake.rolls[:2]
+        with self.assertRaises(core.FarmError) as caught:
+            self.client.start_print("a.gcode", {"filament_slots": [1, 3]})
+        self.assertIn("no roll 3", str(caught.exception))
+        self.assertEqual(self.fake.started, [])
+
+    def test_printer_that_never_reports_rolls_is_asked_once(self):
+        core._CC2_NO_ROLLS.discard(self.client.host)
+        self.addCleanup(core._CC2_NO_ROLLS.discard, self.client.host)
+        self.fake.files["a.gcode"] = b"x"
+        self.fake.rolls = None
+        self.assertEqual(self.client.status()["tools"], [])
+        self.assertEqual(self.client.status()["tools"], [])
+        self.assertEqual(self.fake.roll_calls, 1)
+        self.assertEqual(self.client.start_print("a.gcode", {"filament_slots": [1]}), "")
+        self.assertEqual(self.fake.started, ["a.gcode"])
+
+    def test_status_lists_the_rolls(self):
+        tools = self.client.status()["tools"]
+        self.assertEqual([t["slot"] for t in tools], [1, 2, 3, 4])
+        self.assertEqual(tools[0], {"slot": 1, "color": "#000000", "type": "PETG", "loaded": True})
+
     def test_start_errors(self):
         with self.assertRaises(core.FarmError) as caught:
             self.client.start_print("missing.gcode")
@@ -1457,6 +1501,9 @@ class AppTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual(self.cc2.started, list(self.cc2.files))
         self.assertEqual(self.u1.files, {})
+        # the test plate prints with filament 2 only, so the printer is told: tool 1 from roll 2
+        self.assertEqual(self.cc2.start_requests[-1]["config"]["slot_map"], [{"t": 1, "canvas_id": 0, "tray_id": 1}])
+        self.assertIn("from roll 2", result["text"])
 
     def test_print_refused_when_busy_but_file_stays(self):
         self.u1.state = "printing"

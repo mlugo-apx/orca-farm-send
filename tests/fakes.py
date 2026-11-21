@@ -181,6 +181,9 @@ class FakeCC2:
         self.register_error = "ok"
         self.registered, self.max_clients = set(), 3
         self.start_requests = []
+        # rolls in the Canvas unit as (color, type); [] = no Canvas connected; None = the printer never answers
+        self.rolls = [("#000000", "PETG"), ("#FFFFFF", "PETG"), ("#898989", "PETG"), ("#F88D36", "PETG")]
+        self.roll_calls = 0
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -351,6 +354,14 @@ class FakeCC2:
             result = {"error_code": 0, "machine_status": {"status": self.status_code, "progress": self.progress if self.progress is not None else (40 if printing else 0), "exception_status": []},
                       "print_status": {"filename": "busy.gcode" if printing else "", "remaining_time_sec": 1200, "state": "printing" if printing else ""},
                       "extruder": {"temperature": 250, "target": 250}, "heater_bed": {"temperature": 70, "target": 70}}
+        elif method == 2005:
+            self.roll_calls += 1
+            if self.rolls is None:
+                return
+            result = {"error_code": 0, "canvas_info": {"active_canvas_id": 0, "active_tray_id": 1, "canvas_list": [
+                {"canvas_id": 0, "connected": 1 if self.rolls else 0, "tray_list": [
+                    {"tray_id": index, "filament_color": color, "filament_type": kind, "status": 1}
+                    for index, (color, kind) in enumerate(self.rolls)]}]}}
         elif method == 1020:
             self.start_requests.append(params)
             if params.get("filename") not in self.files:

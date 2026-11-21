@@ -20,7 +20,7 @@ Farm Send uses OrcaSlicer's Python plugin system (OrcaSlicer 2.5.1 or newer), wh
 |---|---|
 | Developed and tested on | Linux, OrcaSlicer 2.5.1 |
 | Windows, macOS | **Not tested.** Reports welcome |
-| Centauri Carbon 2 | Tested on two printers, single-filament jobs. Multi-color jobs through the multi-color unit are not tested |
+| Centauri Carbon 2 | Tested on two printers, single-filament jobs. Slicer filament slot N prints from roll N of the Canvas unit (verified with slot 1 on two printers). Multi-color jobs are not tested |
 | Snapmaker U1 | Tested on three printers, firmware 2.1.2. Slicer filament slot N prints on toolhead N |
 
 The printer protocols were worked out from the vendors' own clients, not from published specifications. A firmware update can break them.
@@ -66,6 +66,8 @@ Verified on a U1 up to the point where the printer heats the chosen toolhead; a 
 
 In the library send dialog, **Parts to print per printer** defaults to the full plate. Enter less and the printer is told to skip the other parts as it starts; the panel reports the start only after the printer confirms, and cancels the print if it does not. So one full plate in the library covers any quantity.
 This works when the plate's parts are labelled one by one in the G-code and that number equals the parts count you entered. The kept parts are the first ones in the plate's own order. The time and grams shown are still those of the full plate.
+On a Centauri Carbon 2 with a Canvas unit, the start tells the printer which roll each filament number prints from: filament 1 from roll 1, and so on. Left unsaid, the printer reuses the rolls of its previous print. The card lists the rolls as the printer reports them; their colors are the ones entered on the printer and are not compared with the sliced color. A different roll cannot be chosen in the send dialog yet.
+
 A Centauri Carbon 2 prints whole plates only, so keep a small plate for it if you want small quantities there.
 
 **Orders**

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.6
+
+- **Fix: a Centauri Carbon 2 now prints from the roll the plate was sliced with.** Filament 1 prints from roll 1, filament 2 from roll 2, and so on. Before, the start named no roll and the printer reused the roll of its previous print, so a plate sliced with filament 1 could print from roll 2. The start message says which roll was named.
+- A Centauri Carbon 2 card lists the rolls in its Canvas unit, as the printer reports them. The colors are the ones entered on the printer.
+- A plate that prints with a filament number the printer has no roll for is not started.
+- The printer groups (Needs attention, Available, Busy) fold: click a heading to hide or show its printers. A folded group still shows a printer that is selected or sending.
+
 ## 0.3.5
 
 - Clicking **Bed cleared** now also removes the note about how the last print ended, so a free printer no longer shows its previous file.

@@ -72,6 +72,7 @@
                 library: [], folders: [], orders: [], order_plates: {}, toolhead_names: ["", "", "", ""], storage: {}, cleanup: { mode: "age", days: 30, keep: 50, auto: false, text: "" } };
   var selected = {};
   var expanded = {};   // busy printers shown as a full card instead of one line
+  var groupShut = {};  // printer groups folded to their heading
   var $ = function (id) { return document.getElementById(id); };
 
   function esc(value) {
@@ -940,6 +941,8 @@
     var checked = status.checked_at ? "checked " + clock(new Date(status.checked_at * 1000), true) : "";
     if (temps.length || checked) lines += "<div class='row spread small muted' style='flex-wrap:wrap'><span>" + temps.join(" \u00b7 ") +
                                           "</span><span style='white-space:nowrap'>" + checked + "</span></div>";
+    if (p.kind === "elegoo_cc2" && (status.tools || []).length)   // the rolls in its Canvas unit, as the printer reports them
+      lines += "<div class='small muted'>Rolls: " + status.tools.map(function (t) { return t.slot + " " + swatch(t.color) + esc(t.type || ""); }).join(" \u00b7 ") + "</div>";
     if (status.notice) lines += "<div class='small " + (status.notice.level === "error" ? "err" : "ok") + "'>" + esc(status.notice.text) +
                                 " \u00b7 " + clock(new Date(status.notice.at * 1000), false) + "</div>";
     if (status.state === "offline" && status.detail) lines += "<div class='small muted'>" + esc(status.detail) + "</div>";
@@ -991,14 +994,18 @@
     $("printers").innerHTML = ["attention", "available", "busy"].map(function (name) {
       var list = groups[name];
       if (!list.length && (name === "attention" || !state.printers.length)) return "";
+      var shut = !!groupShut[name], hidden = 0;
       var body = list.map(function (p) {
         var status = state.status[p.id] || { state: "unknown", state_text: "Checking..." };
+        // A folded group still shows a printer that is selected or in the middle of a send.
+        if (shut && !selected[p.id] && !(state.sends[p.id] && state.sends[p.id].active)) { hidden++; return ""; }
         // A busy printer is one line, unless opened, selected or in the middle of a send.
         var slim = name === "busy" && !expanded[p.id] && !selected[p.id] && !(state.sends[p.id] && state.sends[p.id].active);
         return slim ? slimCard(p, status) : fullCard(p, status, name);
       }).join("");
-      return "<div class='group'>" + titles[name] + " (" + list.length + ")</div>" +
-             (body || "<div class='small muted' style='margin-top:5px'>" + (name === "available" ? "No printer is free right now." : "Nothing is printing.") + "</div>");
+      return "<div class='group' data-group-toggle='" + name + "' style='cursor:pointer' title='Click to " + (shut ? "show" : "hide") + " these printers'>" +
+             (shut ? "\u25b8 " : "\u25be ") + titles[name] + " (" + list.length + ")</div>" +
+             (shut && hidden ? body : (body || "<div class='small muted' style='margin-top:5px'>" + (name === "available" ? "No printer is free right now." : "Nothing is printing.") + "</div>"));
     }).join("");
   }
 
@@ -1103,7 +1110,8 @@
 
   $("printers").addEventListener("click", function (event) {
     var t = event.target, d = t.dataset || {};
-    if (d.upload) confirmSend([byId(d.upload)], false);
+    if (d.groupToggle) { groupShut[d.groupToggle] = !groupShut[d.groupToggle]; renderPrinters(); }
+    else if (d.upload) confirmSend([byId(d.upload)], false);
     else if (d.start) confirmSend([byId(d.start)], true);
     else if (d.refresh) refresh([d.refresh]);
     else if (d.cleared) bedCleared(d.cleared);

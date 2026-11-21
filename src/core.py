@@ -579,6 +579,7 @@ CC2_STATUS_TEXT = {
 CC2_GET_BASIC_INFO = 1002
 CC2_START_PRINT = 1020
 CC2_GET_FILE_LIST = 1044
+CC2_GET_CANVAS = 2005     # the rolls in the Canvas unit
 CC2_GET_FILE_DETAIL = 1046
 CC2_DELETE_FILE = 1047
 CC2_DELETE_BATCH = 10      # files per delete request
@@ -702,7 +703,20 @@ class ElegooCC2:
 
     def status(self):
         with self._session() as session:
-            return normalize_cc2_status(session.request(CC2_GET_BASIC_INFO, {}))
+            out = normalize_cc2_status(session.request(CC2_GET_BASIC_INFO, {}))
+            out["tools"] = [{key: roll[key] for key in ("slot", "color", "type", "loaded")} for roll in self._rolls(session)]
+            return out
+
+    def _rolls(self, session):
+        """The rolls in the Canvas unit, or [] for a printer without one. A printer that does not
+        answer the question is not asked again by this window."""
+        if self.host in _CC2_NO_ROLLS:
+            return []
+        try:
+            return cc2_rolls(session.request(CC2_GET_CANVAS, {}, timeout=5))
+        except FarmError:
+            _CC2_NO_ROLLS.add(self.host)
+            return []
 
     def raw_status(self):
         with self._session() as session:
@@ -754,6 +768,13 @@ class ElegooCC2:
         _cc2_check(reply, "Could not delete file")
 
     def start_print(self, filename, options=None):
+        """Start a file already on the printer. Returns which rolls it was told to print from
+        ("roll 1"), or "" when none were named.
+
+        options["filament_slots"] lists the filament numbers the G-code prints with. Each is sent to
+        the roll of the same number (or the one options["toolhead_map"] names). Without that, the
+        printer reuses the roll assignment of its previous print: a plate sliced with filament 1
+        printed from roll 2 on two printers because their last print had used roll 2."""
         options = options or {}
         config = {
             "delay_video": bool(options.get("timelapse", False)),
@@ -761,12 +782,62 @@ class ElegooCC2:
             "print_layout": options.get("plate", "A"),
         }
         params = {"filename": filename, "storage_media": "local", "config": config}
+        named = ""
         with self._session() as session:
+            slots = options.get("filament_slots") or []
+            rolls = self._rolls(session) if slots else []
+            if rolls:
+                config["slot_map"] = cc2_slot_map(rolls, slots, options.get("toolhead_map"))
+                numbers = [str(row["tray_id"] + 1) for row in config["slot_map"]]
+                named = "roll%s %s" % ("" if len(numbers) == 1 else "s", ", ".join(numbers))
             reply = session.request(CC2_START_PRINT, params, timeout=20)
             if reply.get("error_code") == CC2_ERR_BED_MESH_MISSING:
                 config["bedlevel_force"] = True
                 reply = session.request(CC2_START_PRINT, params, timeout=20)
         _cc2_check(reply, "Printer refused to start the print")
+        return named
+
+
+_CC2_NO_ROLLS = set()
+
+
+def cc2_rolls(reply):
+    """The rolls a CC2 reports in its Canvas unit: [{slot, color, type, loaded, canvas, tray}], slot from 1.
+
+    [] when no Canvas unit is connected. The color is what was entered on the printer, from Elegoo's
+    fixed list, so it can differ from the real spool."""
+    for unit in ((reply or {}).get("canvas_info") or {}).get("canvas_list") or []:
+        if not unit.get("connected"):
+            continue
+        rolls = []
+        for tray in unit.get("tray_list") or []:
+            if not isinstance(tray.get("tray_id"), int):
+                continue
+            color = str(tray.get("filament_color") or "")
+            rolls.append({"slot": tray["tray_id"] + 1, "color": color if re.match(r"^#[0-9A-Fa-f]{6}$", color) else "",
+                          "type": str(tray.get("filament_type") or ""), "loaded": True,
+                          "canvas": unit.get("canvas_id", 0), "tray": tray["tray_id"]})
+        return rolls
+    return []
+
+
+def cc2_slot_map(rolls, slots, mapping=None):
+    """The rows that tell a CC2 which roll each G-code tool prints from: [{t, canvas_id, tray_id}].
+
+    slots are the filament numbers the G-code uses, from 1; mapping is {filament number: roll} for
+    the ones that should print from another roll. Verified on two CC2s: started with tool 0 sent to
+    roll 1, both changed their active roll from 2 to 1 before the first layer."""
+    have = {roll["slot"]: roll for roll in rolls}
+    rows = []
+    for slot in sorted({int(slot) for slot in slots}):
+        try:
+            roll = int((mapping or {}).get(slot, (mapping or {}).get(str(slot), slot)))
+        except (TypeError, ValueError):
+            roll = slot
+        if roll not in have:
+            raise FarmError("Not started: the plate prints with filament %d and the printer reports no roll %d." % (slot, roll))
+        rows.append({"t": slot - 1, "canvas_id": have[roll]["canvas"], "tray_id": have[roll]["tray"]})
+    return rows
 
 
 def _cc2_check(reply, what):

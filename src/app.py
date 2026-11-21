@@ -701,7 +701,8 @@ class FarmApp:
                 self._cancel[printer_id] = threading.Event()
                 self._set_send(printer_id, True, "Preparing...", percent=0)
                 work.append((dict(printer), {"path": job["path"], "name": names[job["id"]],
-                                             "item": self._job_base_name(job)}))
+                                             "item": self._job_base_name(job),
+                                             "slots": [f.get("slot") for f in job["meta"].get("filaments") or []]}))
         for printer, snapshot in work:
             self._spawn(self._send_worker, printer, snapshot, start, options)
 
@@ -738,9 +739,12 @@ class FarmApp:
             status = client.status()
             if not can_start(status):
                 raise FarmError("Uploaded, but not started: the printer is %s." % status.get("state_text", status.get("state")).lower())
-            how = client.start_print(remote, options)
+            # Which filament numbers the file prints with: a CC2 is told which roll each one uses.
+            how = client.start_print(remote, dict(options or {}, filament_slots=[s for s in snapshot.get("slots") or [] if s]))
             note = ""
-            if how == "standard":
+            if how and how.startswith("roll"):
+                note = " from %s" % how
+            elif how == "standard":
                 # Only Snapmaker firmware takes start options. Say so instead of implying they applied.
                 note = ". This printer does not accept start options, so bed leveling and time-lapse follow its own settings"
             if snapshot.get("keep"):
@@ -1087,7 +1091,8 @@ class FarmApp:
                     else:
                         for filament in used:   # printing as sliced: every toolhead it uses must be usable
                             problem = problem or toolhead_problem(tools, filament.get("slot"), filament.get("type"))
-                        if not problem and not mine.get("any_color"):
+                        # A CC2's roll colors are picked from a fixed list on the printer, so they are not compared.
+                        if not problem and not mine.get("any_color") and printer.get("kind") != KIND_CC2:
                             # As sliced means the sliced color. A swapped spool is caught here unless the
                             # user confirmed the loaded color in the dialog.
                             for filament in used:
@@ -1107,6 +1112,7 @@ class FarmApp:
                 self._cancel[printer_id] = threading.Event()
                 self._set_send(printer_id, True, "Preparing...", percent=0)
                 snapshot = {"path": entry["path"], "name": name, "item": entry.get("item", ""),
+                            "slots": [f.get("slot") for f in entry.get("filaments") or []],
                             "parts": entry.get("parts"), "source": "order" if order_id else "library",
                             "toolhead": int(toolhead) if toolhead and printer.get("kind") != KIND_CC2 else None}
                 if fewer:
