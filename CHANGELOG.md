@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.12
+
+- **Faster Centauri Carbon 2 time-lapse clean-up.** The printer saves one frame per layer, so Farm Send now reads each print's layer count from its G-code file and removes just those frames, usually in one request (well under a second) where it used to take 12 to 20 seconds per print. Tried on a CC2: after removing the frames up to the layer count plus 5, the printer could no longer make a video of that print. When the G-code has already been removed from the printer, the clean-up removes the first 3000 frames as before. Layer counts are read when the Videos tab lists the recordings and kept until Orca closes, so a later G-code clean-up does not lose them.
+
 ## 0.3.11
 
 - The panel shows its version next to the title, so you can see which build a window is running.

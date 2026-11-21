@@ -582,7 +582,8 @@ CC2_GET_FILE_LIST = 1044
 CC2_GET_CANVAS = 2005     # the rolls in the Canvas unit
 CC2_GET_HISTORY = 1036    # the last prints, each with the state of its time-lapse
 CC2_DELETE_HISTORY = 1038
-CC2_FRAME_LIMIT = 3000    # frames asked to be removed per recording (one frame per layer)
+CC2_FRAME_LIMIT = 3000    # frames asked to be removed when the print's layer count is unknown
+CC2_FRAME_SLACK = 5       # frames past the layer count, in case the printer takes a few more
 CC2_FRAME_BATCH = 50
 # The printer keeps G-code in /opt/usr/gcode/local, finished videos in /opt/usr/video and the
 # frames of each print in /opt/usr/picture/<name>/0000.jpeg. Its delete-file command does not keep
@@ -779,11 +780,36 @@ class ElegooCC2:
 
     def list_videos(self):
         """The time-lapses the printer holds, one per finished print in its history that has frames
-        or a video: [{name, modified, size, video, task}]. size is 0 until a video was exported."""
+        or a video: [{name, modified, size, video, task, layers}]. size is 0 until a video was
+        exported; layers is the print's layer count, or 0 when its G-code is no longer stored."""
         with self._session() as session:
             reply = session.request(CC2_GET_HISTORY, {}, timeout=15)
         _cc2_check(reply, "Could not read the print history")
-        return cc2_recordings(reply.get("history_task_list") or [])
+        found = cc2_recordings(reply.get("history_task_list") or [])
+        self._add_layers(found)
+        return found
+
+    def _add_layers(self, recordings):
+        """Fill in each recording's layer count from its G-code file, which the printer makes one
+        frame per layer from. Counts are kept for this window, so they are read while the G-code is
+        still there: a later G-code clean-up removes them from the printer."""
+        known = _CC2_LAYERS.setdefault(self.host, {})
+        missing = [item for item in recordings if item["task"] not in known and item.get("gcode")]
+        if missing:
+            try:
+                stored = {entry["name"] for entry in self.list_stored()}
+                with self._session() as session:
+                    for item in missing:
+                        if item["gcode"] not in stored:
+                            known[item["task"]] = 0
+                            continue
+                        reply = session.request(CC2_GET_FILE_DETAIL, {"storage_media": "local", "filename": item["gcode"]}, timeout=10)
+                        layers = reply.get("layer") if reply.get("error_code", 0) in (0, None) else None
+                        known[item["task"]] = layers if isinstance(layers, int) and 0 < layers < CC2_MAX_LAYERS else 0
+            except FarmError:
+                pass      # the ones not read yet are tried at the next listing
+        for item in recordings:
+            item["layers"] = known.get(item["task"], 0)
 
     def _video_served(self, name):
         """True when the printer hands out the exported video of this recording. A missing file
@@ -798,6 +824,8 @@ class ElegooCC2:
 
     def delete_videos(self, items, progress=None, cancelled=None):
         """Remove each recording: its exported video, its frames, then its line in the history.
+        The frames are asked for up to the print's layer count when it is known (one request for
+        most prints), else up to CC2_FRAME_LIMIT.
 
         The names come from the printer's own history and were checked by cc2_recordings, because
         the paths reach outside the G-code folder. The printer answers "ok" whether or not it
@@ -813,11 +841,12 @@ class ElegooCC2:
             with self._session() as session:
                 if item.get("video"):
                     session.request(CC2_DELETE_FILE, {"storage_media": "local", "file_path": [CC2_VIDEO_PATH % name]}, timeout=20)
-                for start in range(0, CC2_FRAME_LIMIT, CC2_FRAME_BATCH):
+                frames = item["layers"] + CC2_FRAME_SLACK if item.get("layers") else CC2_FRAME_LIMIT
+                for start in range(0, frames, CC2_FRAME_BATCH):
                     if cancelled is not None and cancelled():
                         break
                     session.request(CC2_DELETE_FILE, {"storage_media": "local", "file_path": [
-                        CC2_FRAME_PATH % (name, index) for index in range(start, start + CC2_FRAME_BATCH)]}, timeout=20)
+                        CC2_FRAME_PATH % (name, index) for index in range(start, min(frames, start + CC2_FRAME_BATCH))]}, timeout=20)
             if cancelled is not None and cancelled():
                 break
             if not (item.get("video") and self._video_served(name)):
@@ -860,6 +889,8 @@ class ElegooCC2:
 
 
 _CC2_NO_ROLLS = set()
+_CC2_LAYERS = {}           # {printer address: {history task id: layer count, 0 when unknown}}
+CC2_MAX_LAYERS = 20000
 
 
 def cc2_safe_name(name):
@@ -895,7 +926,8 @@ def cc2_recordings(tasks):
             continue
         out.append({"name": name, "modified": float(task.get("end_time") or task.get("begin_time") or 0),
                     "size": int(task.get("time_lapse_video_size") or 0) if state == 2 else 0,
-                    "video": state == 2, "task": str(task["task_id"]), "parts": []})
+                    "video": state == 2, "task": str(task["task_id"]), "parts": [],
+                    "gcode": str(task.get("task_name") or "")})
     return out
 
 

@@ -1436,10 +1436,10 @@ class AppTests(unittest.TestCase):
         self.assertIn("Removed 1 old recording ", self.app.sends[self.p_u1["id"]]["text"])
         self.assertEqual(sorted(self.u1.camera), ["busy_20250101.jpg", "busy_20250101.mp4", "busy_20250101_cover.jpg"])
 
-    def _cc2_film(self, name, days, exported=False, status=1):
+    def _cc2_film(self, name, days, exported=False, status=1, gcode=None):
         """One finished print with time-lapse frames in the fake CC2's history, optionally exported."""
         when = int(time.time() - days * 86400)
-        self.cc2.history.append({"task_id": "id-" + name, "task_name": name, "begin_time": when - 600, "end_time": when,
+        self.cc2.history.append({"task_id": "id-" + name, "task_name": gcode or name, "begin_time": when - 600, "end_time": when,
                                  "task_status": status, "time_lapse_video_status": 2 if exported else 1,
                                  "time_lapse_video_url": ("video/%s.mp4" if exported else "picture/%s") % name,
                                  "time_lapse_video_size": 1000000 if exported else 0, "time_lapse_video_duration": 1})
@@ -1479,6 +1479,26 @@ class AppTests(unittest.TestCase):
         self.assertEqual(sorted(self.cc2.media), ["picture/new.gcode20261119/%04d.jpeg" % index for index in range(3)])
         self.assertEqual([task["task_name"] for task in self.cc2.history], ["new.gcode20261119"])
         self.assertEqual(len(self.cc2.files), 2)      # the G-code is untouched
+
+    def test_cc2_video_cleanup_asks_only_for_frames_up_to_the_layer_count(self):
+        core._CC2_LAYERS.clear()
+        self.cc2.files["counted.gcode"] = b"G28\n"
+        self.cc2.layers["counted.gcode"] = 2
+        self._cc2_film("counted.gcode20261001", 50, gcode="counted.gcode")
+        self._cc2_film("gone.gcode20261002", 50, gcode="gone.gcode")      # its G-code is no longer stored
+        client = core.make_client(self.p_cc2, timeout=5)
+        found = {item["name"]: item for item in client.list_videos()}
+        self.assertEqual(found["counted.gcode20261001"]["layers"], 2)
+        self.assertEqual(found["gone.gcode20261002"]["layers"], 0)
+        self.cc2.delete_calls = 0
+        client.delete_videos([found["counted.gcode20261001"]])
+        self.assertEqual(self.cc2.delete_calls, 1)       # frames 0-6 in one request
+        self.cc2.delete_calls = 0
+        client.delete_videos([found["gone.gcode20261002"]])
+        self.assertEqual(self.cc2.delete_calls, core.CC2_FRAME_LIMIT // core.CC2_FRAME_BATCH)
+        self.assertEqual(self.cc2.media, set())
+        self.assertEqual(self.cc2.history, [])
+        self.assertIn("counted.gcode", self.cc2.files)   # the G-code is untouched
 
     def test_cc2_video_cleanup_keeps_the_history_line_when_the_video_would_not_go(self):
         self._cc2_film("exported.gcode20260901", 80, exported=True)

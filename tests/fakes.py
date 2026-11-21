@@ -196,6 +196,7 @@ class FakeCC2:
         self.history = []      # print history entries, as the printer lists them
         self.media = set()     # files outside the G-code folder: "video/<name>.mp4", "picture/<name>/0000.jpeg"
         self.media_stuck = set()   # media files the printer keeps although it answers "ok"
+        self.layers = {}       # {G-code name: layer count} that file details report
         self.roll_calls = 0
         outer = self
 
@@ -381,6 +382,9 @@ class FakeCC2:
                       "extruder": {"temperature": 250, "target": 250}, "heater_bed": {"temperature": 70, "target": 70}}
         elif method == 1036:
             result = {"error_code": 0, "history_task_list": list(self.history)}
+        elif method == 1046:
+            name = params.get("filename")
+            result = {"error_code": 0, "filename": name, "layer": self.layers.get(name, 10)} if name in self.files else {"error_code": 1021}
         elif method == 1038:
             gone = set(params.get("list") or [])
             self.history = [task for task in self.history if task["task_id"] not in gone]
