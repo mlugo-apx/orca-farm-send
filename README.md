@@ -39,6 +39,7 @@ To send everything at once, click **select all available**, then **Upload and pr
 The U1s get the U1 plate and the CC2s get the CC2 plate, in one action.
 
 The plugin keeps its own copy of each slice, because OrcaSlicer overwrites its temp G-code on the next slice.
+A slice for a printer model that has no printer in Farm Send is ignored: nothing is shown and nothing is kept. Add the printer first, then slice.
 Slicing again for a type replaces that type's plate only.
 You can re-arrange the bed between types: the "plate changed" warning only ever applies to the most recent slice. Copies are deleted when the project closes.
 

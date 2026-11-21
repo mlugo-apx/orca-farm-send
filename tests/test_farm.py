@@ -1697,6 +1697,20 @@ class AppTests(unittest.TestCase):
         self.assertEqual(next(iter(self.cc2.files.values())).decode(), CC2_GCODE)
         self.assertEqual((len(self.u1.started), len(self.u1b.started), len(self.cc2.started)), (1, 1, 1))
 
+    def test_a_slice_for_a_printer_outside_the_farm_leaves_no_trace(self):
+        u1_job = self.slice(U1_GCODE)
+        other = U1_GCODE.replace("printer_model = Snapmaker U1", "printer_model = Anycubic Kobra 2 Max")
+        path = write(self.orca_tmp.name, ".1.0.gcode", other)
+        self.app.current = {"model": "Anycubic Kobra 2 Max"}
+        self.app.on_slice_started()
+        self.assertFalse(self.app.snapshot()["slicing"])          # not announced while it slices
+        self.app.on_gcode_exported(path, "")
+        self.assertTrue(wait_for(lambda: [job["id"] for job in self.app.jobs] == [u1_job["id"]]))
+        self.assertEqual(len(self.copies()), 1)                   # only the U1 plate's copy
+        snapshot = self.app.snapshot()
+        self.assertNotIn("anycubic", " ".join(row["key"] for row in snapshot["types"]))
+        self.assertEqual(snapshot["job_for"][self.p_u1["id"]], u1_job["id"])   # the U1 plate is still the one sent
+
     def test_cc2_upload_and_print(self):
         self.slice(CC2_GCODE)
         (result,) = self.send([self.p_cc2], start=True)

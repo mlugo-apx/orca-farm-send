@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.15
+
+- A plate sliced for a printer that is not in Farm Send (one you use on its own) no longer shows up in the panel, and no copy of it is kept. The plates held for your farm's printer types stay as they were. To use a new printer type with Farm Send, add the printer first, then slice.
+
 ## 0.3.14
 
 - When a newer Farm Send has been installed while an OrcaSlicer window still runs the older one, the panel says so at the top, with how to load it: Plugins > Refresh, untick and tick Farm Send, then run it. Each window notes its version in the plugin's storage folder when it starts, and the panel looks there about once a minute; nothing is sent anywhere.
