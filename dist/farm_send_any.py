@@ -3743,6 +3743,7 @@ PANEL_HTML = r"""<style>
                 library: [], folders: [], orders: [], order_plates: {}, toolhead_names: ["", "", "", ""], storage: {}, cleanup: { mode: "age", days: 30, keep: 50, auto: false, text: "" } };
   var selected = {};
   var expanded = {};   // busy printers shown as a full card instead of one line
+  var collapsed = {};  // available and needs-attention printers folded to one line
   var groupShut = {};  // printer groups folded to their heading
   var detailsOpen = {}; // printers whose card shows temperatures, rolls and the time of the last check
   var $ = function (id) { return document.getElementById(id); };
@@ -4588,12 +4589,13 @@ PANEL_HTML = r"""<style>
   }
   function slimCard(p, status) {
     var slimPct = status.state === "printing" && status.progress != null ? Math.round(status.progress) : null;
-    return "<div class='box slim card st-" + esc(status.state) + "' data-expand='" + esc(p.id) + "' title='Show details'>" +
+    return "<div class='box slim card st-" + esc(status.needs_clearing ? "attention" : status.state) + "' data-expand='" + esc(p.id) + "' title='Show details'>" +
       "<div class='row spread' data-expand='" + esc(p.id) + "'><div class='row' style='min-width:0' data-expand='" + esc(p.id) + "'>" +
-        "<span class='dot " + esc(status.state) + "'></span><span class='card-title' data-expand='" + esc(p.id) + "'>" + esc(p.name) + "</span></div>" +
+        "<span class='dot " + esc(status.needs_clearing ? "paused" : status.state) + "'></span><span class='card-title' data-expand='" + esc(p.id) + "'>" + esc(p.name) + "</span></div>" +
       "<div class='row' style='flex:none' data-expand='" + esc(p.id) + "'>" +
       "<span class='small soft' style='white-space:nowrap' data-expand='" + esc(p.id) + "'>" +
-        esc(refreshing[p.id] ? "Checking..." : (status.state === "printing" ? progressText(status) || "Printing" : (status.state_text || status.state))) +
+        esc(refreshing[p.id] ? "Checking..." : (status.state === "printing" ? progressText(status) || "Printing" :
+            (status.needs_clearing ? "Finished: clear the bed" : (status.state_text || status.state)))) +
       "</span><span class='chev' data-expand='" + esc(p.id) + "'>" + svg("down") + "</span></div></div>" +
       (slimPct == null ? "" : "<div class='bar thin' data-expand='" + esc(p.id) + "'><i style='width:" + slimPct + "%'></i></div>") + "</div>";
   }
@@ -4650,7 +4652,7 @@ PANEL_HTML = r"""<style>
     var stateText = refreshing[p.id] ? "Checking..." : (status.needs_clearing ? "Finished" : (status.state_text || status.state));
     // An opened busy card closes the way it opened: click its name or state. A ticked card stays
     // open, because the tick box only exists on the full card.
-    var fold = group === "busy" && !selected[p.id] && !(sending && sending.active)
+    var fold = !selected[p.id] && !(sending && sending.active)
       ? " data-collapse='" + esc(p.id) + "' style='cursor:pointer' title='Collapse'" : "";
     var look = status.needs_clearing ? "attention" : status.state;
     return "<div class='box card st-" + esc(look) + "'>" +
@@ -4686,7 +4688,8 @@ PANEL_HTML = r"""<style>
         // A folded group still shows a printer that is selected or in the middle of a send.
         if (shut && !selected[p.id] && !(state.sends[p.id] && state.sends[p.id].active)) { hidden++; return ""; }
         // A busy printer is one line, unless opened, selected or in the middle of a send.
-        var slim = name === "busy" && !expanded[p.id] && !selected[p.id] && !(state.sends[p.id] && state.sends[p.id].active);
+        // Any other printer is a full card, unless folded by hand.
+        var slim = (name === "busy" ? !expanded[p.id] : !!collapsed[p.id]) && !selected[p.id] && !(state.sends[p.id] && state.sends[p.id].active);
         return slim ? slimCard(p, status) : fullCard(p, status, name);
       }).join("");
       return "<div class='group' data-group-toggle='" + name + "' style='cursor:pointer' title='Click to " + (shut ? "show" : "hide") + " these printers'>" +
@@ -4802,8 +4805,8 @@ PANEL_HTML = r"""<style>
     else if (d.start) confirmSend([byId(d.start)], true);
     else if (d.refresh) refresh([d.refresh]);
     else if (d.cleared) bedCleared(d.cleared);
-    else if (d.collapse) { delete expanded[d.collapse]; renderPrinters(); }
-    else if (d.expand) { expanded[d.expand] = true; renderPrinters(); }
+    else if (d.collapse) { delete expanded[d.collapse]; collapsed[d.collapse] = true; renderPrinters(); }
+    else if (d.expand) { expanded[d.expand] = true; delete collapsed[d.expand]; renderPrinters(); }
     else if (d.edit) editPrinter(byId(d.edit));
     else if (d.cancel) send("cancel_send", { id: d.cancel });
     else if (d.pick) { selected[d.pick] = t.checked; renderMulti(); renderPrinters(); }

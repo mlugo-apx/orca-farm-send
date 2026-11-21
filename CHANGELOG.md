@@ -3,6 +3,7 @@
 ## 0.3.8
 
 - A Snapmaker card now lists what each toolhead holds, as small tags under "details", the same way a Centauri Carbon 2 card lists its rolls. An empty toolhead says so.
+- Every printer card folds to one line and opens again, not only the busy ones: click the name, the state label or the arrow.
 
 ## 0.3.7
 
