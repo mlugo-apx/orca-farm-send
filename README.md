@@ -18,7 +18,7 @@ Farm Send uses OrcaSlicer's Python plugin system (OrcaSlicer 2.5.1 or newer), wh
 
 | | |
 |---|---|
-| Developed and tested on | Linux, OrcaSlicer 2.5.1 |
+| Developed and tested on | Linux, OrcaSlicer 2.5.1 and 2.5.2 (2.5.2 checked 2026-11-21: plugin loads, live status, slice capture) |
 | Windows, macOS | **Not tested.** Reports welcome |
 | Centauri Carbon 2 | Tested on two printers, single-filament jobs. Slicer filament slot N prints from roll N of the Canvas unit (verified with slot 1 on two printers). Multi-color jobs are not tested |
 | Snapmaker U1 | Tested on three printers, firmware 2.1.2. Slicer filament slot N prints on toolhead N |
