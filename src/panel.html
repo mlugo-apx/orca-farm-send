@@ -64,14 +64,13 @@
 </style>
 
 <div class="row spread">
-  <h3 style="white-space:nowrap">Farm Send <span id="version" class="tiny muted" style="font-weight:normal" title="The Farm Send version this window is running"></span></h3>
+  <h3 style="white-space:nowrap">Farm Send <span id="version" class="tiny muted" style="font-weight:normal" title="The Farm Send version this window is running"></span> <span id="newer" class="pill st-busy" style="display:none;font-weight:normal;cursor:help"></span></h3>
   <div class="row">
     <button type="button" class="quiet" id="btn-refresh" title="Ask every printer for its status now">Refresh</button>
     <button type="button" class="quiet" id="btn-import" title="Add printers from your OrcaSlicer printer presets">Import</button>
     <button type="button" class="quiet" id="btn-add" title="Add a printer by address">Add</button>
   </div>
 </div>
-<p class="small warn" id="newer" style="display:none;margin:4px 0 8px"></p>
 
 <div class="box" id="job"></div>
 <div id="multi" class="box" style="display:none"></div>
@@ -1256,7 +1255,9 @@
       if (message.version) $("version").textContent = (/^\d/.test(message.version) ? "v" : "") + message.version;
       if ("newer" in message) {
         $("newer").style.display = message.newer ? "" : "none";
-        $("newer").textContent = message.newer ? "Farm Send " + message.newer + " is installed. To use it: Plugins > Refresh, untick and tick Farm Send, then run it." : "";
+        $("newer").textContent = message.newer ? "\u21bb " + message.newer : "";
+        $("newer").title = message.newer ? "This window runs Farm Send " + (message.version || "") + "; " + message.newer + " is installed. To use it: Plugins > Refresh, untick and tick Farm Send, then run it." : "";
+        $("version").style.display = message.newer ? "none" : "";      // the pill takes its place: the header row has no room for both
       }
       if (message.status) state.status = message.status;
       if (message.sends) state.sends = message.sends;

@@ -120,7 +120,7 @@ A Centauri Carbon 2 holding 250 or more files shows a warning on its card: uploa
 3. Expand the row and click the run arrow. The panel docks to the right of the 3D view.
 4. **Import** pulls printers from the printer presets OrcaSlicer has loaded (address and access code). **Add** adds one by hand; **Test connection** fills in the model.
 
-To load a newer build into a running OrcaSlicer: Plugins > **Refresh**, untick and tick Farm Send, then run it. The panel shows a line at the top when a newer version has been installed than the one the window is running.
+To load a newer build into a running OrcaSlicer: Plugins > **Refresh**, untick and tick Farm Send, then run it. When a newer version has been installed than the one the window is running, an orange "↻ 0.3.x" label replaces the version next to the panel title; hover over it for these steps.
 
 From then on the panel opens by itself when OrcaSlicer starts. It opens once per session, so closing it keeps it closed. Untick **Open this panel when OrcaSlicer starts** at the bottom of the panel to open it only from the Plugins dialog.
 After adding a printer, OrcaSlicer asks for network access to it the next time the plugin loads.

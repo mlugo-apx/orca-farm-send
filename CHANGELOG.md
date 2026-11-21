@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.17
+
+- When a newer Farm Send is installed, the panel shows a small orange "↻ 0.3.x" label next to its title instead of a line of text. Hover over it to see how to load it.
+
 ## 0.3.16
 
 - A printer whose bed still holds a print now says how that print ended: "Stopped" for one stopped partway (it used to say "Finished"), "Cancelled", or "Finished". When the panel did not see the print end, it uses what the printer reports, or "Print on bed".
