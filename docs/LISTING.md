@@ -31,6 +31,12 @@ Farm Send is a docked panel for small print farms. Slice a plate once per printe
 - Every plate of a multi-plate project is held after Slice all.
 - Print history: what was started on which printer and how it ended, with a CSV copy.
 
+**What it reads and where it goes**
+
+- It reads your OrcaSlicer presets: which printer, process and filament presets are selected, and, when you click Import, your own printer presets (name, model, nozzle size, address and access code or API key). OrcaSlicer has no permission prompt for reading presets, so nothing asks you.
+- It connects only to the printer addresses you save, on your own network, to send files and commands. Nothing read from your presets goes anywhere else: no cloud, no telemetry, no update check.
+- Printer access codes are kept as plain text in the plugin's own storage folder, readable only by your user account.
+
 Early release. Developed and tested on Linux with two Centauri Carbon 2s and three Snapmaker U1s (firmware 2.1.2). Windows and macOS are untested; reports welcome. It talks only to the printer addresses you save: no cloud, no telemetry.
 
 Found a problem, or want something added? Click **Report a problem or request an enhancement** at the bottom of the panel and open an issue at https://github.com/mlugo-apx/orca-farm-send/issues
