@@ -2,6 +2,7 @@
 import base64
 import hashlib
 import json
+import os
 import re
 import socket
 import struct
@@ -63,6 +64,14 @@ class FakeMoonraker:
                     self.wfile.flush()
 
                 push({"jsonrpc": "2.0", "method": "notify_proc_stat_update", "params": [{}]})   # unrelated chatter first
+                if call["method"] == "camera.delete_timelapse_instance":
+                    stamp = "_" + str(call["params"].get("date_index"))
+                    gone = [name for name in (outer.camera or {})
+                            if os.path.splitext(name)[0].replace("_cover", "").endswith(stamp)]
+                    for name in gone:
+                        outer.camera.pop(name)
+                    push({"jsonrpc": "2.0", "id": call["id"], "result": {"deleted_count": 1 if gone else 0, "state": "success"}})
+                    return
                 if call["method"] != "server.files.start_local_print":
                     push({"jsonrpc": "2.0", "id": call["id"], "error": {"code": -32601, "message": "Method not found"}})
                     return
@@ -162,6 +171,9 @@ class FakeMoonraker:
             def do_DELETE(self):
                 name = urllib.parse.unquote(self.path.rsplit("/", 1)[1])
                 if "/files/camera/" in self.path:
+                    if outer.snapmaker:     # a U1 exposes its camera folder read-only
+                        self._json(405, {"error": {"message": "Method Not Allowed"}})
+                        return
                     (outer.camera or {}).pop(name, None)
                 else:
                     outer.files.pop(name, None)

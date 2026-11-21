@@ -561,8 +561,8 @@ class LibraryTests(unittest.TestCase):
         self.p_cc2 = self.app.store.upsert({"name": "CC1", "kind": core.KIND_CC2, "address": self.cc2.address,
                                             "model": "Centauri Carbon 2", "access_code": "abc123", "mqtt_port": self.cc2.mqtt_port})
 
-    def _slice_and_save(self, item="Rail clip", parts=24):
-        path = write(self.tmp.name, ".1.0.gcode", U1_GCODE)
+    def _slice_and_save(self, item="Rail clip", parts=24, gcode=U1_GCODE):
+        path = write(self.tmp.name, ".1.0.gcode", gcode)
         self.app.on_slice_started(); self.app.on_gcode_exported(path, "")
         job = self.app.jobs[0]
         self.assertTrue(wait_for(lambda: job["ready"] or job["error"]))
@@ -592,6 +592,16 @@ class LibraryTests(unittest.TestCase):
         with open(entry["path"]) as handle:
             self.assertEqual(handle.read(), U1_GCODE)
         self.assertEqual(entry["md5"], core.file_md5(entry["path"]))
+
+    def test_cc2_prints_a_kept_plate_from_the_roll_picked_in_the_dialog(self):
+        self.assertTrue(self._slice_and_save(gcode=CC2_GCODE)["ok"])
+        (entry,) = self.app.library()
+        self._status(self.p_cc2)
+        (result,) = self._send(entry["id"], [self.p_cc2], roll=3)
+        self.assertTrue(result["ok"], result)
+        # the plate was sliced with filament 2; the printer is told to print it from roll 3
+        self.assertEqual(self.cc2.start_requests[-1]["config"]["slot_map"], [{"t": 1, "canvas_id": 0, "tray_id": 2}])
+        self.assertIn("from roll 3", result["text"])
 
     def test_save_needs_a_name_a_count_and_a_fresh_slice(self):
         self.assertFalse(self._slice_and_save(item="  ")["ok"])
@@ -1403,10 +1413,11 @@ class AppTests(unittest.TestCase):
         self.assertEqual([item["name"] for item in core.videos_to_clean(sets, rule, running="a.gcode", now=now)], ["b_2"])
 
     def test_video_cleanup_removes_old_recordings_and_leaves_gcode_alone(self):
+        self.u1.snapmaker = True     # camera folder read-only, recordings removed through the camera service
         self._stock(self.u1, [40, 90])
-        self._film(self.u1, "new_part_20260101", 2)
-        self._film(self.u1, "old_part_20250101", 45)
-        self._film(self.u1, "older_part_20240101", 120, cover=False)
+        self._film(self.u1, "new_part_20260101120000", 2)
+        self._film(self.u1, "old_part_20250101120000", 45)
+        self._film(self.u1, "older_part_20240101120000", 120, cover=False)
         self.u1.camera["monitor.jpg"] = (time.time() - 300 * 86400, 9000)
         self._read(self.p_u1), self._read(self.p_cc2)
         self.app.handle({"command": "save_cleanup", "kind": "videos", "rule": {"mode": "age", "days": 30, "auto": True}})
@@ -1421,20 +1432,29 @@ class AppTests(unittest.TestCase):
         result = self.app.sends[self.p_u1["id"]]
         self.assertTrue(result["ok"], result)
         self.assertIn("Removed 2 old recordings (10 MB)", result["text"])
-        self.assertEqual(sorted(self.u1.camera), ["monitor.jpg", "new_part_20260101.jpg", "new_part_20260101.mp4", "new_part_20260101_cover.jpg"])
+        self.assertEqual(sorted(self.u1.camera), ["monitor.jpg", "new_part_20260101120000.jpg", "new_part_20260101120000.mp4", "new_part_20260101120000_cover.jpg"])
         self.assertEqual(len(self.u1.files), 2)                                  # the G-code is untouched
         self.assertEqual(self.app.storage[self.p_u1["id"]]["videos"]["removable"], 0)
         self.assertEqual(self.app.storage[self.p_u1["id"]]["removable"], 2)      # and still counted under its own rule
 
+    def test_video_cleanup_on_a_plain_moonraker_deletes_file_by_file(self):
+        fake = FakeMoonraker()       # no Snapmaker camera service; its camera folder is writable
+        self.addCleanup(fake.close)
+        self._film(fake, "part_20250101120000", 60)
+        client = core.make_client({"kind": core.KIND_MOONRAKER, "address": fake.address, "name": "plain"}, timeout=5)
+        client.delete_videos(core.video_sets([{"path": name, "modified": when, "size": size} for name, (when, size) in fake.camera.items()]))
+        self.assertEqual(fake.camera, {})
+
     def test_video_cleanup_keeps_the_recording_of_the_running_print(self):
-        self._film(self.u1, "busy_20250101", 60)       # the fake prints busy.gcode
-        self._film(self.u1, "other_20250101", 60)
+        self.u1.snapmaker = True     # camera folder read-only, recordings removed through the camera service
+        self._film(self.u1, "busy_20250101120000", 60)       # the fake prints busy.gcode
+        self._film(self.u1, "other_20250102120000", 60)
         self.u1.state = "printing"
         self._read(self.p_u1)
         self.app.handle({"command": "cleanup", "kind": "videos", "printer_ids": [self.p_u1["id"]]})
         self.assertTrue(wait_for(lambda: not self.app.sends.get(self.p_u1["id"], {"active": True})["active"]))
         self.assertIn("Removed 1 old recording ", self.app.sends[self.p_u1["id"]]["text"])
-        self.assertEqual(sorted(self.u1.camera), ["busy_20250101.jpg", "busy_20250101.mp4", "busy_20250101_cover.jpg"])
+        self.assertEqual(sorted(self.u1.camera), ["busy_20250101120000.jpg", "busy_20250101120000.mp4", "busy_20250101120000_cover.jpg"])
 
     def _cc2_film(self, name, days, exported=False, status=1, gcode=None):
         """One finished print with time-lapse frames in the fake CC2's history, optionally exported."""
@@ -1499,6 +1519,12 @@ class AppTests(unittest.TestCase):
         self.assertEqual(self.cc2.media, set())
         self.assertEqual(self.cc2.history, [])
         self.assertIn("counted.gcode", self.cc2.files)   # the G-code is untouched
+        # The counts outlast a restart: a new window reads them from the storage folder, not the printer.
+        core._CC2_LAYERS.clear()
+        self.cc2.files.pop("counted.gcode")
+        self._cc2_film("counted.gcode20261003", 40, gcode="counted.gcode")
+        self.cc2.history[-1]["task_id"] = "id-counted.gcode20261001"
+        self.assertEqual(client.list_videos()[0]["layers"], 2)
 
     def test_cc2_video_cleanup_keeps_the_history_line_when_the_video_would_not_go(self):
         self._cc2_film("exported.gcode20260901", 80, exported=True)

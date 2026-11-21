@@ -68,7 +68,7 @@ Verified on a U1 up to the point where the printer heats the chosen toolhead; a 
 
 In the library send dialog, **Parts to print per printer** defaults to the full plate. Enter less and the printer is told to skip the other parts as it starts; the panel reports the start only after the printer confirms, and cancels the print if it does not. So one full plate in the library covers any quantity.
 This works when the plate's parts are labelled one by one in the G-code and that number equals the parts count you entered. The kept parts are the first ones in the plate's own order. The time and grams shown are still those of the full plate.
-On a Centauri Carbon 2 with a Canvas unit, the start tells the printer which roll each filament number prints from: filament 1 from roll 1, and so on. Left unsaid, the printer reuses the rolls of its previous print. The card lists the rolls as the printer reports them; their colors are the ones entered on the printer and are not compared with the sliced color. A different roll cannot be chosen in the send dialog yet.
+On a Centauri Carbon 2 with a Canvas unit, the start tells the printer which roll each filament number prints from: filament 1 from roll 1, and so on. Left unsaid, the printer reuses the rolls of its previous print. The card lists the rolls as the printer reports them; their colors are the ones entered on the printer and are not compared with the sliced color. For a one-filament plate, **Print from roll** in the send dialog picks another roll; the start is refused when the printer reports a different material there.
 
 A Centauri Carbon 2 prints whole plates only, so keep a small plate for it if you want small quantities there.
 
@@ -96,8 +96,8 @@ The file a printer is printing is always kept. A Centauri Carbon 2 is only clean
 
 The **Videos** tab of the same box does this for time-lapse recordings, with its own rule. Recordings are removed only when you click Clean up, never automatically.
 
-- **Snapmaker U1**: each recording is removed together with its pictures. The recording of a print that is running and the camera's live picture are kept.
-- **Centauri Carbon 2**: a recording is the frames of one finished print (one per layer), plus its video if one was exported. Farm Send reads the print's layer count from its G-code file and removes just those frames, usually in one request; when the G-code is already gone from the printer it removes the first 3000 frames. Removing a recording also removes that print from the printer's history list. It works only while the printer is idle and relies on a path the printer does not officially offer (verified on two printers on 2026-11-21), so a firmware update may stop it. Frame deletions cannot be checked one by one: the printer answers "ok" either way.
+- **Snapmaker U1**: each recording is removed together with its pictures, through Snapmaker's camera service (the camera folder is read-only to the file API). The recording of a print that is running and the camera's live picture are kept.
+- **Centauri Carbon 2**: a recording is the frames of one finished print (one per layer), plus its video if one was exported. Farm Send reads the print's layer count from its G-code file and removes just those frames, usually in one request; when the G-code is already gone from the printer it removes the first 3000 frames. Layer counts are saved in the plugin's storage folder, so they are not lost when OrcaSlicer restarts. Removing a recording also removes that print from the printer's history list. It works only while the printer is idle and relies on a path the printer does not officially offer (verified on two printers on 2026-11-21), so a firmware update may stop it. Frame deletions cannot be checked one by one: the printer answers "ok" either way.
 
 "Clean automatically, once a day" is off by default and only runs while the panel is open, so it does not replace a scheduled job for an unattended farm.
 A Centauri Carbon 2 holding 250 or more files shows a warning on its card: uploads began failing on printers holding 355 and 516 files.
@@ -191,6 +191,6 @@ The first in-app checks ran in an OrcaSlicer instance on a hidden virtual displa
 | "Use presets" switching printer, filament slots and process, both directions | Inside OrcaSlicer 2.5.1 |
 | Select all available, grouped confirmation | Inside OrcaSlicer 2.5.1, cancelled before sending |
 | CC2 prints from the roll the slicer names | Real CC2-1 and CC2-2: started with filament 1 sent to roll 1, both switched from roll 2 to roll 1 before the first layer (2026-11-20) |
-| U1 time-lapse clean-up | Real U1s, from the panel (2026-11-21) |
+| U1 time-lapse clean-up | Real U1-1 (2026-11-21): one recording removed through Snapmaker's camera service, its video, picture and cover gone. The 0.3.9 to 0.3.12 file-by-file removal failed on every U1 with HTTP 405 |
 | CC2 time-lapse clean-up | Real CC2-1: 24 recordings down to 21, G-code untouched (2026-11-21) |
 | CC2 frames end at the layer count | Real CC2-1: frames 0 to 41 of a 37-layer print removed in one request; asking the printer to export it afterwards made no video (2026-11-21) |

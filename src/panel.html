@@ -671,6 +671,7 @@
     if (!e) return;
     var printers = state.printers.filter(function (p) { return e.printers.indexOf(p.id) >= 0; });
     var anyU1 = printers.some(function (p) { return p.kind === "moonraker"; });
+    var anyCC2 = printers.some(function (p) { return p.kind === "elegoo_cc2"; });
     var single = e.filaments.length === 1, sliced = single ? e.filaments[0].slot : 0;
     var rows = printers.map(function (p) {
       var st = state.status[p.id] || {}, free = st.state === "idle" && !st.needs_clearing;
@@ -683,6 +684,11 @@
       pick = "<label class='field'>Print from toolhead (Snapmaker)<select id='l-tool'><option value=''>" + sliced + " \u2014 as sliced</option>" +
         [1, 2, 3, 4].filter(function (n) { return n !== sliced; }).map(function (n) { return "<option value='" + n + "'>" + esc(toolLabel(n)) + "</option>"; }).join("") +
         "</select></label><p class='small muted' style='margin:4px 0 0'>The color is whatever that toolhead holds; each printer's toolheads are listed above. Material and temperatures stay as sliced.</p>";
+    }
+    if (single && anyCC2) {
+      pick += "<label class='field'>Print from roll (Centauri Carbon 2)<select id='l-roll'><option value=''>" + sliced + " — as sliced</option>" +
+        [1, 2, 3, 4].filter(function (n) { return n !== sliced; }).map(function (n) { return "<option value='" + n + "'>Roll " + n + "</option>"; }).join("") +
+        "</select></label><p class='small muted' style='margin:4px 0 0'>The color is whatever that roll holds; each printer's rolls are listed above. Material and temperatures stay as sliced.</p>";
     }
     var count = (e.countable && anyU1) ? "<label class='field'>Parts to print per printer<input id='l-keep' type='number' min='1' max='" + esc(e.parts) + "' value='" + esc(e.parts) + "'></label>" +
       "<p class='small muted' style='margin:4px 0 0'>Fewer than " + esc(e.parts) + ": the printer skips the other parts as it starts. The time and grams shown are for the full plate.</p>" : "";
@@ -736,6 +742,7 @@
     }
     function go(start) {
       send("library_send", { id: id, printer_ids: picked(), start: start, keep: keepCount() < e.parts ? keepCount() : null, toolhead: $("l-tool") && $("l-tool").value ? parseInt($("l-tool").value, 10) : null,
+        roll: $("l-roll") && $("l-roll").value ? parseInt($("l-roll").value, 10) : null,
         options: { bed_leveling: $("opt-level").checked, flow_calibrate: $("opt-flow") ? $("opt-flow").checked : false, timelapse: $("opt-lapse").checked,
                    any_color: !!($("l-anycolor") && $("l-anycolor").checked) } });
       hideDialog();

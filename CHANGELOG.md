@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.13
+
+- **Fixed: time-lapse clean-up on Snapmaker U1s did nothing.** A U1 keeps its recordings in a folder the file API can only read, so every removal failed with "HTTP 405 Method Not Allowed". Recordings are now removed through Snapmaker's own camera service, the way Snapmaker's app does it; tried on a U1, the video, picture and cover all went. Earlier notes said this had been checked on real U1s: it had only been checked against the test printer, which allowed it.
+- **Choose the roll for a Centauri Carbon 2.** When you send a one-filament plate from the library, the dialog has "Print from roll", like the toolhead choice for Snapmaker U1s. Material and temperatures stay as sliced; the start is refused if the printer reports a different material on that roll.
+- Centauri Carbon 2 layer counts for time-lapse clean-up are saved in the plugin's storage folder, so they survive restarting OrcaSlicer.
+
 ## 0.3.12
 
 - **Faster Centauri Carbon 2 time-lapse clean-up.** The printer saves one frame per layer, so Farm Send now reads each print's layer count from its G-code file and removes just those frames, usually in one request (well under a second) where it used to take 12 to 20 seconds per print. Tried on a CC2: after removing the frames up to the layer count plus 5, the printer could no longer make a video of that print. When the G-code has already been removed from the printer, the clean-up removes the first 3000 frames as before. Layer counts are read when the Videos tab lists the recordings and kept until Orca closes, so a later G-code clean-up does not lose them.

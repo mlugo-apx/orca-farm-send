@@ -791,9 +791,9 @@ class ElegooCC2:
 
     def _add_layers(self, recordings):
         """Fill in each recording's layer count from its G-code file, which the printer makes one
-        frame per layer from. Counts are kept for this window, so they are read while the G-code is
-        still there: a later G-code clean-up removes them from the printer."""
-        known = _CC2_LAYERS.setdefault(self.host, {})
+        frame per layer from. Counts are read while the G-code is still there (a later G-code
+        clean-up removes it) and saved in the plugin's storage folder, so they outlast a restart."""
+        known = _cc2_layer_cache(self.host)
         missing = [item for item in recordings if item["task"] not in known and item.get("gcode")]
         if missing:
             try:
@@ -810,6 +810,9 @@ class ElegooCC2:
                 pass      # the ones not read yet are tried at the next listing
         for item in recordings:
             item["layers"] = known.get(item["task"], 0)
+        if missing:
+            # Only the prints still in the history are kept, so the file stays small.
+            _cc2_save_layers(self.host, {item["task"]: known[item["task"]] for item in recordings if item["task"] in known})
 
     def _video_served(self, name):
         """True when the printer hands out the exported video of this recording. A missing file
@@ -891,6 +894,44 @@ class ElegooCC2:
 _CC2_NO_ROLLS = set()
 _CC2_LAYERS = {}           # {printer address: {history task id: layer count, 0 when unknown}}
 CC2_MAX_LAYERS = 20000
+CC2_LAYERS_FILE = "farm_send_cc2_layers.json"
+
+
+def _cc2_layer_cache(host):
+    """This printer's known layer counts, read once per window from the storage folder."""
+    if host not in _CC2_LAYERS:
+        counts = {}
+        if _CC2_SHARED_DIR:
+            try:
+                with open(os.path.join(_CC2_SHARED_DIR, CC2_LAYERS_FILE), "r", encoding="utf-8") as handle:
+                    stored = json.load(handle).get(host) or {}
+                counts = {str(task): int(layers) for task, layers in stored.items()
+                          if isinstance(layers, int) and 0 <= layers < CC2_MAX_LAYERS}
+            except (OSError, ValueError, AttributeError):
+                counts = {}
+        _CC2_LAYERS[host] = counts
+    return _CC2_LAYERS[host]
+
+
+def _cc2_save_layers(host, counts):
+    """Store a printer's layer counts next to the other printers' ones. A failed write only means
+    they are read from the printer again next time."""
+    _CC2_LAYERS[host] = dict(counts)
+    if not _CC2_SHARED_DIR:
+        return
+    path = os.path.join(_CC2_SHARED_DIR, CC2_LAYERS_FILE)
+    try:
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                everything = json.load(handle)
+            if not isinstance(everything, dict):
+                everything = {}
+        except (OSError, ValueError):
+            everything = {}
+        everything[host] = counts
+        write_private(path, json.dumps(everything))
+    except OSError:
+        pass
 
 
 def cc2_safe_name(name):
@@ -1388,14 +1429,30 @@ class Moonraker:
         return video_sets(reply.get("result") or [])
 
     def delete_videos(self, items, progress=None, cancelled=None):
-        """Remove each recording with its pictures. Returns how many recordings were worked through."""
+        """Remove each recording with its pictures. Returns how many recordings were worked through.
+
+        On a Snapmaker U1 the camera folder is read-only to the file API (HTTP 405), so a recording
+        is removed through Snapmaker's camera service by the 14-digit time its name ends with, as
+        Snapmaker's own app does. Verified on a U1 on 2026-11-21: its video, picture and cover went.
+        Other printers, and pictures with no such time, are removed file by file."""
         items, done = list(items), 0
+        service = True
         for item in items:
             if cancelled is not None and cancelled():
                 break
-            for part in item.get("parts") or []:
-                http_json("http://%s/server/files/camera/%s" % (self.address, urllib.parse.quote(part)), method="DELETE",
-                          headers=self._headers(), timeout=self.timeout)
+            stamp = re.search(r"_(\d{14})$", os.path.basename(str(item.get("name") or "")))
+            if stamp and service:
+                try:
+                    websocket_rpc(self.address, "camera.delete_timelapse_instance", {"date_index": stamp.group(1)}, timeout=30)
+                    stamp = "done"
+                except RpcError as error:
+                    if error.code != -32601:
+                        raise FarmError("Could not remove the recording: %s" % error)
+                    service = False     # not a Snapmaker: fall back to the file API
+            if stamp != "done":
+                for part in item.get("parts") or []:
+                    http_json("http://%s/server/files/camera/%s" % (self.address, urllib.parse.quote(part)), method="DELETE",
+                              headers=self._headers(), timeout=self.timeout)
             done += 1
             if progress is not None:
                 progress(done, len(items))

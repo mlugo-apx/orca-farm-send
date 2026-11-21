@@ -1044,12 +1044,14 @@ class FarmApp:
 
     def _cmd_library_send(self, message):
         """Send a kept plate to the listed printers. toolhead: print a one-filament plate from this
-        toolhead instead of the one it was sliced for (Snapmaker only)."""
+        toolhead instead of the one it was sliced for (Snapmaker only). roll: the same for a Centauri
+        Carbon 2, printing from this roll of its Canvas unit."""
         entry = next((e for e in self.library() if e["id"] == message.get("id")), None)
         self._library_start(entry, message.get("printer_ids") or [], bool(message.get("start")),
-                            dict(message.get("options") or {}), message.get("toolhead"), keep=message.get("keep"))
+                            dict(message.get("options") or {}), message.get("toolhead"), keep=message.get("keep"),
+                            roll=message.get("roll"))
 
-    def _library_start(self, entry, printer_ids, start, options, toolhead=None, order_id=None, keep=None):
+    def _library_start(self, entry, printer_ids, start, options, toolhead=None, order_id=None, keep=None, roll=None):
         """keep: print only this many parts of the plate (Snapmaker / Klipper printers; the rest are
         skipped on the printer). None or the full count prints the whole plate."""
         work = []
@@ -1057,6 +1059,10 @@ class FarmApp:
             keep = int(keep) if keep is not None else None
         except (TypeError, ValueError):
             keep = None
+        try:
+            roll = int(roll) if roll else None
+        except (TypeError, ValueError):
+            roll = None
         if entry is not None and keep is not None and keep >= (entry.get("parts") or 0):
             keep = None
         with self.lock:
@@ -1090,6 +1096,12 @@ class FarmApp:
                         else:
                             mine["toolhead_map"] = {used[0]["slot"]: int(toolhead)}
                             problem = toolhead_problem(tools, int(toolhead), used[0].get("type"))
+                    elif roll and printer.get("kind") == KIND_CC2:
+                        if len(used) != 1:
+                            problem = "Not started: only a one-filament plate can be moved to another roll."
+                        else:
+                            mine["toolhead_map"] = {used[0]["slot"]: roll}
+                            problem = toolhead_problem(tools, roll, used[0].get("type")).replace("toolhead", "roll")
                     else:
                         for filament in used:   # printing as sliced: every toolhead it uses must be usable
                             problem = problem or toolhead_problem(tools, filament.get("slot"), filament.get("type"))
