@@ -201,6 +201,7 @@ The first in-app checks ran in an OrcaSlicer instance on a hidden virtual displa
 | Library send, "Print from roll" on a CC2 | Real CC2-1 (2026-11-21): a 10 mm cube sliced for roll 1 printed from roll 2; the printer switched to roll 2 before layer 1 and the card said "from roll 2" |
 | CC2 layer counts kept for clean-up | Real: the storage folder holds counts for 20 and 26 recordings on the two CC2s |
 | Slice for a printer outside the farm is ignored | Inside OrcaSlicer 2.5.1 (0.3.15): a cube sliced for an Anycubic Kobra 2 Max left no plate row, no "Slicing..." and no kept copy |
+| Newer-version pill and Stored table | Inside OrcaSlicer 2.5.2 (2026-11-21): a window on an older build showed the orange pill after 0.3.19 was installed, clicking it opened the reload steps, and after the reload the Stored box showed as a table |
 
 ### Checked only against the test printers
 
@@ -210,7 +211,6 @@ These pass the automated tests, which use stand-in printers, but have not been s
 - **Automatic daily G-code clean-up**, and G-code clean-up deleting real files (only probe files have been deleted on a real CC2; U1 file delete is proven).
 - **Paused and error notices.**
 - **Clean-up guards**: a busy CC2 refusing video clean-up, and a U1 keeping the recording of the print that is running.
-- **The "newer version installed" line** (0.3.14): unit-tested; not yet seen in a window.
 - **Multi-color CC2 jobs** (several rolls in one print) and **Windows / macOS**.
 
 The U1 time-lapse clean-up shipped in 0.3.9 to 0.3.12 passed its tests and failed on every real U1, because the stand-in printer allowed what the real one refuses. The stand-in now refuses it too, but treat this list as untested until it moves into the table above.
