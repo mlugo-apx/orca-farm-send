@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.8
+
+- A Snapmaker card now lists what each toolhead holds, as small tags under "details", the same way a Centauri Carbon 2 card lists its rolls. An empty toolhead says so.
+
 ## 0.3.7
 
 - **Clearer printer cards.** Cards have a visible gray outline and a lighter fill, a colored edge and a state label for the printer's state (green idle, blue printing, amber needs attention, red error), and lighter text for the details. The finish time stands on its own at the right, and a folded busy printer shows a thin progress line. The rolls of a Centauri Carbon 2 are shown as small tags.

@@ -963,9 +963,13 @@
     var checked = status.checked_at ? "checked " + clock(new Date(status.checked_at * 1000), true) : "";
     if (temps.length || checked) lines += "<div class='facts small soft'><span>" + temps.join(" \u00b7 ") +
                                           "</span><span class='tiny muted' style='white-space:nowrap'>" + checked + "</span></div>";
-    if (p.kind === "elegoo_cc2" && (status.tools || []).length)   // the rolls in its Canvas unit, as the printer reports them
+    if ((status.tools || []).length) {   // what the printer reports as loaded: a CC2's rolls, a Snapmaker's toolheads
+      var what = p.kind === "elegoo_cc2" ? "Roll " : "Toolhead ";
       lines += "<div class='small soft'>" + status.tools.map(function (t) {
-        return "<span class='chip' title='Roll " + t.slot + "'>" + t.slot + " " + swatch(t.color) + esc(t.type || "") + "</span>"; }).join("") + "</div>";
+        var label = state.toolhead_names[t.slot - 1];
+        return "<span class='chip' title='" + what + t.slot + (label ? " (" + esc(label) + ")" : "") + "'>" + t.slot + " " +
+               (t.loaded ? swatch(t.color) + esc(t.type || "") : "<span class='warn'>empty</span>") + "</span>"; }).join("") + "</div>";
+    }
     var details = lines;
     lines = main + (detailsOpen[p.id] ? details : "");
     if (status.notice) lines += "<div class='small " + (status.notice.level === "error" ? "err" : "ok") + "'>" + esc(status.notice.text) +
