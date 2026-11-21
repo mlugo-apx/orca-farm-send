@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.16
+
+- A printer whose bed still holds a print now says how that print ended: "Stopped" for one stopped partway (it used to say "Finished"), "Cancelled", or "Finished". When the panel did not see the print end, it uses what the printer reports, or "Print on bed".
+- The README's verification table was checked against real printer records: remapped-toolhead and part-count prints, real print endings, the CC2 roll choice and saved layer counts are now listed as seen on real printers, and a new list names what has only been checked against the test printers.
+
 ## 0.3.15
 
 - A plate sliced for a printer that is not in Farm Send (one you use on its own) no longer shows up in the panel, and no copy of it is kept. The plates held for your farm's printer types stay as they were. To use a new printer type with Farm Send, add the printer first, then slice.

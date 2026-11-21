@@ -1196,6 +1196,19 @@ class AppTests(unittest.TestCase):
         self.assertTrue(wait_for(lambda: len(self._statuses()) > count))
         return self.app.status[printer["id"]]
 
+    def test_the_card_says_how_the_print_on_the_bed_ended(self):
+        self.cc2.status_code, self.cc2.progress = 2, 40
+        self._read(self.p_cc2)
+        self.cc2.status_code, self.cc2.progress = 1, None       # idle well short of the end: stopped
+        status = self._read(self.p_cc2)
+        self.assertTrue(status["needs_clearing"])
+        self.assertEqual(status["ended"], "stopped")
+        self.cc2.status_code, self.cc2.progress = 2, 100
+        status = self._read(self.p_cc2)
+        self.assertNotIn("ended", status)                        # printing again: nothing ended
+        self.cc2.status_code, self.cc2.progress = 1, None
+        self.assertEqual(self._read(self.p_cc2)["ended"], "finished")
+
     def test_notice_when_a_print_finishes_pauses_or_fails(self):
         self.assertNotIn("notice", self._read(self.p_u1))       # first look: nothing to report
         self.u1.state = "printing"

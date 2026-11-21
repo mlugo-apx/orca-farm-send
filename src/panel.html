@@ -660,6 +660,10 @@
       send("library_save_all", { rows: rows });
     };
   }
+  // The label for a printer whose bed still holds a print: how that print ended, when known.
+  function endedText(status) {
+    return { stopped: "Stopped", cancelled: "Cancelled", error: "Stopped" }[status.ended] || (status.ended === "finished" ? "Finished" : "Print on bed");
+  }
   function toolsHtml(printer) {
     var tools = (state.status[printer.id] || {}).tools || [];
     if (!tools.length) return "";
@@ -952,7 +956,7 @@
       "<div class='row' style='flex:none' data-expand='" + esc(p.id) + "'>" +
       "<span class='small soft' style='white-space:nowrap' data-expand='" + esc(p.id) + "'>" +
         esc(refreshing[p.id] ? "Checking..." : (status.state === "printing" ? progressText(status) || "Printing" :
-            (status.needs_clearing ? "Finished: clear the bed" : (status.state_text || status.state)))) +
+            (status.needs_clearing ? endedText(status) + ": clear the bed" : (status.state_text || status.state)))) +
       "</span><span class='chev' data-expand='" + esc(p.id) + "'>" + svg("down") + "</span></div></div>" +
       (slimPct == null ? "" : "<div class='bar thin' data-expand='" + esc(p.id) + "'><i style='width:" + slimPct + "%'></i></div>") + "</div>";
   }
@@ -1006,7 +1010,7 @@
     if (!sending || !sending.active) {
       if (uploadWhy) hint = uploadWhy; else if (startWhy) hint = "Print: " + startWhy.charAt(0).toLowerCase() + startWhy.slice(1);
     }
-    var stateText = refreshing[p.id] ? "Checking..." : (status.needs_clearing ? "Finished" : (status.state_text || status.state));
+    var stateText = refreshing[p.id] ? "Checking..." : (status.needs_clearing ? endedText(status) : (status.state_text || status.state));
     // An opened busy card closes the way it opened: click its name or state. A ticked card stays
     // open, because the tick box only exists on the full card.
     var fold = !selected[p.id] && !(sending && sending.active)

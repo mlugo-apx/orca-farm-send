@@ -91,6 +91,7 @@ class FarmApp:
         set_shared_dir(storage_dir)   # every OrcaSlicer window shares one client slot per CC2
         self.storage_dir = storage_dir
         self.newer = ""           # a newer Farm Send recorded in the storage folder than this window runs
+        self.endings = {}         # printer id -> how its last print ended, as this window saw it
         self._newer_at = 0.0
         record_version(storage_dir, self.version())
         self.beds = BedLog(os.path.join(storage_dir, "farm_send_beds.json"))
@@ -1538,6 +1539,15 @@ class FarmApp:
             if change is not None:
                 self.beds.set(printer_id, change)
             status["needs_clearing"] = status.get("state") == "idle" and bool(self.beds.get(printer_id))
+            if ended:
+                self.endings[printer_id] = ended
+            elif status.get("state") in ("printing", "paused"):
+                self.endings.pop(printer_id, None)
+            if status["needs_clearing"]:
+                # How the print on the bed ended: seen ending in this window, else what the printer
+                # reports about its last print. "" when neither is known.
+                last = {"complete": "finished", "cancelled": "cancelled"}.get(status.get("last_result") or "", "")
+                status["ended"] = self.endings.get(printer_id) or last
             self.status[printer_id] = status
             # "Started <file>" is only true while that print runs. Once the printer is idle again
             # (finished or cancelled) the line would be stale, so it is dropped.

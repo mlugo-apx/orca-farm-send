@@ -63,7 +63,7 @@ A kept plate is the G-code exactly as sliced: printer type, nozzle, material and
 On Snapmaker U1s a one-filament plate can be printed from any toolhead, so one kept plate covers every color: choose the toolhead in the send dialog, which lists what each printer's toolheads hold.
 The same toolhead number is used on every printer you tick, so this assumes your printers keep the same color in the same position.
 A start is refused when that toolhead reports no filament or holds a different material. Printing as sliced is also refused when the toolhead reports a clearly different color than the plate was sliced with, until you confirm the loaded color in the dialog. When you pick another toolhead, the dialog shows what each printer holds there and warns if they differ.
-Verified on a U1 up to the point where the printer heats the chosen toolhead; a complete print through a remapped toolhead has not been run yet.
+Two complete prints through a remapped toolhead have run on real U1s (a pool drain plate sent to toolhead 4 on U1-2 and U1-3, both finished).
 
 **Printing part of a plate (Snapmaker U1)**
 
@@ -177,7 +177,7 @@ The first in-app checks ran in an OrcaSlicer instance on a hidden virtual displa
 | Cross-model block | Real sliced G-code, refused before any network call |
 | One CC2 slot shared by all windows | Real CC1 and CC2: 8 processes at once, 96 requests, no errors, one client id per printer |
 | Refresh one printer and Refresh all, finish time, last-checked time | Clicked inside OrcaSlicer 2.5.1 against all five real printers |
-| Notices for finished, cancelled, paused, error | Fake printers. Real CC2s confirmed to report 100% when idle after a completed print; no real print has ended with the panel open yet |
+| Notices for finished, cancelled, stopped | Real printers with the panel open: the print history holds 3 finished, 1 cancelled and 5 stopped endings read from real U1s and CC2s; a CC2 stopped at 42% showed "stopped printing ... at 42%" on its card (2026-11-21). Paused and error notices: fake printers only |
 | Plates per printer type, grouped printer list, expandable busy rows, presets dialog, Bed cleared | Clicked inside OrcaSlicer 2.5.1 against all five real printers |
 | Stored-file counts, cleanup rule and confirmation dialog | Real printers: counts and rule previews on all five; dialogs opened inside OrcaSlicer 2.5.1 and cancelled |
 | Cleanup deleting files | Fake printers (250-file CC2, kept-file case). Real CC2: paging and batch delete proven with probe files only. No real user file has been deleted |
@@ -197,3 +197,20 @@ The first in-app checks ran in an OrcaSlicer instance on a hidden virtual displa
 | U1 time-lapse clean-up | Real U1-1 (2026-11-21): one recording removed through Snapmaker's camera service, its video, picture and cover gone. The 0.3.9 to 0.3.12 file-by-file removal failed on every U1 with HTTP 405 |
 | CC2 time-lapse clean-up | Real CC2-1: 24 recordings down to 21, G-code untouched (2026-11-21) |
 | CC2 frames end at the layer count | Real CC2-1: frames 0 to 41 of a 37-layer print removed in one request; asking the printer to export it afterwards made no video (2026-11-21) |
+| Part count (printer skips the other parts) | Real U1-2: Left_Vertical_Clip plate of 28, 2 kept, 26 skipped, finished |
+| Library send, "Print from roll" on a CC2 | Real CC2-1 (2026-11-21): a 10 mm cube sliced for roll 1 printed from roll 2; the printer switched to roll 2 before layer 1 and the card said "from roll 2" |
+| CC2 layer counts kept for clean-up | Real: the storage folder holds counts for 20 and 26 recordings on the two CC2s |
+| Slice for a printer outside the farm is ignored | Inside OrcaSlicer 2.5.1 (0.3.15): a cube sliced for an Anycubic Kobra 2 Max left no plate row, no "Slicing..." and no kept copy |
+
+### Checked only against the test printers
+
+These pass the automated tests, which use stand-in printers, but have not been seen working on a real printer or in real use:
+
+- **Orders**: Print next splitting a quantity over free printers, and good-part counts from Bed cleared. No real order has been run.
+- **Automatic daily G-code clean-up**, and G-code clean-up deleting real files (only probe files have been deleted on a real CC2; U1 file delete is proven).
+- **Paused and error notices.**
+- **Clean-up guards**: a busy CC2 refusing video clean-up, and a U1 keeping the recording of the print that is running.
+- **The "newer version installed" line** (0.3.14): unit-tested; not yet seen in a window.
+- **Multi-color CC2 jobs** (several rolls in one print) and **Windows / macOS**.
+
+The U1 time-lapse clean-up shipped in 0.3.9 to 0.3.12 passed its tests and failed on every real U1, because the stand-in printer allowed what the real one refuses. The stand-in now refuses it too, but treat this list as untested until it moves into the table above.
