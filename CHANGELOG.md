@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.11
+
+- The panel shows its version next to the title, so you can see which build a window is running.
+
 ## 0.3.10
 
 - **Clean up time-lapses on a Centauri Carbon 2.** The Videos tab now lists the time-lapses each CC2 holds (the frames of each finished print, plus its video if you exported one) and removes old ones under the same rule as the Snapmaker recordings, only when you click Clean up and only while the printer is idle. Removing one also removes that print from the printer's history list. This reaches the files through a path the printer does not officially offer, so a firmware update may stop it; an exported video is checked to be gone, frame deletions cannot be checked, and prints over 3000 layers keep their later frames.

@@ -64,7 +64,7 @@
 </style>
 
 <div class="row spread">
-  <h3 style="white-space:nowrap">Farm Send</h3>
+  <h3 style="white-space:nowrap">Farm Send <span id="version" class="tiny muted" style="font-weight:normal" title="The Farm Send version this window is running"></span></h3>
   <div class="row">
     <button type="button" class="quiet" id="btn-refresh" title="Ask every printer for its status now">Refresh</button>
     <button type="button" class="quiet" id="btn-import" title="Add printers from your OrcaSlicer printer presets">Import</button>
@@ -1241,6 +1241,7 @@
     if (!message) return;
     if (message.command === "state") {
       ["printers", "jobs", "job_for", "slicing", "combos", "types", "library", "folders", "orders", "order_plates", "toolhead_names", "current", "combo_note", "can_switch", "storage", "cleanup", "video_cleanup"].forEach(function (key) { if (key in message) state[key] = message[key]; });
+      if (message.version) $("version").textContent = (/^\d/.test(message.version) ? "v" : "") + message.version;
       if (message.status) state.status = message.status;
       if (message.sends) state.sends = message.sends;
       if ("auto_open" in message) $("auto-open").checked = !!message.auto_open;

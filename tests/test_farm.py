@@ -1500,6 +1500,9 @@ class AppTests(unittest.TestCase):
         self.assertFalse(self.app.sends[self.p_cc2["id"]]["ok"])
         self.assertEqual(len(self.cc2.history), 1)
 
+    def test_snapshot_carries_the_version_for_the_panel_title(self):
+        self.assertTrue(self.app.snapshot()["version"])
+
     def test_video_rule_is_saved_apart_from_the_gcode_rule(self):
         self.app.handle({"command": "save_cleanup", "rule": {"mode": "count", "keep": 12}})
         self.app.handle({"command": "save_cleanup", "kind": "videos", "rule": {"mode": "age", "days": 7}})

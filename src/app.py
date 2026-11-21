@@ -384,6 +384,7 @@ class FarmApp:
                 "storage": dict(self.storage),
                 "cleanup": dict(self.store.cleanup, text=rule_text(self.store.cleanup)),
                 "video_cleanup": dict(self.store.video_cleanup, text=rule_text(self.store.video_cleanup)),
+                "version": str(globals().get("PLUGIN_VERSION", "dev")),
                 "current": dict(self.current) if self.current else None,
                 "combo_note": dict(self.combo_note),
                 "can_switch": self._apply_presets is not None,
