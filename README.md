@@ -47,6 +47,7 @@ You can re-arrange the bed between types: the "plate changed" warning only ever 
 
 Select the printer, process and filament presets you use for one printer type, click **presets** on that type's row, then **Remember current**.
 **Use presets** on the row then switches all three OrcaSlicer selections back in one click. Then slice.
+**In use** marks the type whose remembered presets OrcaSlicer is set to right now. **Forget** in the presets dialog drops what was remembered for that type.
 If a preset has unsaved edits, OrcaSlicer shows its normal save or discard dialog first.
 The plugin cannot press Slice for you.
 
@@ -55,6 +56,7 @@ The plugin cannot press Slice for you.
 <img src="docs/library.png" alt="Library view: folders of kept plates, each with its printer type, time, grams and a Send button" width="346">
 
 For parts you print again and again. On a sliced plate's row click **Save**, name the item and enter how many parts are on the plate (the count is filled in when the G-code labels its parts). A plate already in the library shows **saved**.
+Centauri Carbon 2 G-code does not label its parts, so type that count yourself. In OrcaSlicer, right-click a part and open **Instances > Set number of instances**: the box shows how many copies are on the plate (click Cancel).
 The plate is kept on this computer, in the plugin's own data folder, and survives closing the project and restarting OrcaSlicer.
 You can also put it in a folder. The save dialog can make a new folder on the spot, inside the folder you picked. Folders start collapsed. **New folder** in the Library view makes one at the top, and the plus on a folder makes one inside it, up to four levels. The pencil and bin on a folder rename or remove it; removing a folder keeps what is in it and moves it up one level. The pencil on a library row renames the item, corrects the count or moves it to another folder.
 In the Plates box, **Library** lists what you kept, grouped by folder, with search. **Send** shows the printers of the right type with their state, and the total parts for the printers you tick, then uploads and starts them. No project, no slicing.
@@ -79,6 +81,14 @@ For "I need 10 of these". In the Plates box open **Orders**, click **New order**
 **Print next** splits what is left evenly over the printers that are free right now: idle, bed cleared, and no uncounted plate on them. Ten parts over five printers that can skip parts is two each. A printer that prints whole plates only gets the kept plate nearest its share, and is left out when that plate would be more than double the share. Edit any count, untick what you do not want, then **Start prints**.
 When a plate finishes, **Bed cleared** on that printer asks how many parts came out good. Only good parts count. The order line shows good, printing and still to start, and is remembered across restarts.
 
+An order uses every printer type that has a kept plate under the item's name, so to use the whole farm, keep one plate per printer type under the **same name**. For example, an order of 110 clips on two Centauri Carbon 2s and three Snapmaker U1s:
+
+1. Open the part, pick the U1 presets, right-click the part and use **Instances > Fill bed with instances** (or **Clone > Fill**). Slice, then **Save** as "Horizontal Slat Clip". Here the bed held 21.
+2. Click **Use presets** for the Centauri Carbon 2. The U1 bed is larger, so set the copies back to one (**Instances > Set number of instances**) and fill again. Slice, then **Save** under the same name with the count, 15 here.
+3. In **Orders**, **New order** for that item, quantity 110. **Print next** offered 15 on each CC2 (whole plates) and 21 on each U1: 93 in the first round, 17 left for the next. In that next round the CC2s sit out, because their 15-part plate is more than double their share.
+
+Fill spaces parts by their convex outline, so parts with hooks or notches pack loosely. More parts per plate can save a whole round.
+
 **Several plates in one project**
 
 After **Slice all**, every plate is held for its printer type, one line each; click a line for its details. **Save all to library** names and keeps every plate not saved yet in one dialog, each with its own name, parts count and folder. The dot in front of a plate marks the one the printer cards send; click another plate's dot to change it. The printer type OrcaSlicer is set to stays open and the others fold to one line; **clear** drops the sliced plates of a type. Slicing a plate again replaces that plate only.
@@ -92,7 +102,7 @@ After **Slice all**, every plate is held for its printer type, one line each; cl
 <img src="docs/videos.png" alt="Stored box on its Videos tab: recordings per printer, how many are old under the rule, and Clean up" width="346">
 
 The **Stored** box at the bottom lists every printer with its file count, size and oldest file, and how many files count as old under your rule.
-The pencil next to refresh sets the rule: keep files newer than N days, or keep the newest N files. **Clean up** shows what will be removed per printer and asks before deleting.
+The pencil next to refresh sets the rule: keep files newer than N days, or keep the newest N files. **Clean up** shows what will be removed per printer and asks before deleting. Every printer is ticked in that dialog; untick any you want to leave alone.
 The file a printer is printing is always kept. A Centauri Carbon 2 is only cleaned while idle. Deleted files cannot be brought back.
 
 The **Videos** tab of the same box does this for time-lapse recordings, with its own rule. Recordings are removed only when you click Clean up, never automatically.
@@ -118,7 +128,7 @@ A Centauri Carbon 2 holding 250 or more files shows a warning on its card: uploa
 1. OrcaSlicer > menu > **Plugins** > **Install local plugin** > `dist/farm_send/farm_send.py`
 2. Tick **Activate**. OrcaSlicer asks once for: read access to its own temp G-code folder, permission to start threads, and network access to each saved printer address. Answering No stops the plugin from loading.
 3. Expand the row and click the run arrow. The panel docks to the right of the 3D view.
-4. **Import** pulls printers from the printer presets OrcaSlicer has loaded (address and access code). **Add** adds one by hand; **Test connection** fills in the model.
+4. **Import** pulls printers from the printer presets OrcaSlicer has loaded (address and access code). **Add** adds one by hand; **Test connection** fills in the model. On a printer card, the circular arrow asks that printer for its status now, and the pencil edits its name, address or access code, or removes it.
 
 To load a newer build into a running OrcaSlicer: Plugins > **Refresh**, untick and tick Farm Send, then run it. When a newer version has been installed than the one the window is running, an orange "↻ 0.3.x" label replaces the version next to the panel title; click it (or hover over it) for these steps.
 
@@ -165,7 +175,7 @@ python3 tests/hardware_check.py --upload "U1 #2"   # 1 KB upload, list, delete. 
 
 ## What has been verified, and how
 
-Tested 2026-11-18 to 21 on OrcaSlicer 2.5.1 (Linux) with two Centauri Carbon 2s (called "CC1" and "CC2" in the older rows, "CC2-1" and "CC2-2" now) and three Snapmaker U1s.
+Tested 2026-11-18 to 22 on OrcaSlicer 2.5.1 and 2.5.2 (Linux) with two Centauri Carbon 2s (called "CC1" and "CC2" in the older rows, "CC2-1" and "CC2-2" now) and three Snapmaker U1s.
 
 The first in-app checks ran in an OrcaSlicer instance on a hidden virtual display (Xvfb), started through the desktop launcher. Since 2026-11-20 they run in a visible OrcaSlicer window.
 
@@ -201,13 +211,14 @@ The first in-app checks ran in an OrcaSlicer instance on a hidden virtual displa
 | Library send, "Print from roll" on a CC2 | Real CC2-1 (2026-11-21): a 10 mm cube sliced for roll 1 printed from roll 2; the printer switched to roll 2 before layer 1 and the card said "from roll 2" |
 | CC2 layer counts kept for clean-up | Real: the storage folder holds counts for 20 and 26 recordings on the two CC2s |
 | Slice for a printer outside the farm is ignored | Inside OrcaSlicer 2.5.1 (0.3.15): a cube sliced for an Anycubic Kobra 2 Max left no plate row, no "Slicing..." and no kept copy |
+| Order split and start | Real, inside OrcaSlicer 2.5.2 (2026-11-22): an order of 110 clips with kept plates for both printer types; Print next planned 15 on each CC2 and 21 on each U1, and all five uploaded and started |
 | Newer-version pill and Stored table | Inside OrcaSlicer 2.5.2 (2026-11-21): a window on an older build showed the orange pill after 0.3.19 was installed, clicking it opened the reload steps, and after the reload the Stored box showed as a table |
 
 ### Checked only against the test printers
 
 These pass the automated tests, which use stand-in printers, but have not been seen working on a real printer or in real use:
 
-- **Orders**: Print next splitting a quantity over free printers, and good-part counts from Bed cleared. No real order has been run.
+- **Orders after the first round**: good-part counts from Bed cleared and the next round. The first real order was started on 2026-11-22 and is still printing.
 - **Automatic daily G-code clean-up**, and G-code clean-up deleting real files (only probe files have been deleted on a real CC2; U1 file delete is proven).
 - **Paused and error notices.**
 - **Clean-up guards**: a busy CC2 refusing video clean-up, and a U1 keeping the recording of the print that is running.

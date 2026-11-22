@@ -39,6 +39,8 @@ Farm Send is a docked panel for small print farms. Slice a plate once per printe
 
 Early release. Developed and tested on Linux with two Centauri Carbon 2s and three Snapmaker U1s (firmware 2.1.2). Windows and macOS are untested; reports welcome. It talks only to the printer addresses you save: no cloud, no telemetry.
 
+Full instructions, a worked example of an order over two printer types, release notes and the source: https://github.com/mlugo-apx/orca-farm-send
+
 Found a problem, or want something added? Click **Report a problem or request an enhancement** at the bottom of the panel and open an issue at https://github.com/mlugo-apx/orca-farm-send/issues
 
 It starts real prints. Look at the bed before you confirm.
