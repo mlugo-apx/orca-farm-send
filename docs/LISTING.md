@@ -16,7 +16,7 @@
 
 Farm Send is a docked panel for small print farms. Slice a plate once per printer type, then upload it and start it on several printers at once.
 
-- Elegoo Centauri Carbon 2: upload and start. Stock OrcaSlicer can upload to this printer but cannot start it.
+- Elegoo Centauri Carbon 2: upload and start, on several printers at once from one dialog.
 - Snapmaker U1: upload and start, with bed leveling, flow calibration and time-lapse options.
 - Live status for every printer: progress, time left, expected finish time, temperatures.
 - Printers grouped into Needs attention, Available and Busy.

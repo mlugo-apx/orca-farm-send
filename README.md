@@ -4,7 +4,7 @@ A docked panel for small print farms: slice a plate once per printer type, then 
 
 <img src="docs/panel.png" alt="Farm Send panel: a 3DBenchy sliced for both printer types, five idle printers, two of them with Details open" width="362">
 
-- **Elegoo Centauri Carbon 2**: upload and start the print. Stock OrcaSlicer can upload to a Centauri Carbon 2 but cannot start it.
+- **Elegoo Centauri Carbon 2**: upload and start the print, on several printers at once from one dialog.
 - **Snapmaker U1**: upload and start the print, with bed leveling, flow calibration and time-lapse options.
 - **Other Moonraker / Klipper printers**: upload and a plain start. Not tested beyond the U1.
 
