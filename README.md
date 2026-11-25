@@ -2,7 +2,7 @@
 
 A docked panel for small print farms: slice a plate once per printer type, then upload it and start it on several printers at once, with live status for every printer.
 
-<img src="docs/panel.png" alt="Farm Send panel: a 3DBenchy sliced for both printer types, five idle printers, two of them with Details open" width="362">
+<img src="docs/panel.png" alt="Farm Send panel during a real order: U1-1 finished and waiting for Bed cleared, four printers busy with progress and finish times, and the Stored table with 39 old files to clean up" width="376">
 
 - **Elegoo Centauri Carbon 2**: upload and start the print, on several printers at once from one dialog.
 - **Snapmaker U1**: upload and start the print, with bed leveling, flow calibration and time-lapse options.
