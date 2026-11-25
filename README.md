@@ -99,7 +99,7 @@ After **Slice all**, every plate is held for its printer type, one line each; cl
 
 **Stored files and cleanup**
 
-<img src="docs/videos.png" alt="Stored box on its Videos tab: recordings per printer, how many are old under the rule, and Clean up" width="346">
+<img src="docs/videos.png" alt="Stored box on its Videos tab: a table of recordings, size and oldest recording per printer, how many are old under the rule, and Clean up" width="354">
 
 The **Stored** box at the bottom lists every printer with its file count, size and oldest file, and how many files count as old under your rule.
 The pencil next to refresh sets the rule: keep files newer than N days, or keep the newest N files. **Clean up** shows what will be removed per printer and asks before deleting. Every printer is ticked in that dialog; untick any you want to leave alone.
