@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.20
+
+- After Upload to all or Upload and print on all, the printers that were sent to are unselected. Before, they stayed selected, so after switching to another printer type and slicing, the busy printers were still picked.
+
 ## 0.3.19
 
 - The Stored box is a table: one row per printer, with columns for files (or recordings), size, oldest and how many are old under the rule.

@@ -274,7 +274,10 @@
                       flow_calibrate: $("opt-flow") ? $("opt-flow").checked : false,
                       timelapse: $("opt-lapse") ? $("opt-lapse").checked : false };
       send("send", { printer_ids: printers.map(function (p) { return p.id; }), start: start, options: options });
+      // The send is on its way: unselect those printers so the next slice does not find them still picked.
+      printers.forEach(function (p) { delete selected[p.id]; });
       hideDialog();
+      render();
     };
   }
 
