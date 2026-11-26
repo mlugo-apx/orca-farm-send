@@ -93,6 +93,10 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(core.strip_model_suffix("part.STL"), "part")
         self.assertEqual(core.strip_model_suffix(".stl"), ".stl")
         self.assertEqual(core.strip_model_suffix("v1.2 bracket"), "v1.2 bracket")
+        # OrcaSlicer numbers copies of an object after the extension.
+        self.assertEqual(core.strip_model_suffix("Pool_Drain_v26.stl_2"), "Pool_Drain_v26")
+        self.assertEqual(core.strip_model_suffix("bracket.3MF_12"), "bracket")
+        self.assertEqual(core.strip_model_suffix("x.stl_a"), "x.stl_a")
         self.assertNotEqual(core.job_filename("a", when=1), core.job_filename("a", when=2))
 
     def test_validate(self):
@@ -1349,6 +1353,10 @@ class AppTests(unittest.TestCase):
         self.assertTrue(wait_for(lambda: self.app.storage.get(self.p_cc2["id"], {}).get("removable") == 2
                                  and self.app.storage.get(self.p_u1["id"], {}).get("removable") == 2))
         self.assertEqual(self.app.storage[self.p_cc2["id"]]["count"], 4)
+        # The clean-up dialog lists by name what the rule removes, oldest first.
+        listed = self.app.storage[self.p_cc2["id"]]["old"]
+        self.assertEqual([item["name"] for item in listed], ["old_03_90d.gcode", "old_02_40d.gcode"])
+        self.assertTrue(listed[0]["modified"] < listed[1]["modified"])
         results = self._cleanup([self.p_u1, self.p_cc2])
         for result in results:
             self.assertTrue(result["ok"], result)
@@ -1356,6 +1364,7 @@ class AppTests(unittest.TestCase):
         for fake in (self.u1, self.cc2):
             self.assertEqual(sorted(fake.files), ["old_00_1d.gcode", "old_01_10d.gcode"])
         self.assertEqual(self.app.storage[self.p_cc2["id"]]["removable"], 0)
+        self.assertEqual(self.app.storage[self.p_cc2["id"]]["old"], [])
         (again,) = self._cleanup([self.p_u1])
         self.assertIn("Nothing to remove", again["text"])
 
@@ -1459,6 +1468,7 @@ class AppTests(unittest.TestCase):
                                  and "videos" in self.app.storage.get(self.p_cc2["id"], {})))
         videos = self.app.storage[self.p_u1["id"]]["videos"]
         self.assertEqual((videos["count"], videos["removable_bytes"]), (3, 5003000 + 5001000))
+        self.assertEqual([item["name"] for item in videos["old"]], ["older_part_20240101120000", "old_part_20250101120000"])
         self.assertEqual(self.app.storage[self.p_cc2["id"]]["videos"]["count"], 0)   # the fake CC2's history is empty
         self.assertFalse(self.app.store.video_cleanup["auto"])                   # recordings are never removed automatically
         self.app.handle({"command": "cleanup", "kind": "videos", "printer_ids": [self.p_u1["id"]]})

@@ -195,8 +195,12 @@ MODEL_SUFFIXES = (".gcode.3mf", ".gcode", ".3mf", ".stl", ".step", ".stp", ".obj
 
 
 def strip_model_suffix(name):
-    """'bracket.stl' -> 'bracket': object names carry the extension of the file they came from."""
+    """'bracket.stl' -> 'bracket': object names carry the extension of the file they came from.
+    OrcaSlicer also numbers copies of an object after the extension ('bracket.stl_2')."""
     name = (name or "").strip()
+    copy = re.match(r"^(.+?)\.(?:stl|3mf|step|stp|obj|amf)_\d+$", name, re.IGNORECASE)
+    if copy:
+        return copy.group(1)
     for suffix in MODEL_SUFFIXES:
         if name.lower().endswith(suffix) and len(name) > len(suffix):
             return name[: -len(suffix)]
@@ -2004,6 +2008,15 @@ def videos_to_clean(items, rule, running="", now=None):
 def storage_summary(files):
     dated = [item["modified"] for item in files if item.get("modified")]
     return {"count": len(files), "bytes": sum(item.get("size") or 0 for item in files), "oldest": min(dated) if dated else None}
+
+
+OLD_LIST_MAX = 300   # old files listed by name in the clean-up dialog, per printer
+
+
+def old_list(items):
+    """The files or recordings a clean-up would remove, for the dialog: name, date and size, oldest first."""
+    return [{"name": os.path.basename(str(item.get("name") or "")), "modified": item.get("modified") or 0,
+             "size": item.get("size") or 0} for item in items[:OLD_LIST_MAX]]
 
 
 def file_stamp(path):

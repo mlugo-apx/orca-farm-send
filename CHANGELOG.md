@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.21
+
+- Tidier panel text. Library plates and sliced plates show their facts as labelled rows (Print, Toolhead, Process, Kept) that wrap instead of being cut off at the panel edge, and preset names drop the printer they are for ("@Elegoo CC2 0.4 nozzle"), since the printer is already shown.
+- A printing card shows the part name ("Pool_Drain_v26") instead of the file name the send gave it; the full file name is in the hover text. The extra line "Print: printer is printing" is gone: the card's state already says so.
+- OrcaSlicer's copy number after an object's extension ("part.stl_2") is left out of plate names and of the names of files sent.
+- Each sliced printer type has its printers, "clear" and "presets" on one line.
+- The clean-up dialog lists the old files or recordings of each printer by name, date and size, under "Show the N files", before you confirm.
+
 ## 0.3.20
 
 - After Upload to all or Upload and print on all, the printers that were sent to are unselected. Before, they stayed selected, so after switching to another printer type and slicing, the busy printers were still picked.

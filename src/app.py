@@ -11,7 +11,7 @@ import time
 import uuid
 
 from core import (videos_to_clean, newest_installed, record_version, version_key, RunLog, run_result, toolhead_color_problem, count_objects, file_stamp, OrderBook, plan_order, CC2_MANY_FILES, nozzle_mismatch, toolhead_problem, write_private, file_md5, STORE_FILE, KIND_CC2, WATCHED_STATES, BedLog, FarmError, bed_needs_clearing, files_to_clean, rule_text,
-                  storage_summary, PrinterStore, can_start, job_filename, make_client, model_key, model_matches,
+                  storage_summary, old_list, PrinterStore, can_start, job_filename, make_client, model_key, model_matches,
                   parse_gcode_meta, preset_to_printer, presets_to_printers, set_shared_dir, status_event, strip_model_suffix, validate_printer)
 # BUNDLE-STRIP-END
 
@@ -1281,7 +1281,8 @@ class FarmApp:
         if videos is None:
             return None
         old = videos_to_clean(videos, self.store.video_cleanup, (self.status.get(printer_id) or {}).get("filename"))
-        return dict(storage_summary(videos), removable=len(old), removable_bytes=sum(item.get("size") or 0 for item in old))
+        return dict(storage_summary(videos), removable=len(old), removable_bytes=sum(item.get("size") or 0 for item in old),
+                    old=old_list(old))
 
     def _set_storage(self, printer, files=None, error="", videos=False):
         """videos: the printer's recordings, None when it has none to list, False = unchanged."""
@@ -1295,7 +1296,9 @@ class FarmApp:
             else:
                 entry = storage_summary(files)
                 entry["videos"] = before.get("videos")
-                entry["removable"] = len(files_to_clean(files, self.store.cleanup, self._protected(printer_id)))
+                old = files_to_clean(files, self.store.cleanup, self._protected(printer_id))
+                entry["removable"] = len(old)
+                entry["old"] = old_list(old)
                 entry["many"] = printer.get("kind") == KIND_CC2 and entry["count"] >= CC2_MANY_FILES
                 entry["error"] = ""
             if videos is not False:
