@@ -316,7 +316,10 @@
       "<label class='field'>Name<input id='f-name' value='" + esc(p.name) + "' placeholder='U1 #3'></label>" +
       "<label class='field'>Type<select id='f-kind'>" +
         "<option value='moonraker'>Snapmaker U1 / Moonraker</option>" +
-        "<option value='elegoo_cc2'>Elegoo Centauri Carbon 2</option></select></label>" +
+        "<option value='elegoo_cc2'>Elegoo Centauri Carbon 2</option>" +
+        "<option value='elegoo_cc1'>Elegoo Centauri Carbon (experimental, untested)</option></select></label>" +
+      "<p class='small warn' id='row-cc1' style='margin:4px 0 0'>Experimental: never run on a real Centauri Carbon by the developer. " +
+        "It checks status, uploads, starts and stops prints; nothing else. Watch the first prints, and turn on the debug log in Settings (&#9881;) so you can report what happened.</p>" +
       "<label class='field'>IP address or host name<input id='f-address' value='" + esc(p.address) + "' placeholder='192.168.1.50'></label>" +
       "<label class='field' id='row-code'>Access code<input id='f-code' value='" + esc(p.access_code) + "' placeholder='shown on the printer screen'></label>" +
       "<label class='field' id='row-key'>API key (leave empty if none)<input id='f-key' value='" + esc(p.api_key) + "'></label>" +
@@ -330,9 +333,10 @@
         "<button type='button' id='dlg-ok'>Save</button></div>");
     $("f-kind").value = p.kind;
     function sync() {
-      var cc2 = $("f-kind").value === "elegoo_cc2";
+      var kind = $("f-kind").value, cc2 = kind === "elegoo_cc2";
       $("row-code").style.display = cc2 ? "block" : "none";
-      $("row-key").style.display = cc2 ? "none" : "block";
+      $("row-key").style.display = kind === "moonraker" ? "block" : "none";     // the first Centauri Carbon has no code or key
+      $("row-cc1").style.display = kind === "elegoo_cc1" ? "block" : "none";
     }
     function collect() {
       return { id: p.id, name: $("f-name").value, kind: $("f-kind").value, address: $("f-address").value,
@@ -1067,7 +1071,8 @@
       "<div class='row spread'><div class='row' style='min-width:0'>" +
         "<input type='checkbox' data-pick='" + esc(p.id) + "'" + (selected[p.id] ? " checked" : "") + " title='Select for sending to several printers'>" +
         "<span class='dot " + esc(status.needs_clearing ? "paused" : status.state) + "'" + fold + "></span>" +
-        "<span class='card-title'" + fold + ">" + esc(p.name) + "</span></div>" +
+        "<span class='card-title'" + fold + ">" + esc(p.name) + "</span>" +
+        (p.kind === "elegoo_cc1" ? " <span class='tiny warn' title='Experimental support, never run on a real Centauri Carbon by the developer'>experimental</span>" : "") + "</div>" +
         "<div class='row'><span class='pill st-" + esc(look) + "'" + fold + ">" + esc(stateText) + "</span>" +
         (fold ? iconButton("up", "data-collapse", p.id, "Collapse") : "") +
         iconButton("refresh", "data-refresh", p.id, "Refresh: ask this printer for its status now") +
@@ -1131,7 +1136,7 @@
   function storeOf(p) { var st = state.storage[p.id]; return storeView === "videos" ? (st && st.count != null ? st.videos : undefined) : st; }
   function storeWord(n) { return storeView === "videos" ? (n === 1 ? "recording" : "recordings") : (n === 1 ? "file" : "files"); }
   function recount() {
-    counting = state.printers.length;
+    counting = state.printers.filter(function (p) { return p.kind !== "elegoo_cc1"; }).length;
     renderStorage();
     send("check_storage");
     setTimeout(function () { counting = 0; renderStorage(); }, 30000);   // never stuck on "Counting..."
@@ -1142,7 +1147,8 @@
     var body = state.printers.map(function (p) {
       var st = storeOf(p), whole = state.storage[p.id];
       var cells;
-      if (st === null) cells = "<td colspan='4' class='muted'>none to list</td>";
+      if (p.kind === "elegoo_cc1") cells = "<td colspan='4' class='muted' title='This first version only checks status, uploads, starts and stops prints on a Centauri Carbon'>not on a Centauri Carbon yet</td>";
+      else if (st === null) cells = "<td colspan='4' class='muted'>none to list</td>";
       else if (!st || st.count == null) cells = "<td colspan='4' class='muted'>" + esc(whole && whole.error ? whole.error : "counting...") + "</td>";
       else {
         removable += st.removable || 0;

@@ -444,3 +444,221 @@ class FakeCC2:
         else:
             result = {"error_code": 1001}
         self._send_publish(conn, "%s/%s/api_response" % (base, match.group(1)), {"id": body.get("id"), "method": method, "result": result})
+
+
+class FakeCC1:
+    """The first Elegoo Centauri Carbon, as OrcaSlicer's ElegooLink.cpp and Elegoo's elegoo-link SDK describe
+    it: SDCP over a WebSocket, and a chunked multipart upload. Nobody on the project owns one, so this fake
+    is the only printer the CC1 code has met; keep it to what the sources say."""
+
+    MAINBOARD = "7f3c0a9d11e2aa00"
+
+    def __init__(self, max_clients=5):
+        self.files, self.started, self.stops, self.bad_commands = {}, [], 0, []
+        self.codes, self.job_status, self.filename = [0], 0, ""
+        self.check_polls = 0           # status reads that still show "checking file" after an upload
+        self.no_start_ack = False      # the start command is carried out but never answered
+        self.start_ack = 0
+        self.prefix = False            # send frames as "<length>{...}", as some firmware does
+        self.max_clients, self.open, self.opened, self.clean_closes = max_clients, 0, 0, 0
+        self.status_reads, self.upload_parts = 0, []
+        self._uploads, self._lock = {}, threading.Lock()
+        outer = self
+
+        # ---- WebSocket on its own port ------------------------------------------------------
+        self.ws = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.ws.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.ws.bind(("127.0.0.1", 0))
+        self.ws.listen(16)
+        self.ws_port = self.ws.getsockname()[1]
+        threading.Thread(target=self._accept, daemon=True).start()
+
+        # ---- upload over HTTP -----------------------------------------------------------------
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                if not self.path.startswith("/uploadFile/upload"):
+                    self.send_response(404); self.send_header("Content-Length", "0"); self.end_headers()
+                    return
+                body = self.rfile.read(int(self.headers["Content-Length"]))
+                boundary = re.search(r"boundary=(.+)", self.headers["Content-Type"]).group(1).encode()
+                fields, data = {}, b""
+                for part in body.split(b"--" + boundary):
+                    if b"\r\n\r\n" not in part:
+                        continue
+                    head, _, value = part.partition(b"\r\n\r\n")
+                    value = value[:-2] if value.endswith(b"\r\n") else value
+                    name = re.search(rb'name="([^"]+)"', head).group(1).decode()
+                    if name == "File":
+                        data = value
+                        fields["filename"] = re.search(rb'filename="([^"]*)"', head).group(1).decode()
+                    else:
+                        fields[name] = value.decode()
+                outer.upload_parts.append(dict(fields, size=len(data)))
+                ok = all(k in fields for k in ("Check", "S-File-MD5", "Offset", "Uuid", "TotalSize"))
+                with outer._lock:
+                    got = outer._uploads.setdefault(fields.get("Uuid"), bytearray())
+                    if ok and int(fields["Offset"]) != len(got):
+                        ok = False
+                    if ok:
+                        got += data
+                        if len(got) == int(fields["TotalSize"]):
+                            if hashlib.md5(bytes(got)).hexdigest() != fields["S-File-MD5"]:
+                                ok = False
+                            else:
+                                outer.files[fields["filename"]] = bytes(got)
+                                outer.check_polls = getattr(outer, "check_after_upload", 0)
+                reply = {"code": "000000", "messages": None, "data": {}, "success": True} if ok else \
+                        {"code": "111111", "messages": [{"field": "common_field", "message": -2}], "data": {}, "success": False}
+                raw = json.dumps(reply).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+        self.http = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.upload_port = self.http.server_address[1]
+        threading.Thread(target=self.http.serve_forever, daemon=True).start()
+
+    def printer(self, name="CC1-A"):
+        return {"name": name, "kind": "elegoo_cc1", "address": "127.0.0.1", "model": "Elegoo Centauri Carbon",
+                "ws_port": self.ws_port, "upload_ports": [self.upload_port]}
+
+    def close(self):
+        self.http.shutdown()
+        try:
+            self.ws.close()
+        except OSError:
+            pass
+
+    # ---- state as the printer reports it ------------------------------------------------------
+    def status(self):
+        codes = list(self.codes)
+        if self.check_polls > 0:
+            self.check_polls -= 1
+            codes = [8]
+        return {"CurrentStatus": codes, "TempOfNozzle": 215.0, "TempTargetNozzle": 215, "TempOfHotbed": 60.0,
+                "TempTargetHotbed": 60, "PrintInfo": {"Status": self.job_status, "CurrentLayer": 3, "TotalLayer": 120,
+                                                       "CurrentTicks": 300.5, "TotalTicks": 3900.0, "Progress": 8,
+                                                       "Filename": ("/local/" + self.filename) if self.filename else "",
+                                                       "ErrorNumber": 0}}
+
+    # ---- WebSocket server ---------------------------------------------------------------------
+    def _accept(self):
+        while True:
+            try:
+                conn, _ = self.ws.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
+
+    def _serve(self, conn):
+        conn.settimeout(10)
+        try:
+            request = b""
+            while b"\r\n\r\n" not in request:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    return
+                request += chunk
+            with self._lock:
+                full = self.open >= self.max_clients
+                if not full:
+                    self.open += 1
+                    self.opened += 1
+            if full:
+                conn.sendall(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 15\r\n\r\ntoo many client")
+                return
+            key = re.search(rb"Sec-WebSocket-Key: (\S+)", request).group(1)
+            accept = base64.b64encode(hashlib.sha1(key + b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest())
+            conn.sendall(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                         b"Sec-WebSocket-Accept: " + accept + b"\r\n\r\n")
+            try:
+                self._talk(conn)
+            finally:
+                with self._lock:
+                    self.open -= 1
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+    def _read_frame(self, conn, buffer):
+        def need(count):
+            nonlocal buffer
+            while len(buffer) < count:
+                chunk = conn.recv(65536)
+                if not chunk:
+                    raise ConnectionError()
+                buffer += chunk
+        need(2)
+        opcode, length = buffer[0] & 0x0F, buffer[1] & 0x7F
+        offset = 2
+        if length == 126:
+            need(4); length, offset = struct.unpack("!H", buffer[2:4])[0], 4
+        elif length == 127:
+            need(10); length, offset = struct.unpack("!Q", buffer[2:10])[0], 10
+        need(offset + 4 + length)
+        mask = buffer[offset:offset + 4]
+        data = bytes(b ^ mask[i % 4] for i, b in enumerate(buffer[offset + 4:offset + 4 + length]))
+        return opcode, data, buffer[offset + 4 + length:]
+
+    def _send(self, conn, value):
+        text = value if isinstance(value, str) else json.dumps(value)
+        if self.prefix and not isinstance(value, str):
+            text = "%d%s" % (len(text), text)
+        raw = text.encode()
+        head = bytes([0x81, len(raw)]) if len(raw) < 126 else bytes([0x81, 126]) + struct.pack("!H", len(raw))
+        conn.sendall(head + raw)
+
+    def _ack(self, conn, request, data):
+        body = request.get("Data") or {}
+        self._send(conn, {"Id": "x", "Data": {"Cmd": body.get("Cmd"), "Data": data, "RequestID": body.get("RequestID"),
+                                              "MainboardID": self.MAINBOARD, "TimeStamp": 1735032553},
+                          "Topic": "sdcp/response/" + self.MAINBOARD})
+
+    def _talk(self, conn):
+        buffer = b""
+        while True:
+            opcode, data, buffer = self._read_frame(conn, buffer)
+            if opcode == 8:
+                with self._lock:
+                    self.clean_closes += 1
+                return
+            if opcode != 1:
+                continue
+            text = data.decode()
+            if text == "ping":
+                self._send(conn, "pong")
+                continue
+            request = json.loads(text)
+            body = request.get("Data") or {}
+            cmd = body.get("Cmd")
+            if cmd == 0:
+                self.status_reads += 1
+                self._ack(conn, request, {"Ack": 0})
+                self._send(conn, {"Status": self.status(), "MainboardID": self.MAINBOARD, "TimeStamp": 1735032553,
+                                  "Topic": "sdcp/status/" + self.MAINBOARD})
+            elif cmd == 1:
+                self._ack(conn, request, {"Ack": 0})
+                self._send(conn, {"Attributes": {"Name": "Centauri Carbon", "MachineName": "Centauri Carbon",
+                                                 "FirmwareVersion": "V1.1.46", "MainboardID": self.MAINBOARD},
+                                  "Topic": "sdcp/attributes/" + self.MAINBOARD})
+            elif cmd == 128:
+                self.started.append(dict(body.get("Data") or {}))
+                name = str((body.get("Data") or {}).get("Filename", "")).replace("/local/", "", 1)
+                ack = self.start_ack if name in self.files else 2
+                if ack == 0:
+                    self.codes, self.job_status, self.filename = [1], 13, name
+                if not self.no_start_ack:
+                    self._ack(conn, request, {"Ack": ack})
+            elif cmd == 130:
+                self.stops += 1
+                self.codes, self.job_status = [0], 8
+                self._ack(conn, request, {"Ack": 0})
+            else:
+                # The real printer's control program can crash on a command it does not expect.
+                self.bad_commands.append(cmd)
+                return

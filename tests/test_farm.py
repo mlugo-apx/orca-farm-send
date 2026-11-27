@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -32,7 +33,7 @@ if os.environ.get("FARM_SEND_BUNDLE"):
 else:
     import core  # noqa: E402
     from app import FarmApp  # noqa: E402
-from fakes import FakeCC2, FakeMoonraker  # noqa: E402
+from fakes import FakeCC1, FakeCC2, FakeMoonraker  # noqa: E402
 
 U1_GCODE = "; HEADER_BLOCK_START\n; total layer number: 12\n; filament used [g] = 0.00, 3.50\n; total filament used [g] = 3.50\n" \
            "; estimated printing time (normal mode) = 1h 2m 3s\n; HEADER_BLOCK_END\nG28\nG1 X1\n" \
@@ -40,6 +41,8 @@ U1_GCODE = "; HEADER_BLOCK_START\n; total layer number: 12\n; filament used [g] 
            "; filament_type = PETG;PETG\n; post_process = \n; printer_model = Snapmaker U1\n" \
            "; printer_settings_id = Snapmaker U1 (0.4 nozzle) - #1\n; CONFIG_BLOCK_END\n"
 CC2_GCODE = U1_GCODE.replace("Snapmaker U1 (0.4 nozzle) - #1", "CC1").replace("printer_model = Snapmaker U1", "printer_model = Elegoo Centauri Carbon 2")
+CC1_GCODE = U1_GCODE.replace("Snapmaker U1 (0.4 nozzle) - #1", "Elegoo Centauri Carbon 0.4 nozzle").replace(
+    "printer_model = Snapmaker U1", "printer_model = Elegoo Centauri Carbon").replace("; CONFIG_BLOCK_END", "; curr_bed_type = Cool Plate\n; CONFIG_BLOCK_END")
 
 
 def write(folder, name, text):
@@ -290,6 +293,167 @@ class DebugLogTests(unittest.TestCase):
         self.assertEqual(core.PrinterStore(store.path).debug_until, 1000.0 + core.DEBUG_LOG_HOURS * 3600)
         store.set_debug(False)
         self.assertEqual(core.PrinterStore(store.path).debug_until, 0.0)
+
+
+class CC1Tests(unittest.TestCase):
+    """The first Centauri Carbon (experimental). These tests hold the guard rails: a wrong message can
+    crash the printer's control program and kill a running print, and nobody on the project owns one."""
+
+    def setUp(self):
+        self.fake = FakeCC1(); self.addCleanup(self.fake.close)
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.client = core.make_client(self.fake.printer())
+        core._CC1_UPLOAD_PORT.clear()
+
+    def _gcode(self, size=0):
+        return write(self.tmp.name, "plate.gcode", CC1_GCODE + ("G1 X2 ; padding\n" * (size // 16)))
+
+    def _all_closed(self):
+        self.assertTrue(wait_for(lambda: self.fake.open == 0))
+        self.assertEqual(self.fake.clean_closes, self.fake.opened)       # every connection closed properly
+
+    def test_idle_means_every_code_zero_and_no_job_running(self):
+        idle = lambda codes, job: core.cc1_is_idle({"CurrentStatus": codes, "PrintInfo": {"Status": job}})
+        for job in (0, 8, 9):
+            self.assertTrue(idle([0], job), job)
+        for job in (1, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 99):
+            self.assertFalse(idle([0], job), job)                        # anything else, known or not, is busy
+        self.assertFalse(idle([0, 8], 0))
+        self.assertFalse(idle([1], 9))
+        self.assertFalse(idle([], 0))
+        self.assertFalse(core.cc1_is_idle({}))
+        self.assertTrue(idle(0, 0))                                      # older firmware: a number, not a list
+
+    def test_status_is_read_and_translated(self):
+        self.assertEqual(self.client.status()["state"], "idle")
+        self.fake.codes, self.fake.job_status, self.fake.filename = [1], 13, "x.gcode"
+        status = self.client.status()
+        self.assertEqual((status["state"], status["filename"], status["progress"], status["remaining_s"]), ("printing", "x.gcode", 8.0, 3599))
+        self.assertEqual(status["nozzle"], {"current": 215.0, "target": 215.0})
+        self.fake.codes, self.fake.job_status = [0], 9
+        self.assertEqual(self.client.status()["last_result"], "complete")
+        self.fake.job_status = 8
+        self.assertEqual(self.client.status()["last_result"], "cancelled")
+        self.fake.job_status = 14
+        self.assertEqual(self.client.status()["state"], "error")
+        self.fake.codes, self.fake.job_status = [0], 6
+        self.assertEqual(self.client.status()["state"], "paused")
+        self.fake.codes, self.fake.job_status = [42], 0
+        self.assertEqual(self.client.status()["state"], "busy")          # an unknown code is never idle
+        self.fake.prefix = True                                          # "123{...}" frames from some firmware
+        self.fake.codes = [0]
+        self.assertEqual(self.client.status()["state"], "idle")
+        self._all_closed()
+        self.assertEqual(self.fake.bad_commands, [])
+
+    def test_upload_and_start_send_exactly_what_orcaslicer_sends(self):
+        path = self._gcode(size=2_500_000)                               # three pieces of 1 MB
+        name = self.client.upload(path, "plate_x1.gcode")
+        with open(path, "rb") as handle:
+            self.assertEqual(self.fake.files["plate_x1.gcode"], handle.read())
+        self.assertEqual([part["Offset"] for part in self.fake.upload_parts], ["0", "1048576", "2097152"])
+        self.assertEqual(len({part["Uuid"] for part in self.fake.upload_parts}), 1)
+        self.client.start_print(name, {"bed_leveling": True, "timelapse": False, "bed_type": "Cool Plate"})
+        self.assertEqual(self.fake.started, [{"Filename": "/local/plate_x1.gcode", "StartLayer": 0, "Calibration_switch": 1,
+                                              "PrintPlatformType": 1, "Tlp_Switch": 0}])
+        self.assertEqual(self.client.status()["state"], "printing")
+        self._all_closed()
+        self.assertEqual(self.fake.bad_commands, [])
+
+    def test_waits_while_the_printer_checks_a_new_file(self):
+        self.fake.check_after_upload = 3
+        self.client.upload(self._gcode(), "a.gcode")
+        reads = self.fake.status_reads
+        self.client.start_print("a.gcode", {})
+        self.assertGreaterEqual(self.fake.status_reads - reads, 4)        # three "checking" reads, then idle
+        self.assertEqual(len(self.fake.started), 1)
+
+    def test_nothing_is_uploaded_onto_a_busy_printer_or_over_the_running_file(self):
+        self.fake.codes, self.fake.job_status, self.fake.filename = [1], 13, "a.gcode"
+        with self.assertRaisesRegex(core.FarmError, "Not uploaded: the printer is printing"):
+            self.client.upload(self._gcode(), "b.gcode")
+        self.fake.codes, self.fake.job_status = [0], 5                   # pausing still holds a job
+        with self.assertRaisesRegex(core.FarmError, "Not uploaded"):
+            self.client.upload(self._gcode(), "b.gcode")
+        self.fake.codes, self.fake.job_status = [0], 9                   # finished, file still current
+        with self.assertRaisesRegex(core.FarmError, "same name"):
+            self.client.upload(self._gcode(), "a.gcode")
+        self.assertEqual(self.fake.upload_parts, [])
+
+    def test_the_start_is_never_sent_twice(self):
+        old = core.CC1_START_ACK_WAIT
+        core.CC1_START_ACK_WAIT = 0.5
+        self.addCleanup(setattr, core, "CC1_START_ACK_WAIT", old)
+        self.fake.no_start_ack = True
+        # No answer, but the printer shows the print running: that counts as started.
+        self.client.upload(self._gcode(), "a.gcode")
+        self.client.start_print("a.gcode", {})
+        self.assertEqual(len(self.fake.started), 1)
+        # No answer and still idle: reported, never sent again.
+        self.fake.codes, self.fake.job_status, self.fake.filename = [0], 0, ""
+        self.fake.started.clear()
+        with self.assertRaisesRegex(core.FarmError, "does not send the start again"):
+            self.client.start_print("missing.gcode", {})
+        self.assertEqual(len(self.fake.started), 1)
+        self._all_closed()
+
+    def test_no_start_when_the_printer_got_busy_after_the_upload(self):
+        self.client.upload(self._gcode(), "a.gcode")
+        # Someone starts another file at the printer before Farm Send sends its start.
+        self.fake.codes, self.fake.job_status, self.fake.filename = [1], 13, "other.gcode"
+        with self.assertRaisesRegex(core.FarmError, "not started: the printer is printing"):
+            self.client.start_print("a.gcode", {})
+        self.assertEqual(self.fake.started, [])
+
+    def test_a_refused_start_is_explained(self):
+        self.client.upload(self._gcode(), "a.gcode")
+        self.fake.start_ack = 1
+        with self.assertRaisesRegex(core.FarmError, "busy"):
+            self.client.start_print("a.gcode", {})
+        with self.assertRaisesRegex(core.FarmError, "cannot find the file"):
+            self.client.start_print("missing.gcode", {})
+
+    def test_a_full_printer_says_so(self):
+        self.fake.max_clients = 0
+        with self.assertRaisesRegex(core.FarmError, "as many apps as it allows"):
+            self.client.status()
+
+    def test_upload_tries_the_other_port_and_remembers_it(self):
+        spare = socket.socket(); spare.bind(("127.0.0.1", 0)); closed = spare.getsockname()[1]; spare.close()
+        client = core.ElegooCC1("127.0.0.1", ws_port=self.fake.ws_port, upload_ports=(closed, self.fake.upload_port))
+        client.upload(self._gcode(), "a.gcode")
+        self.assertIn("a.gcode", self.fake.files)
+        self.assertEqual(core._CC1_UPLOAD_PORT["127.0.0.1"], self.fake.upload_port)
+
+    def test_only_known_commands_are_ever_sent(self):
+        sock = self.client._open()
+        try:
+            for cmd in (258, 259, 320, 386, 387, 403, 129, 131, 512):
+                with self.assertRaisesRegex(core.FarmError, "not known to be safe"):
+                    self.client._command(sock, cmd, {}, 1)
+        finally:
+            sock.close()
+        self.assertEqual(self.fake.bad_commands, [])
+
+    def test_cancel(self):
+        self.client.upload(self._gcode(), "a.gcode")
+        self.client.start_print("a.gcode", {})
+        self.client.cancel_print()
+        status = self.client.status()
+        self.assertEqual((status["state"], status["last_result"]), ("idle", "cancelled"))
+
+    def test_import_and_validation(self):
+        found = core.preset_to_printer({"print_host": "192.168.1.70", "printer_model": "Elegoo Centauri Carbon",
+                                        "name": "Elegoo Centauri Carbon 0.4 nozzle - Shop", "host_type": "elegoolink"})
+        self.assertEqual(found["kind"], core.KIND_CC1)
+        self.assertEqual(found["access_code"], "")
+        cc2 = core.preset_to_printer({"print_host": "192.168.1.71", "printer_model": "Elegoo Centauri Carbon 2",
+                                      "name": "Elegoo Centauri Carbon 2 0.4 nozzle - A", "printhost_apikey": "abc"})
+        self.assertEqual(cc2["kind"], core.KIND_CC2)
+        neptune = core.preset_to_printer({"print_host": "192.168.1.72", "printer_model": "Elegoo Neptune 4", "host_type": "elegoolink"})
+        self.assertIsNone(neptune)
+        self.assertEqual(core.validate_printer(dict(found, name="CC1"))["kind"], core.KIND_CC1)
+        self.assertFalse(core.model_matches("Elegoo Centauri Carbon", "Elegoo Centauri Carbon 2"))
 
 
 class MoonrakerTests(unittest.TestCase):
@@ -1438,6 +1602,30 @@ class AppTests(unittest.TestCase):
         self.assertEqual(len(self.app.debug_log.tail(5000)), before)          # off: nothing more is written
         self.app.handle({"command": "debug_log", "action": "clear"})
         self.assertEqual(self.app.debug_log.size(), 0)
+
+    def test_an_experimental_centauri_carbon_beside_the_others(self):
+        fake = FakeCC1(); self.addCleanup(fake.close)
+        cc1 = self.app.store.upsert(fake.printer())
+        self.slice(CC1_GCODE)
+        self.app.handle({"command": "bed_cleared", "id": cc1["id"]})
+        (sent,) = self.send([cc1], True)
+        self.assertTrue(sent["ok"], sent)
+        self.assertEqual(sent["text"], "Started widget")
+        self.assertEqual(fake.started[0]["PrintPlatformType"], 1)                 # Cool Plate, read from the G-code
+        self.assertEqual(self._read(cc1)["state"], "printing")
+        fake.codes, fake.job_status = [0], 9                                       # finished
+        status = self._read(cc1)
+        self.assertEqual(status["state"], "idle")
+        self.assertTrue(status["needs_clearing"])
+        (again,) = self.send([cc1], True)                                          # Bed cleared is still required
+        self.assertFalse(again["ok"])
+        self.assertIn("clear the bed", again["text"])
+        self.app.check_storage(force=True, only=cc1["id"])
+        time.sleep(0.3)
+        self.assertNotIn(cc1["id"], self.app.storage)                              # file lists are never asked of it
+        self.assertEqual(fake.bad_commands, [])
+        u1 = self.app.snapshot()["types"]
+        self.assertTrue(any("Centauri Carbon" in (t.get("label") or "") for t in u1))
 
     def test_send_messages_name_the_part_and_keep_the_file_name_for_hover(self):
         self.slice()

@@ -30,7 +30,9 @@ CC2_UPLOAD_TRIES = 5      # per piece, when the printer says busy (HTTP 429) or 
 CC2_UPLOAD_PAUSE = 3.0    # seconds before the first retry; grows with each one. The printer needed about 6 s.
 KIND_CC2 = "elegoo_cc2"
 KIND_MOONRAKER = "moonraker"
-KINDS = {KIND_CC2: "Elegoo Centauri Carbon 2 (ElegooLink)", KIND_MOONRAKER: "Moonraker / Klipper (Snapmaker U1)"}
+KIND_CC1 = "elegoo_cc1"     # the first Centauri Carbon: experimental, never run on a real printer by the author
+KINDS = {KIND_CC2: "Elegoo Centauri Carbon 2 (ElegooLink)", KIND_MOONRAKER: "Moonraker / Klipper (Snapmaker U1)",
+         KIND_CC1: "Elegoo Centauri Carbon (experimental, untested)"}
 
 
 class FarmError(Exception):
@@ -57,6 +59,7 @@ _META_KEYS = {
     "post_process": "post_process",
     "total layer number": "layers",
     "total layers count": "layers",
+    "curr_bed_type": "bed_type",
 }
 
 
@@ -1633,6 +1636,425 @@ def _temp(block):
 
 
 # --------------------------------------------------------------------------------------
+# Elegoo Centauri Carbon (the first model): EXPERIMENTAL, never run on a real printer by the author
+# --------------------------------------------------------------------------------------
+#
+# Elegoo's SDCP over a WebSocket on port 3030, and a chunked HTTP upload. Built from OrcaSlicer's own
+# src/slic3r/Utils/ElegooLink.cpp, which uploads to and starts this printer, and from Elegoo's elegoo-link
+# SDK for status. Guard rails, because a wrong message can crash the printer's control program and kill
+# a print that is running:
+# - only the commands in CC1_SAFE_COMMANDS are ever sent, with exactly the fields OrcaSlicer sends;
+# - nothing is uploaded unless the printer clearly reports idle and is not holding a file of that name;
+# - the start command is sent once and never repeated: if no answer comes, the status is read and shown;
+# - each connection is closed with a proper close frame, as the printer takes only about five at once.
+
+CC1_WS_PORT = 3030
+CC1_UPLOAD_PORTS = (80, 3030)      # OrcaSlicer and Elegoo's SDK post to port 80; the protocol paper says 3030
+CC1_CHUNK = 1024 * 1024
+CC1_CMD_STATUS, CC1_CMD_ATTRIBUTES, CC1_CMD_START, CC1_CMD_STOP = 0, 1, 128, 130
+CC1_SAFE_COMMANDS = frozenset((CC1_CMD_STATUS, CC1_CMD_ATTRIBUTES, CC1_CMD_START, CC1_CMD_STOP))
+CC1_FILE_CHECK_WAIT = 60.0          # seconds the printer may spend checking a new file before a start
+CC1_START_ACK_WAIT = 30.0
+CC1_MACHINE_TEXT = {0: "Idle", 1: "Printing", 2: "Receiving file", 4: "Self check", 5: "Auto leveling",
+                    6: "Resonance test", 7: "Busy", 8: "Checking file", 9: "Homing", 10: "Unloading filament",
+                    11: "PID calibration"}
+CC1_PRINT_TEXT = {1: "Homing", 5: "Pausing", 6: "Paused", 7: "Stopping", 8: "Stopped", 9: "Complete",
+                  10: "Checking file", 11: "Checking printer", 12: "Resuming", 13: "Printing", 14: "Stopped on error",
+                  15: "Auto leveling", 16: "Preheating", 17: "Resonance test", 18: "Starting", 19: "Leveled",
+                  20: "Preheated", 21: "Homed", 22: "Resonance test done"}
+CC1_IDLE_PRINT_CODES = frozenset((0, 8, 9))        # nothing running: never printed, cancelled, finished
+CC1_START_ACKS = {1: "the printer is busy", 2: "the printer cannot find the file", 3: "the file arrived damaged (MD5 check failed)",
+                  4: "the printer could not read the file", 5: "the file does not match this printer",
+                  6: "the printer does not recognise the file format", 7: "the file was sliced for another printer model"}
+_CC1_UPLOAD_PORT = {}              # host -> the upload port that worked, so later sends try it first
+
+
+def _cc1_codes(value):
+    """CurrentStatus as a list of ints; it is a list on current firmware, a number on some older builds."""
+    values = value if isinstance(value, list) else [value]
+    return [v for v in values if isinstance(v, int) and not isinstance(v, bool)]
+
+
+def _cc1_temp(current, target):
+    """A temperature pair. Older firmware sends [target, actual] as one list."""
+    if isinstance(current, list) and len(current) == 2:
+        target, current = current[0], current[1]
+    if not isinstance(current, (int, float)) or isinstance(current, bool):
+        return None
+    return {"current": round(float(current), 1),
+            "target": round(float(target), 1) if isinstance(target, (int, float)) and not isinstance(target, bool) else 0.0}
+
+
+def cc1_is_idle(status):
+    """True only when the printer clearly reports idle: every machine code 0, and the job either never
+    started, was stopped or completed. Anything unknown is busy."""
+    status = status if isinstance(status, dict) else {}
+    codes = _cc1_codes(status.get("CurrentStatus"))
+    job = status.get("PrintInfo") if isinstance(status.get("PrintInfo"), dict) else {}
+    job_code = job.get("Status", 0)
+    return bool(codes) and all(code == 0 for code in codes) and job_code in CC1_IDLE_PRINT_CODES
+
+
+def normalize_cc1_status(status):
+    status = status if isinstance(status, dict) else {}
+    codes = _cc1_codes(status.get("CurrentStatus"))
+    job = status.get("PrintInfo") if isinstance(status.get("PrintInfo"), dict) else {}
+    job_code = job.get("Status")
+    filename = str(job.get("Filename") or "")
+    if filename.startswith("/local/"):
+        filename = filename[len("/local/"):]
+    out = {"state": "busy", "state_text": "Busy", "filename": filename, "progress": None, "remaining_s": None,
+           "nozzle": _cc1_temp(status.get("TempOfNozzle"), status.get("TempTargetNozzle")),
+           "bed": _cc1_temp(status.get("TempOfHotbed"), status.get("TempTargetHotbed")),
+           "errors": [job["ErrorNumber"]] if isinstance(job.get("ErrorNumber"), int) and job.get("ErrorNumber") else [],
+           "last_result": ""}
+    if cc1_is_idle(status):
+        out["state"], out["state_text"] = "idle", "Idle"
+        out["last_result"] = {9: "complete", 8: "cancelled"}.get(job_code, "")
+    elif job_code == 14:
+        out["state"], out["state_text"] = "error", "Stopped on error"
+    elif job_code in (5, 6):
+        out["state"], out["state_text"] = "paused", CC1_PRINT_TEXT[job_code]
+    elif 1 in codes or job_code in (13, 16, 18, 19, 20, 21):
+        # A job is running (or warming up for one): the bed is taken.
+        out["state"], out["state_text"] = "printing", CC1_PRINT_TEXT.get(job_code, "Printing")
+    else:
+        known = [CC1_MACHINE_TEXT[c] for c in codes if c in CC1_MACHINE_TEXT and c != 0]
+        out["state_text"] = known[0] if known else (CC1_PRINT_TEXT.get(job_code) or "Busy")
+    if out["state"] in ("printing", "paused"):
+        progress = job.get("Progress")
+        if isinstance(progress, (int, float)) and not isinstance(progress, bool):
+            out["progress"] = max(0.0, min(100.0, float(progress)))
+        total, done = job.get("TotalTicks"), job.get("CurrentTicks")
+        if isinstance(total, (int, float)) and isinstance(done, (int, float)) and total > 0:
+            out["remaining_s"] = max(0, int(total - done))     # seconds on the FDM printer
+    if out["errors"] and out["state"] == "idle":
+        out["state_text"] = "Idle (error %s)" % ", ".join(str(e) for e in out["errors"])
+    return out
+
+
+class _WebSocket:
+    """A small WebSocket client for one short conversation with a printer (text frames, ping/pong,
+    a proper close). Farm Send's websocket_rpc() is one-shot JSON-RPC; SDCP needs several messages."""
+
+    def __init__(self, host, port, path="/websocket", timeout=6):
+        self.host, self.port, self.timeout = host, port, timeout
+        self._buffer = b""
+        try:
+            self.sock = socket.create_connection((host, port), timeout=timeout)
+        except PermissionError:
+            raise
+        except (socket.timeout, TimeoutError):
+            raise FarmError("Cannot reach printer: timed out")
+        except OSError as error:
+            raise FarmError("Cannot reach printer: %s" % (error.strerror or error))
+        try:
+            key = base64.b64encode(os.urandom(16)).decode("ascii")
+            self.sock.sendall(("GET %s HTTP/1.1\r\nHost: %s:%d\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                               "Sec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n" % (path, host, port, key)).encode("ascii"))
+            deadline = time.monotonic() + timeout
+            while b"\r\n\r\n" not in self._buffer:
+                if len(self._buffer) > 65536:
+                    raise FarmError("Printer sent an oversized reply")
+                self._fill(len(self._buffer) + 1, deadline)
+            head, _, self._buffer = self._buffer.partition(b"\r\n\r\n")
+            first = head.split(b"\r\n")[0]
+            if b" 101 " not in first + b" ":
+                debug("ws", "%s:%d%s handshake refused: %s %s" % (host, port, path, first[:60].decode("latin-1"),
+                                                                 self._buffer[:60].decode("latin-1")))
+                if b" 500 " in first + b" " or b"too many" in (head + self._buffer).lower():
+                    raise FarmError("The printer is already talking to as many apps as it allows (Elegoo app, a slicer, "
+                                    "other Farm Send windows). Close one, or wait a moment.")
+                raise FarmError("The printer refused the connection on port %d" % port)
+        except Exception:
+            self._drop()
+            raise
+
+    def _fill(self, count, deadline):
+        while len(self._buffer) < count:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise socket.timeout()
+            self.sock.settimeout(remaining)
+            chunk = self.sock.recv(65536)
+            if not chunk:
+                raise FarmError("Printer closed the connection")
+            self._buffer += chunk
+
+    def _send_frame(self, opcode, payload=b""):
+        mask = os.urandom(4)
+        size = len(payload)
+        if size < 126:
+            head = bytes([0x80 | opcode, 0x80 | size])
+        elif size < 65536:
+            head = bytes([0x80 | opcode, 0x80 | 126]) + struct.pack("!H", size)
+        else:
+            head = bytes([0x80 | opcode, 0x80 | 127]) + struct.pack("!Q", size)
+        self.sock.sendall(head + mask + bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload)))
+
+    def send_json(self, value):
+        text = json.dumps(value, separators=(",", ":"))
+        debug("sdcp", "%s send %s" % (self.host, debug_reply(text)))
+        self._send_frame(1, text.encode("utf-8"))
+
+    def receive(self, deadline):
+        """The next text message, parsed: a dict or a list. "pong" and pings are handled here.
+        Raises socket.timeout at the deadline."""
+        message = bytearray()
+        for _ in range(MAX_WS_FRAMES):
+            self._fill(2, deadline)
+            final, opcode, length = self._buffer[0] & 0x80, self._buffer[0] & 0x0F, self._buffer[1] & 0x7F
+            offset = 2
+            if length == 126:
+                self._fill(4, deadline)
+                length, offset = struct.unpack("!H", self._buffer[2:4])[0], 4
+            elif length == 127:
+                self._fill(10, deadline)
+                length, offset = struct.unpack("!Q", self._buffer[2:10])[0], 10
+            if length > MAX_REPLY_BYTES or len(message) + length > MAX_REPLY_BYTES:
+                raise FarmError("Printer sent an oversized reply")
+            self._fill(offset + length, deadline)
+            data, self._buffer = self._buffer[offset:offset + length], self._buffer[offset + length:]
+            if opcode == 8:
+                raise FarmError("Printer closed the connection")
+            if opcode == 9:
+                self._send_frame(10, bytes(data))
+                continue
+            if opcode not in (0, 1):
+                continue
+            message += data
+            if not final:
+                continue
+            text = bytes(message).decode("utf-8", errors="replace").strip()
+            message = bytearray()
+            debug("sdcp", "%s got %s" % (self.host, debug_reply(text[:16384])))
+            # Some firmware puts the message length in front of the JSON: "123{...}".
+            text = re.sub(r"^\d+(?=[\[{])", "", text)
+            if text in ("pong", "ping", ""):
+                continue
+            try:
+                return json.loads(text)
+            except ValueError:
+                continue
+        raise FarmError("Printer did not answer the request")
+
+    def _drop(self):
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+    def close(self):
+        """Close politely, so the printer frees the connection at once."""
+        try:
+            self._send_frame(8, struct.pack("!H", 1000))
+        except OSError:
+            pass
+        self._drop()
+
+
+class ElegooCC1:
+    """The first Elegoo Centauri Carbon. See the guard rails above this class."""
+    kind = "elegoo_cc1"
+
+    def __init__(self, address, timeout=6, ws_port=None, upload_ports=None):
+        self.address = host_of(address)
+        self.host = self.address.rsplit(":", 1)[0] if self.address.count(":") == 1 else self.address
+        self.timeout = timeout
+        self.ws_port = ws_port or CC1_WS_PORT
+        self.upload_ports = tuple(upload_ports or CC1_UPLOAD_PORTS)
+
+    # ---- one conversation ------------------------------------------------------------------
+    def _open(self):
+        return _WebSocket(self.host, self.ws_port, "/websocket", self.timeout)
+
+    def _command(self, sock, cmd, data, wait):
+        """Send one command and return the printer's answer to it (Data.Data of the reply).
+        Status messages that arrive meanwhile are kept in self._seen_status."""
+        if cmd not in CC1_SAFE_COMMANDS:
+            raise FarmError("Refused to send command %s to a Centauri Carbon: not known to be safe" % cmd)
+        request_id = uuid.uuid4().hex
+        sock.send_json({"Id": "", "Data": {"Cmd": cmd, "Data": data, "RequestID": request_id, "MainboardID": "",
+                                           "TimeStamp": int(time.time() * 1000), "From": 1}})
+        deadline = time.monotonic() + wait
+        while True:
+            reply = sock.receive(deadline)
+            if not isinstance(reply, dict):
+                continue
+            if isinstance(reply.get("Status"), dict):
+                self._seen_status = reply["Status"]
+            body = reply.get("Data") if isinstance(reply.get("Data"), dict) else {}
+            if body.get("RequestID") == request_id or (body.get("Cmd") == cmd and "RequestID" not in body and "Data" in body):
+                answer = body.get("Data")
+                return answer if isinstance(answer, dict) else {}
+
+    def _read_status(self, sock, wait=None):
+        """Ask for the status and wait for it to arrive (it comes as its own message after the answer)."""
+        self._seen_status = None
+        wait = wait or self.timeout
+        deadline = time.monotonic() + wait
+        self._command(sock, CC1_CMD_STATUS, {}, wait)
+        while self._seen_status is None:
+            reply = sock.receive(deadline)
+            if isinstance(reply, dict) and isinstance(reply.get("Status"), dict):
+                self._seen_status = reply["Status"]
+        return self._seen_status
+
+    def _conversation(self, work):
+        try:
+            sock = self._open()
+        except PermissionError:
+            raise
+        try:
+            return work(sock)
+        except PermissionError:
+            raise
+        except (socket.timeout, TimeoutError):
+            raise FarmError("Printer did not answer in time")
+        except FarmError:
+            raise
+        except OSError as error:
+            raise FarmError("Lost connection to printer: %s" % (error.strerror or error))
+        finally:
+            sock.close()
+
+    # ---- what Farm Send asks ---------------------------------------------------------------
+    def raw_status(self):
+        return self._conversation(self._read_status)
+
+    def status(self):
+        return normalize_cc1_status(self.raw_status())
+
+    def identify(self):
+        def work(sock):
+            answer = self._command(sock, CC1_CMD_ATTRIBUTES, {}, self.timeout)
+            return answer
+        self._conversation(work)
+        return {"model": "Elegoo Centauri Carbon"}
+
+    def upload(self, path, filename, progress=None, cancelled=None):
+        """Upload one G-code file in 1 MB pieces. Refused unless the printer is idle and not holding a
+        file of that name, so a running print's file is never written over."""
+        status = self.raw_status()
+        if not cc1_is_idle(status):
+            raise FarmError("Not uploaded: the printer is %s." % normalize_cc1_status(status)["state_text"].lower())
+        current = normalize_cc1_status(status)["filename"]
+        if current and current == filename:
+            raise FarmError("Not uploaded: the printer's current file has the same name.")
+        total = os.path.getsize(path)
+        digest = file_md5(path)
+        upload_id = uuid.uuid4().hex
+        ports = list(self.upload_ports)
+        known = _CC1_UPLOAD_PORT.get(self.host)
+        if known in ports:
+            ports.remove(known)
+            ports.insert(0, known)
+        port, offset = None, 0
+        with open(path, "rb") as handle:
+            while True:
+                if cancelled and cancelled():
+                    raise FarmError("Upload cancelled")
+                piece = handle.read(CC1_CHUNK)
+                if not piece and offset:
+                    break
+                tries = [port] if port else ports
+                for index, candidate in enumerate(tries):
+                    try:
+                        self._post_piece(candidate, piece, filename, digest, upload_id, offset, total)
+                        port = candidate
+                        break
+                    except _CC1WrongPort:
+                        if index == len(tries) - 1:
+                            raise FarmError("The printer did not take the upload on port %s" %
+                                            " or ".join(str(p) for p in tries))
+                offset += len(piece)
+                if progress:
+                    progress(offset, total)
+                if offset >= total:
+                    break
+        _CC1_UPLOAD_PORT[self.host] = port
+        return filename
+
+    def _post_piece(self, port, piece, filename, digest, upload_id, offset, total):
+        boundary = "----FarmSend%s" % uuid.uuid4().hex
+        fields = (("Check", "1"), ("S-File-MD5", digest), ("Offset", str(offset)), ("Uuid", upload_id),
+                  ("TotalSize", str(total)))
+        body = b"".join(("--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n%s\r\n" % (boundary, name, value)).encode("utf-8")
+                        for name, value in fields)
+        body += ("--%s\r\nContent-Disposition: form-data; name=\"File\"; filename=\"%s\"\r\n"
+                 "Content-Type: application/octet-stream\r\n\r\n" % (boundary, filename)).encode("utf-8") + piece + \
+                ("\r\n--%s--\r\n" % boundary).encode("ascii")
+        try:
+            status, raw = http_request("http://%s:%d/uploadFile/upload" % (self.host, port), "POST", body,
+                                       {"Content-Type": "multipart/form-data; boundary=%s" % boundary},
+                                       timeout=max(self.timeout, 30))
+        except FarmError:
+            if offset == 0:
+                raise _CC1WrongPort()       # nothing listening there: try the other port
+            raise
+        if status == 404 and offset == 0:
+            raise _CC1WrongPort()
+        try:
+            reply = json.loads(raw.decode("utf-8", errors="replace")) if raw else {}
+        except ValueError:
+            reply = {}
+        if status >= 300 or not isinstance(reply, dict) or not reply.get("success"):
+            detail = ""
+            messages = reply.get("messages") if isinstance(reply, dict) else None
+            if isinstance(messages, list) and messages and isinstance(messages[0], dict):
+                detail = " (code %s)" % messages[0].get("message")
+            raise FarmError("The printer refused the upload (HTTP %d%s)" % (status, detail))
+
+    def start_print(self, filename, options=None):
+        """Start an uploaded file. The start command goes out once; it is never repeated."""
+        options = options or {}
+        data = {"Filename": "/local/%s" % filename, "StartLayer": 0,
+                "Calibration_switch": 1 if options.get("bed_leveling") else 0,
+                "PrintPlatformType": 1 if str(options.get("bed_type") or "").lower() == "cool plate" else 0,
+                "Tlp_Switch": 1 if options.get("timelapse") else 0}
+
+        def work(sock):
+            # A new file is checked by the printer first; it cannot start until that is done.
+            deadline = time.monotonic() + CC1_FILE_CHECK_WAIT
+            while True:
+                status = self._read_status(sock)
+                if 8 not in _cc1_codes(status.get("CurrentStatus")) or time.monotonic() > deadline:
+                    break
+                time.sleep(1.0)
+            if not cc1_is_idle(status):                     # checked again right before the start
+                raise FarmError("Uploaded, but not started: the printer is %s." % normalize_cc1_status(status)["state_text"].lower())
+            try:
+                answer = self._command(sock, CC1_CMD_START, data, CC1_START_ACK_WAIT)
+            except (socket.timeout, TimeoutError):
+                answer = None
+            if answer is None:
+                try:
+                    after = normalize_cc1_status(self._read_status(sock))
+                except (socket.timeout, TimeoutError, FarmError):
+                    after = {}
+                if after.get("state") == "printing":
+                    return ""
+                raise FarmError("The printer did not confirm the start and now shows %s. Farm Send does not send the "
+                                "start again; check the printer." % (after.get("state_text") or "no status").lower())
+            ack = answer.get("Ack", 0)
+            if ack:
+                raise FarmError("The printer refused to start: %s (code %s)" % (CC1_START_ACKS.get(ack, "unknown reason"), ack))
+            return ""
+        return self._conversation(work)
+
+    def cancel_print(self):
+        def work(sock):
+            answer = self._command(sock, CC1_CMD_STOP, {}, self.timeout)
+            if answer.get("Ack", 0):
+                raise FarmError("The printer did not stop the print (code %s)" % answer.get("Ack"))
+        self._conversation(work)
+
+
+class _CC1WrongPort(Exception):
+    pass
+
+
+# --------------------------------------------------------------------------------------
 # Moonraker (Snapmaker U1 and other Klipper printers)
 # --------------------------------------------------------------------------------------
 
@@ -1991,6 +2413,9 @@ def make_client(printer, timeout=6):
                          mqtt_port=printer.get("mqtt_port") or 1883)
     if kind == KIND_MOONRAKER:
         return Moonraker(printer.get("address", ""), printer.get("api_key", ""), timeout=timeout)
+    if kind == KIND_CC1:
+        return ElegooCC1(printer.get("address", ""), timeout=timeout, ws_port=printer.get("ws_port"),
+                         upload_ports=printer.get("upload_ports"))
     raise FarmError("Unknown printer type: %s" % kind)
 
 
@@ -2014,6 +2439,9 @@ def validate_printer(printer):
         "access_code": (printer.get("access_code") or "").strip(),
         "api_key": (printer.get("api_key") or "").strip(),
         "mqtt_port": int(printer.get("mqtt_port") or 0),
+        # Ports a test printer listens on; a real Centauri Carbon uses the defaults (0 / empty).
+        "ws_port": int(printer.get("ws_port") or 0),
+        "upload_ports": [int(port) for port in (printer.get("upload_ports") or [])][:3],
         "nozzle": first_number(printer.get("nozzle")),   # mm, from the printer preset; None when unknown
     }
 
@@ -2380,7 +2808,7 @@ def plan_order(remaining, printers, entries):
                 and not nozzle_mismatch(e.get("nozzle_diameter"), printer.get("nozzle")) and (e.get("parts") or 0) > 0]
 
     def countable(printer):
-        if printer.get("kind") == KIND_CC2:
+        if printer.get("kind") != KIND_MOONRAKER:      # only Klipper printers skip parts
             return []
         return [e for e in fitting(printer) if e.get("objects") == e.get("parts") and e["parts"] > 1]
 
@@ -2778,6 +3206,8 @@ def preset_to_printer(preset, fallback_name=""):
     host_type = (_first(preset.get("host_type")) or "").lower()
     if "centauri carbon 2" in lowered:
         kind = KIND_CC2
+    elif "centauri carbon" in lowered:
+        kind = KIND_CC1
     elif "snapmaker" in lowered or host_type in ("moonraker", "klipper"):
         kind = KIND_MOONRAKER
     else:

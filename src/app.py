@@ -10,7 +10,7 @@ import threading
 import time
 import uuid
 
-from core import (DebugLog, debug, debug_trace, set_debug_sink, videos_to_clean, newest_installed, record_version, version_key, RunLog, run_result, toolhead_color_problem, count_objects, file_stamp, OrderBook, plan_order, CC2_MANY_FILES, nozzle_mismatch, toolhead_problem, write_private, file_md5, STORE_FILE, KIND_CC2, WATCHED_STATES, BedLog, FarmError, bed_needs_clearing, files_to_clean, rule_text,
+from core import (DebugLog, debug, debug_trace, set_debug_sink, videos_to_clean, newest_installed, record_version, version_key, RunLog, run_result, toolhead_color_problem, count_objects, file_stamp, OrderBook, plan_order, CC2_MANY_FILES, KIND_CC1, KIND_MOONRAKER, parse_gcode_meta, nozzle_mismatch, toolhead_problem, write_private, file_md5, STORE_FILE, KIND_CC2, WATCHED_STATES, BedLog, FarmError, bed_needs_clearing, files_to_clean, rule_text,
                   storage_summary, old_list, PrinterStore, can_start, job_filename, make_client, model_key, model_matches,
                   parse_gcode_meta, preset_to_printer, presets_to_printers, set_shared_dir, status_event, strip_model_suffix, validate_printer)
 # BUNDLE-STRIP-END
@@ -886,7 +886,11 @@ class FarmApp:
             if not can_start(status):
                 raise FarmError("Uploaded, but not started: the printer is %s." % status.get("state_text", status.get("state")).lower())
             # Which filament numbers the file prints with: a CC2 is told which roll each one uses.
-            how = client.start_print(remote, dict(options or {}, filament_slots=[s for s in snapshot.get("slots") or [] if s]))
+            extra = {}
+            if printer.get("kind") == KIND_CC1:
+                # The Centauri Carbon is told which plate is on the bed; the slicer wrote it into the file.
+                extra["bed_type"] = parse_gcode_meta(snapshot["path"]).get("bed_type") or ""
+            how = client.start_print(remote, dict(options or {}, filament_slots=[s for s in snapshot.get("slots") or [] if s], **extra))
             note = ""
             if how and how.startswith("roll"):
                 note = " from %s" % how
@@ -1227,7 +1231,7 @@ class FarmApp:
                 elif start and self.beds.get(printer_id) and self.status.get(printer_id, {}).get("state") == "idle":
                     problem = "Not started: clear the bed, then click Bed cleared."
                 mine = dict(options)
-                fewer = keep if (keep and printer.get("kind") != KIND_CC2) else None
+                fewer = keep if (keep and printer.get("kind") == KIND_MOONRAKER) else None
                 if not problem and fewer:
                     if not start:
                         problem = "Not sent: a part count needs Start print, because the printer skips the other parts as it starts."
@@ -1236,7 +1240,7 @@ class FarmApp:
                 if not problem and start:
                     used = entry.get("filaments") or []
                     tools = (self.status.get(printer_id) or {}).get("tools") or []
-                    if toolhead and printer.get("kind") != KIND_CC2:
+                    if toolhead and printer.get("kind") == KIND_MOONRAKER:
                         if len(used) != 1:
                             problem = "Not started: only a one-filament plate can be moved to another toolhead."
                         else:
@@ -1252,7 +1256,7 @@ class FarmApp:
                         for filament in used:   # printing as sliced: every toolhead it uses must be usable
                             problem = problem or toolhead_problem(tools, filament.get("slot"), filament.get("type"))
                         # A CC2's roll colors are picked from a fixed list on the printer, so they are not compared.
-                        if not problem and not mine.get("any_color") and printer.get("kind") != KIND_CC2:
+                        if not problem and not mine.get("any_color") and printer.get("kind") == KIND_MOONRAKER:
                             # As sliced means the sliced color. A swapped spool is caught here unless the
                             # user confirmed the loaded color in the dialog.
                             for filament in used:
@@ -1274,7 +1278,7 @@ class FarmApp:
                 snapshot = {"path": entry["path"], "name": name, "item": entry.get("item", ""),
                             "slots": [f.get("slot") for f in entry.get("filaments") or []],
                             "parts": entry.get("parts"), "source": "order" if order_id else "library",
-                            "toolhead": int(toolhead) if toolhead and printer.get("kind") != KIND_CC2 else None}
+                            "toolhead": int(toolhead) if toolhead and printer.get("kind") == KIND_MOONRAKER else None}
                 if fewer:
                     snapshot["keep"] = fewer
                 if order_id and start:
@@ -1381,6 +1385,9 @@ class FarmApp:
                     continue
                 if printer_id in self._storage_busy or self.sends.get(printer_id, {}).get("active"):
                     continue
+                if printer.get("kind") == KIND_CC1:
+                    continue        # experimental: only status, upload, start and stop are sent to it
+
                 if not force and printer_id in self._storage_at and now - self._storage_at[printer_id] < STORAGE_INTERVAL:
                     continue
                 self._storage_busy.add(printer_id)
@@ -1621,7 +1628,7 @@ class FarmApp:
                     continue
                 if printer_id in self._status_busy:
                     continue
-                interval = STATUS_MIN_INTERVAL_CC2 if printer.get("kind") == KIND_CC2 else STATUS_MIN_INTERVAL
+                interval = STATUS_MIN_INTERVAL_CC2 if printer.get("kind") in (KIND_CC2, KIND_CC1) else STATUS_MIN_INTERVAL
                 if not force and now - self._status_at.get(printer_id, 0) < interval:
                     continue
                 self._status_busy.add(printer_id)
