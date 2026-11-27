@@ -32,7 +32,6 @@ body:
         - label: The print started
         - label: Progress and time left looked right while printing
         - label: A finished print showed "Bed cleared"
-        - label: Stop (cancel) worked
   - type: textarea
     id: what
     attributes:

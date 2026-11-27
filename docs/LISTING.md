@@ -18,7 +18,7 @@ Farm Send is a docked panel for small print farms. Slice a plate once per printe
 
 - Elegoo Centauri Carbon 2: upload and start, on several printers at once from one dialog.
 - Snapmaker U1: upload and start, with bed leveling, flow calibration and time-lapse options.
-- Elegoo Centauri Carbon (the first model): EXPERIMENTAL, never run on a real one by the developer. Status, upload, start and stop only. Owners: please try it with the debug log on and report.
+- Elegoo Centauri Carbon (the first model): EXPERIMENTAL, never run on a real one by the developer. Status, upload and start only. Owners: please try it with the debug log on and report.
 - Live status for every printer: progress, time left, expected finish time, temperatures.
 - Printers grouped into Needs attention, Available and Busy.
 - A notification when a print finishes, pauses or fails.

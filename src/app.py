@@ -10,7 +10,7 @@ import threading
 import time
 import uuid
 
-from core import (DebugLog, debug, debug_trace, set_debug_sink, videos_to_clean, newest_installed, record_version, version_key, RunLog, run_result, toolhead_color_problem, count_objects, file_stamp, OrderBook, plan_order, CC2_MANY_FILES, KIND_CC1, KIND_MOONRAKER, parse_gcode_meta, nozzle_mismatch, toolhead_problem, write_private, file_md5, STORE_FILE, KIND_CC2, WATCHED_STATES, BedLog, FarmError, bed_needs_clearing, files_to_clean, rule_text,
+from core import (DebugLog, debug, debug_trace, set_debug_sink, videos_to_clean, newest_installed, record_version, version_key, RunLog, run_result, toolhead_color_problem, count_objects, file_stamp, OrderBook, plan_order, CC2_MANY_FILES, KIND_CC1, KIND_MOONRAKER, DEBUG_LOG_HOURS, nozzle_mismatch, toolhead_problem, write_private, file_md5, STORE_FILE, KIND_CC2, WATCHED_STATES, BedLog, FarmError, bed_needs_clearing, files_to_clean, rule_text,
                   storage_summary, old_list, PrinterStore, can_start, job_filename, make_client, model_key, model_matches,
                   parse_gcode_meta, preset_to_printer, presets_to_printers, set_shared_dir, status_event, strip_model_suffix, validate_printer)
 # BUNDLE-STRIP-END
@@ -18,7 +18,6 @@ from core import (DebugLog, debug, debug_trace, set_debug_sink, videos_to_clean,
 SLICE_DIR = "slices"
 SLICE_KEEP_S = 12 * 3600      # sliced copies of a window that is gone are dropped after this long
 SLICE_TOUCH_S = 600
-DEBUG_HOURS = 24              # matches core.DEBUG_LOG_HOURS; shown in Settings
 DEBUG_TAIL_LINES = 400        # newest debug log lines offered for a trouble report
 JOBS_FILE = "jobs.json"       # in each window's slice folder: the plates it holds, read back after a reload
 JOB_SAVED_KEYS = ("id", "name", "captured_at", "ready", "stale", "settled", "meta", "key", "plate", "objects", "md5")
@@ -114,6 +113,7 @@ class FarmApp:
         self._default_name = default_name or (lambda: "")
         self._spawn = spawn or self._spawn_thread
         self.lock = threading.RLock()
+        self._jobs_save_lock = threading.Lock()
         # One sliced plate per printer type, newest first. Each is the plugin's OWN copy of the G-code,
         # because OrcaSlicer rewrites its temp file on the next slice: without a copy, slicing for
         # the second printer type would destroy the plate sliced for the first.
@@ -134,7 +134,6 @@ class FarmApp:
         # through core.debug(), which lands here; redaction happens in DebugLog before anything is written.
         self.debug_log = DebugLog(storage_dir, window=os.path.basename(self.slice_dir))
         self._refresh_debug()
-        set_debug_sink(self.debug_log.write, self.debug_log.file_code)
         self.slicing = False
         self.status = {}          # printer id -> normalized status
         self._status_at = {}
@@ -167,7 +166,7 @@ class FarmApp:
                     continue
                 if os.path.isdir(path):
                     for inner in os.listdir(path):
-                        if inner.endswith(".gcode") or inner.endswith(".part") or inner == JOBS_FILE:
+                        if inner.endswith(".gcode") or inner.endswith(".part") or inner in (JOBS_FILE, JOBS_FILE + ".tmp"):
                             self._remove_file(os.path.join(path, inner))
                     os.rmdir(path)
                 elif name.endswith(".gcode") or name.endswith(".part"):      # from before 0.3.3
@@ -177,45 +176,59 @@ class FarmApp:
 
     def _load_jobs(self):
         """Take back the plates this window held before the plugin was reloaded. Only plates whose
-        copy is still in this window's folder come back; anything else is dropped."""
+        copy is still in this window's folder come back; anything odd in the file is ignored, so a
+        damaged file can never stop the panel from starting."""
         try:
             with open(os.path.join(self.slice_dir, JOBS_FILE), "r", encoding="utf-8") as handle:
                 saved = json.load(handle)
-        except (OSError, ValueError):
-            return
-        if not isinstance(saved, dict):
-            return
-        jobs = []
-        for entry in saved.get("jobs") or []:
-            if not isinstance(entry, dict) or not entry.get("ready") or not entry.get("key"):
-                continue
-            name = os.path.basename(str(entry.get("file") or ""))
-            path = os.path.join(self.slice_dir, name)
-            if not name.endswith(".gcode") or not os.path.isfile(path):
-                continue
-            job = {k: entry.get(k) for k in JOB_SAVED_KEYS}
-            job.update({"path": path, "source": "", "ready": True, "error": "",
-                        "stale": bool(entry.get("stale")), "meta": entry.get("meta") or {}})
-            jobs.append(job)
-        self.jobs = jobs
-        ids = {job["id"] for job in jobs}
-        self.chosen = {k: v for k, v in (saved.get("chosen") or {}).items() if v in ids}
+            rows = saved.get("jobs") if isinstance(saved, dict) else None
+            jobs = []
+            for entry in rows if isinstance(rows, list) else []:
+                if not isinstance(entry, dict) or entry.get("ready") is not True:
+                    continue
+                if not isinstance(entry.get("id"), str) or not isinstance(entry.get("key"), str) or not entry["key"]:
+                    continue
+                if not isinstance(entry.get("meta"), dict) or not isinstance(entry.get("file"), str):
+                    continue
+                name = os.path.basename(entry["file"])
+                path = os.path.join(self.slice_dir, name)
+                if not name.endswith(".gcode") or not os.path.isfile(path):
+                    continue
+                job = {k: entry.get(k) for k in JOB_SAVED_KEYS}
+                job.update({"path": path, "source": "", "ready": True, "error": "", "stale": bool(entry.get("stale")),
+                            "settled": bool(entry.get("settled")), "name": str(entry.get("name") or ""),
+                            "plate": entry.get("plate") if isinstance(entry.get("plate"), int) else 1,
+                            "objects": entry.get("objects") if isinstance(entry.get("objects"), int) else 0,
+                            "md5": entry.get("md5") if isinstance(entry.get("md5"), str) else "",
+                            "captured_at": entry.get("captured_at") if isinstance(entry.get("captured_at"), (int, float)) else time.time()})
+                jobs.append(job)
+            ids = {job["id"] for job in jobs}
+            chosen = saved.get("chosen") if isinstance(saved, dict) else None
+            self.chosen = {k: v for k, v in (chosen.items() if isinstance(chosen, dict) else [])
+                           if isinstance(k, str) and isinstance(v, str) and v in ids}
+            self.jobs = jobs
+        except Exception:
+            self.jobs, self.chosen = [], {}
 
     def _save_jobs(self):
-        """Write down the plates this window holds, so a plugin reload does not lose them."""
-        with self.lock:
-            rows = [dict({k: job.get(k) for k in JOB_SAVED_KEYS}, file=os.path.basename(job["path"]))
-                    for job in self.jobs if job["ready"] and job["path"]]
-            chosen = dict(self.chosen)
-        path = os.path.join(self.slice_dir, JOBS_FILE)
-        try:
-            if not rows:
-                self._remove_file(path)
-                return
-            os.makedirs(self.slice_dir, exist_ok=True)
-            write_private(path, json.dumps({"jobs": rows, "chosen": chosen}))
-        except OSError:
-            pass      # the plates still work in this session; only a reload would lose them
+        """Write down the plates this window holds, so a plugin reload does not lose them. Saved whole
+        through a temporary file and a rename, one save at a time, so a crash or two saves at once
+        never leave a half-written or older file behind."""
+        with self._jobs_save_lock:
+            with self.lock:
+                rows = [dict({k: job.get(k) for k in JOB_SAVED_KEYS}, file=os.path.basename(job["path"]))
+                        for job in self.jobs if job["ready"] and job["path"]]
+                chosen = dict(self.chosen)
+            path = os.path.join(self.slice_dir, JOBS_FILE)
+            try:
+                if not rows:
+                    self._remove_file(path)
+                    return
+                os.makedirs(self.slice_dir, exist_ok=True)
+                write_private(path + ".tmp", json.dumps({"jobs": rows, "chosen": chosen}))
+                os.replace(path + ".tmp", path)
+            except OSError:
+                pass      # the plates still work in this session; only a reload would lose them
 
     def _touch_slice_dir(self):
         """Mark this window's sliced copies as still in use. Cheap, and at most every few minutes."""
@@ -348,7 +361,10 @@ class FarmApp:
             return
         log.until = self.store.debug_until
         if not log.enabled():
+            # Off: no sink at all, so no debug text is even built.
+            set_debug_sink(None)
             return
+        set_debug_sink(log.write, log.file_code)
         names = set()
         try:
             for entry in self.library():
@@ -373,7 +389,7 @@ class FarmApp:
         log = self.debug_log
         return {"on": log.enabled(), "until": _clock(log.until) if log.enabled() else "",
                 "until_day": time.strftime("%a", time.localtime(log.until)) if log.enabled() else "",
-                "hours": DEBUG_HOURS, "size": log.size(),
+                "hours": DEBUG_LOG_HOURS, "size": log.size(),
                 # Shown only in this panel, so the user can tell P1, P2... apart. Never written to the log.
                 "labels": [{"label": "P%d" % number, "name": printer.get("name", "")}
                            for number, printer in enumerate(self.store.printers, 1)]}
@@ -1386,7 +1402,7 @@ class FarmApp:
                 if printer_id in self._storage_busy or self.sends.get(printer_id, {}).get("active"):
                     continue
                 if printer.get("kind") == KIND_CC1:
-                    continue        # experimental: only status, upload, start and stop are sent to it
+                    continue        # experimental: only status, upload and start are sent to it
 
                 if not force and printer_id in self._storage_at and now - self._storage_at[printer_id] < STORAGE_INTERVAL:
                     continue
@@ -1662,9 +1678,9 @@ class FarmApp:
             status["checked_at"] = time.time()   # wall clock, shown on the card
             before = (self.status.get(printer_id) or {}).get("state")
             if before != status.get("state"):
-                debug("state", '%s: %s -> %s (%s) file="%s" %s' % (
+                debug("state", '%s: %s -> %s (%s) %s %s' % (
                     printer.get("name", ""), before, status.get("state"), status.get("state_text", ""),
-                    status.get("filename") or "", status.get("detail") or ""))
+                    ('file="%s"' % status["filename"]) if status.get("filename") else "no file", status.get("detail") or ""))
             event = None
             if status.get("state") in WATCHED_STATES:
                 name = (self.store.get(printer_id) or printer).get("name") or "Printer"

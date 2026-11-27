@@ -327,7 +327,7 @@ _debug_sink = None
 # Text values a printer sends that are safe to keep: states, result codes and versions. Matched without
 # regard to case. Anything not listed is replaced, however harmless it looks.
 _SAFE_TEXT_KEYS = frozenset(k.lower() for k in (
-    "state", "state_text", "status", "state_message", "print_state", "result", "code", "success",
+    "state", "status", "print_state", "result", "code", "success",
     "firmwareversion", "protocolversion", "firmware_version", "software_version", "klipper_version",
     "brandname", "model", "printer_model", "machine_model", "method", "jsonrpc", "type", "action",
     "Cmd", "Topic", "error_code", "level", "filament_color", "filament_type", "color", "material", "storage_media",
@@ -338,7 +338,9 @@ _FILE_KEYS = frozenset(k.lower() for k in (
     "remote", "name_file"))
 _VERSIONISH = re.compile(r"^[Vv]?\d+(\.\d+){1,3}([-+.][0-9A-Za-z]{1,12})?$")
 _SHORT_CODE = re.compile(r"^[A-Za-z0-9_.:-]{0,12}$")        # "ok", "idle", "000000", "standby"
-_STATEISH = re.compile(r"^[A-Za-z_ ]{1,24}$")
+_STATEISH = re.compile(r"^[A-Za-z_]{1,24}$")       # one word: "printing", "standby", "complete"
+_HEXCOLOR = re.compile(r"^#?[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$")
+_COLOR_KEYS = frozenset(("filament_color", "color"))
 
 _SECRET_FIELD = re.compile(
     r"""(?i)((?<![a-z0-9_])["']?(?:access[_-]?code|lan[_-]?code|api[_-]?key|x-api-key|password|passwd|pin|token|"""
@@ -354,6 +356,8 @@ _TOPIC_ID = re.compile(r"(?i)\b(sdcp/[a-z]+/|elegoo/|device/)[0-9a-z_-]{6,}")
 _LONG_TOKEN = re.compile(r"(?<![A-Za-z0-9+=_-])(?=[A-Za-z0-9+=_-]*\d)[A-Za-z0-9+=_-]{20,}(?![A-Za-z0-9+=_-])")
 _BASE64 = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
 # Quoted text holding a file name ('/x/Kate gift.gcode' in an error message): coded whole, spaces and all.
+# After a "/" or "\\" a file name runs to its extension, spaces included ("gcodes/Sarah Jones keychain.gcode").
+_PATH_FILE = re.compile(r"(?i)(?<=[/\\])[^/\\\n\"'<>|]{1,160}?\.(gcode|3mf|stl|step|stp|obj|amf|mp4|jpe?g|png|zip)\b(?!>)")
 _QUOTED_FILE = re.compile(r"""(["'])([^"'\n]{0,300}?\.(?:gcode|3mf|stl|step|stp|obj|amf|mp4|jpe?g|png|zip))\1""", re.I)
 _IPV4 = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])")
 # Five or more groups, or a "::" form: a time of day (12:30:45) has only three.
@@ -363,7 +367,7 @@ _IPV6 = re.compile(r"(?i)(?<![0-9a-z:])\[?(?:(?:[0-9a-f]{1,4}:){4,7}[0-9a-f]{1,4
 _MAC = re.compile(r"(?i)(?<![0-9a-f:])(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}(?![0-9a-f:])")
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 _HOSTNAME = re.compile(r"(?i)\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.(?:local|lan|home|internal|localdomain)\b")
-_HOME = re.compile(r"(?i)(?:[a-z]:)?(?:\\\\|\\|/)+(?:users|home|documents and settings)(?:\\\\|\\|/)+[^\\/\s\"']+")
+_HOME = re.compile(r"(?i)(?:[a-z]:)?(?:\\\\|\\|/)+(?:users|home|documents and settings)(?:\\\\|\\|/)+[^\\/\"'\n]+")
 
 
 _debug_code = None
@@ -377,8 +381,14 @@ def set_debug_sink(sink, code=None):
 
 
 def debug_reply(raw):
-    """A printer's reply or message, sanitized for the log (see sanitize_json)."""
-    return debug_json(raw, _debug_code or (lambda name: "<file>"))
+    """A printer's reply or message, sanitized for the log (see sanitize_json). Empty when the log is
+    off, so callers pay nothing; never raises, so a strange reply can never break a send."""
+    if _debug_sink is None:
+        return ""
+    try:
+        return debug_json(raw, _debug_code or (lambda name: "<file>"))
+    except Exception:          # RecursionError on deep nesting, or anything else odd
+        return "<%d bytes, unreadable>" % len(raw or b"")
 
 
 def debug(event, text=""):
@@ -410,6 +420,8 @@ def sanitize_json(value, code, key=""):
     lowered = key.lower()
     if lowered in _FILE_KEYS:
         return code(value) if value else ""
+    if lowered in _COLOR_KEYS:
+        return value if _HEXCOLOR.match(value) else "<text:%d>" % len(value)
     if lowered in _SAFE_TEXT_KEYS and (_STATEISH.match(value) or _SHORT_CODE.match(value) or _VERSIONISH.match(value)):
         return value
     if lowered == "topic":
@@ -497,6 +509,11 @@ class DebugLog:
     def set_context(self, printers, names=(), secrets=()):
         """What to remove from every line. printers: the saved printers, in panel order. names: part,
         item, folder, order and toolhead names. secrets: anything else that must never be written."""
+        key = (tuple((p.get("name"), p.get("address"), p.get("access_code"), p.get("api_key")) for p in printers),
+               tuple(sorted(str(n) for n in names if n)), tuple(str(v) for v in secrets if v))
+        if key == getattr(self, "_context_key", None):
+            return
+        self._context_key = key
         swaps = []
 
         def add(value, replacement, minimum):
@@ -515,7 +532,7 @@ class DebugLog:
                 add(address.rsplit(":", 1)[0], label, 3)
             add(printer.get("name"), label, 2)
         for name in names:
-            add(name, "<name-%s>" % self.code_of(str(name).strip().lower()), 4)
+            add(name, "<name-%s>" % self.code_of(str(name).strip().lower()), 2)
         for value in secrets:
             add(value, "<hidden>", 4)
         swaps.sort(key=lambda pair: len(pair[0]), reverse=True)
@@ -530,6 +547,7 @@ class DebugLog:
             text = pattern.sub(replacement, text)
         text = _FILE_FIELD.sub(lambda m: m.group(1) + '"%s"' % self.file_code(m.group(2)[1:-1]), text)
         text = _QUOTED_FILE.sub(lambda m: m.group(1) + self.file_code(m.group(2)) + m.group(1), text)
+        text = _PATH_FILE.sub(lambda m: self.file_code(m.group(0)), text)
         text = _FILE.sub(lambda m: self.file_code(m.group(0)), text)
         text = _EMAIL.sub("<email>", text)
         text = _SECRET_FIELD.sub(lambda m: m.group(1) + ('"<hidden>"' if m.group(2)[:1] in "\"'[" else "<hidden>"), text)
@@ -1766,6 +1784,14 @@ class _WebSocket:
                     raise FarmError("The printer is already talking to as many apps as it allows (Elegoo app, a slicer, "
                                     "other Farm Send windows). Close one, or wait a moment.")
                 raise FarmError("The printer refused the connection on port %d" % port)
+        except (socket.timeout, TimeoutError):
+            self._drop()
+            raise FarmError("Printer did not answer in time")
+        except OSError as error:
+            self._drop()
+            if isinstance(error, PermissionError):
+                raise
+            raise FarmError("Lost connection to printer: %s" % (error.strerror or error))
         except Exception:
             self._drop()
             raise
@@ -1884,7 +1910,9 @@ class ElegooCC1:
             if isinstance(reply.get("Status"), dict):
                 self._seen_status = reply["Status"]
             body = reply.get("Data") if isinstance(reply.get("Data"), dict) else {}
-            if body.get("RequestID") == request_id or (body.get("Cmd") == cmd and "RequestID" not in body and "Data" in body):
+            # Matched by RequestID; or by command, should a firmware not echo the id. Only one command
+            # is ever waiting on a connection, so the command number is enough to tell.
+            if body.get("RequestID") == request_id or (body.get("Cmd") == cmd and isinstance(body.get("Data"), dict)):
                 answer = body.get("Data")
                 return answer if isinstance(answer, dict) else {}
 
@@ -1998,7 +2026,8 @@ class ElegooCC1:
             reply = json.loads(raw.decode("utf-8", errors="replace")) if raw else {}
         except ValueError:
             reply = {}
-        if status >= 300 or not isinstance(reply, dict) or not reply.get("success"):
+        # OrcaSlicer's ElegooLink checks code == "000000"; "success" is accepted too.
+        if status >= 300 or not isinstance(reply, dict) or not (reply.get("code") == "000000" or reply.get("success") is True):
             detail = ""
             messages = reply.get("messages") if isinstance(reply, dict) else None
             if isinstance(messages, list) and messages and isinstance(messages[0], dict):

@@ -347,7 +347,7 @@ _debug_sink = None
 # Text values a printer sends that are safe to keep: states, result codes and versions. Matched without
 # regard to case. Anything not listed is replaced, however harmless it looks.
 _SAFE_TEXT_KEYS = frozenset(k.lower() for k in (
-    "state", "state_text", "status", "state_message", "print_state", "result", "code", "success",
+    "state", "status", "print_state", "result", "code", "success",
     "firmwareversion", "protocolversion", "firmware_version", "software_version", "klipper_version",
     "brandname", "model", "printer_model", "machine_model", "method", "jsonrpc", "type", "action",
     "Cmd", "Topic", "error_code", "level", "filament_color", "filament_type", "color", "material", "storage_media",
@@ -358,7 +358,9 @@ _FILE_KEYS = frozenset(k.lower() for k in (
     "remote", "name_file"))
 _VERSIONISH = re.compile(r"^[Vv]?\d+(\.\d+){1,3}([-+.][0-9A-Za-z]{1,12})?$")
 _SHORT_CODE = re.compile(r"^[A-Za-z0-9_.:-]{0,12}$")        # "ok", "idle", "000000", "standby"
-_STATEISH = re.compile(r"^[A-Za-z_ ]{1,24}$")
+_STATEISH = re.compile(r"^[A-Za-z_]{1,24}$")       # one word: "printing", "standby", "complete"
+_HEXCOLOR = re.compile(r"^#?[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$")
+_COLOR_KEYS = frozenset(("filament_color", "color"))
 
 _SECRET_FIELD = re.compile(
     r"""(?i)((?<![a-z0-9_])["']?(?:access[_-]?code|lan[_-]?code|api[_-]?key|x-api-key|password|passwd|pin|token|"""
@@ -374,6 +376,8 @@ _TOPIC_ID = re.compile(r"(?i)\b(sdcp/[a-z]+/|elegoo/|device/)[0-9a-z_-]{6,}")
 _LONG_TOKEN = re.compile(r"(?<![A-Za-z0-9+=_-])(?=[A-Za-z0-9+=_-]*\d)[A-Za-z0-9+=_-]{20,}(?![A-Za-z0-9+=_-])")
 _BASE64 = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
 # Quoted text holding a file name ('/x/Kate gift.gcode' in an error message): coded whole, spaces and all.
+# After a "/" or "\\" a file name runs to its extension, spaces included ("gcodes/Sarah Jones keychain.gcode").
+_PATH_FILE = re.compile(r"(?i)(?<=[/\\])[^/\\\n\"'<>|]{1,160}?\.(gcode|3mf|stl|step|stp|obj|amf|mp4|jpe?g|png|zip)\b(?!>)")
 _QUOTED_FILE = re.compile(r"""(["'])([^"'\n]{0,300}?\.(?:gcode|3mf|stl|step|stp|obj|amf|mp4|jpe?g|png|zip))\1""", re.I)
 _IPV4 = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])")
 # Five or more groups, or a "::" form: a time of day (12:30:45) has only three.
@@ -383,7 +387,7 @@ _IPV6 = re.compile(r"(?i)(?<![0-9a-z:])\[?(?:(?:[0-9a-f]{1,4}:){4,7}[0-9a-f]{1,4
 _MAC = re.compile(r"(?i)(?<![0-9a-f:])(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}(?![0-9a-f:])")
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 _HOSTNAME = re.compile(r"(?i)\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.(?:local|lan|home|internal|localdomain)\b")
-_HOME = re.compile(r"(?i)(?:[a-z]:)?(?:\\\\|\\|/)+(?:users|home|documents and settings)(?:\\\\|\\|/)+[^\\/\s\"']+")
+_HOME = re.compile(r"(?i)(?:[a-z]:)?(?:\\\\|\\|/)+(?:users|home|documents and settings)(?:\\\\|\\|/)+[^\\/\"'\n]+")
 
 
 _debug_code = None
@@ -397,8 +401,14 @@ def set_debug_sink(sink, code=None):
 
 
 def debug_reply(raw):
-    """A printer's reply or message, sanitized for the log (see sanitize_json)."""
-    return debug_json(raw, _debug_code or (lambda name: "<file>"))
+    """A printer's reply or message, sanitized for the log (see sanitize_json). Empty when the log is
+    off, so callers pay nothing; never raises, so a strange reply can never break a send."""
+    if _debug_sink is None:
+        return ""
+    try:
+        return debug_json(raw, _debug_code or (lambda name: "<file>"))
+    except Exception:          # RecursionError on deep nesting, or anything else odd
+        return "<%d bytes, unreadable>" % len(raw or b"")
 
 
 def debug(event, text=""):
@@ -430,6 +440,8 @@ def sanitize_json(value, code, key=""):
     lowered = key.lower()
     if lowered in _FILE_KEYS:
         return code(value) if value else ""
+    if lowered in _COLOR_KEYS:
+        return value if _HEXCOLOR.match(value) else "<text:%d>" % len(value)
     if lowered in _SAFE_TEXT_KEYS and (_STATEISH.match(value) or _SHORT_CODE.match(value) or _VERSIONISH.match(value)):
         return value
     if lowered == "topic":
@@ -517,6 +529,11 @@ class DebugLog:
     def set_context(self, printers, names=(), secrets=()):
         """What to remove from every line. printers: the saved printers, in panel order. names: part,
         item, folder, order and toolhead names. secrets: anything else that must never be written."""
+        key = (tuple((p.get("name"), p.get("address"), p.get("access_code"), p.get("api_key")) for p in printers),
+               tuple(sorted(str(n) for n in names if n)), tuple(str(v) for v in secrets if v))
+        if key == getattr(self, "_context_key", None):
+            return
+        self._context_key = key
         swaps = []
 
         def add(value, replacement, minimum):
@@ -535,7 +552,7 @@ class DebugLog:
                 add(address.rsplit(":", 1)[0], label, 3)
             add(printer.get("name"), label, 2)
         for name in names:
-            add(name, "<name-%s>" % self.code_of(str(name).strip().lower()), 4)
+            add(name, "<name-%s>" % self.code_of(str(name).strip().lower()), 2)
         for value in secrets:
             add(value, "<hidden>", 4)
         swaps.sort(key=lambda pair: len(pair[0]), reverse=True)
@@ -550,6 +567,7 @@ class DebugLog:
             text = pattern.sub(replacement, text)
         text = _FILE_FIELD.sub(lambda m: m.group(1) + '"%s"' % self.file_code(m.group(2)[1:-1]), text)
         text = _QUOTED_FILE.sub(lambda m: m.group(1) + self.file_code(m.group(2)) + m.group(1), text)
+        text = _PATH_FILE.sub(lambda m: self.file_code(m.group(0)), text)
         text = _FILE.sub(lambda m: self.file_code(m.group(0)), text)
         text = _EMAIL.sub("<email>", text)
         text = _SECRET_FIELD.sub(lambda m: m.group(1) + ('"<hidden>"' if m.group(2)[:1] in "\"'[" else "<hidden>"), text)
@@ -1786,6 +1804,14 @@ class _WebSocket:
                     raise FarmError("The printer is already talking to as many apps as it allows (Elegoo app, a slicer, "
                                     "other Farm Send windows). Close one, or wait a moment.")
                 raise FarmError("The printer refused the connection on port %d" % port)
+        except (socket.timeout, TimeoutError):
+            self._drop()
+            raise FarmError("Printer did not answer in time")
+        except OSError as error:
+            self._drop()
+            if isinstance(error, PermissionError):
+                raise
+            raise FarmError("Lost connection to printer: %s" % (error.strerror or error))
         except Exception:
             self._drop()
             raise
@@ -1904,7 +1930,9 @@ class ElegooCC1:
             if isinstance(reply.get("Status"), dict):
                 self._seen_status = reply["Status"]
             body = reply.get("Data") if isinstance(reply.get("Data"), dict) else {}
-            if body.get("RequestID") == request_id or (body.get("Cmd") == cmd and "RequestID" not in body and "Data" in body):
+            # Matched by RequestID; or by command, should a firmware not echo the id. Only one command
+            # is ever waiting on a connection, so the command number is enough to tell.
+            if body.get("RequestID") == request_id or (body.get("Cmd") == cmd and isinstance(body.get("Data"), dict)):
                 answer = body.get("Data")
                 return answer if isinstance(answer, dict) else {}
 
@@ -2018,7 +2046,8 @@ class ElegooCC1:
             reply = json.loads(raw.decode("utf-8", errors="replace")) if raw else {}
         except ValueError:
             reply = {}
-        if status >= 300 or not isinstance(reply, dict) or not reply.get("success"):
+        # OrcaSlicer's ElegooLink checks code == "000000"; "success" is accepted too.
+        if status >= 300 or not isinstance(reply, dict) or not (reply.get("code") == "000000" or reply.get("success") is True):
             detail = ""
             messages = reply.get("messages") if isinstance(reply, dict) else None
             if isinstance(messages, list) and messages and isinstance(messages[0], dict):
@@ -3291,7 +3320,6 @@ def can_start(status):
 SLICE_DIR = "slices"
 SLICE_KEEP_S = 12 * 3600      # sliced copies of a window that is gone are dropped after this long
 SLICE_TOUCH_S = 600
-DEBUG_HOURS = 24              # matches core.DEBUG_LOG_HOURS; shown in Settings
 DEBUG_TAIL_LINES = 400        # newest debug log lines offered for a trouble report
 JOBS_FILE = "jobs.json"       # in each window's slice folder: the plates it holds, read back after a reload
 JOB_SAVED_KEYS = ("id", "name", "captured_at", "ready", "stale", "settled", "meta", "key", "plate", "objects", "md5")
@@ -3387,6 +3415,7 @@ class FarmApp:
         self._default_name = default_name or (lambda: "")
         self._spawn = spawn or self._spawn_thread
         self.lock = threading.RLock()
+        self._jobs_save_lock = threading.Lock()
         # One sliced plate per printer type, newest first. Each is the plugin's OWN copy of the G-code,
         # because OrcaSlicer rewrites its temp file on the next slice: without a copy, slicing for
         # the second printer type would destroy the plate sliced for the first.
@@ -3407,7 +3436,6 @@ class FarmApp:
         # through core.debug(), which lands here; redaction happens in DebugLog before anything is written.
         self.debug_log = DebugLog(storage_dir, window=os.path.basename(self.slice_dir))
         self._refresh_debug()
-        set_debug_sink(self.debug_log.write, self.debug_log.file_code)
         self.slicing = False
         self.status = {}          # printer id -> normalized status
         self._status_at = {}
@@ -3440,7 +3468,7 @@ class FarmApp:
                     continue
                 if os.path.isdir(path):
                     for inner in os.listdir(path):
-                        if inner.endswith(".gcode") or inner.endswith(".part") or inner == JOBS_FILE:
+                        if inner.endswith(".gcode") or inner.endswith(".part") or inner in (JOBS_FILE, JOBS_FILE + ".tmp"):
                             self._remove_file(os.path.join(path, inner))
                     os.rmdir(path)
                 elif name.endswith(".gcode") or name.endswith(".part"):      # from before 0.3.3
@@ -3450,45 +3478,59 @@ class FarmApp:
 
     def _load_jobs(self):
         """Take back the plates this window held before the plugin was reloaded. Only plates whose
-        copy is still in this window's folder come back; anything else is dropped."""
+        copy is still in this window's folder come back; anything odd in the file is ignored, so a
+        damaged file can never stop the panel from starting."""
         try:
             with open(os.path.join(self.slice_dir, JOBS_FILE), "r", encoding="utf-8") as handle:
                 saved = json.load(handle)
-        except (OSError, ValueError):
-            return
-        if not isinstance(saved, dict):
-            return
-        jobs = []
-        for entry in saved.get("jobs") or []:
-            if not isinstance(entry, dict) or not entry.get("ready") or not entry.get("key"):
-                continue
-            name = os.path.basename(str(entry.get("file") or ""))
-            path = os.path.join(self.slice_dir, name)
-            if not name.endswith(".gcode") or not os.path.isfile(path):
-                continue
-            job = {k: entry.get(k) for k in JOB_SAVED_KEYS}
-            job.update({"path": path, "source": "", "ready": True, "error": "",
-                        "stale": bool(entry.get("stale")), "meta": entry.get("meta") or {}})
-            jobs.append(job)
-        self.jobs = jobs
-        ids = {job["id"] for job in jobs}
-        self.chosen = {k: v for k, v in (saved.get("chosen") or {}).items() if v in ids}
+            rows = saved.get("jobs") if isinstance(saved, dict) else None
+            jobs = []
+            for entry in rows if isinstance(rows, list) else []:
+                if not isinstance(entry, dict) or entry.get("ready") is not True:
+                    continue
+                if not isinstance(entry.get("id"), str) or not isinstance(entry.get("key"), str) or not entry["key"]:
+                    continue
+                if not isinstance(entry.get("meta"), dict) or not isinstance(entry.get("file"), str):
+                    continue
+                name = os.path.basename(entry["file"])
+                path = os.path.join(self.slice_dir, name)
+                if not name.endswith(".gcode") or not os.path.isfile(path):
+                    continue
+                job = {k: entry.get(k) for k in JOB_SAVED_KEYS}
+                job.update({"path": path, "source": "", "ready": True, "error": "", "stale": bool(entry.get("stale")),
+                            "settled": bool(entry.get("settled")), "name": str(entry.get("name") or ""),
+                            "plate": entry.get("plate") if isinstance(entry.get("plate"), int) else 1,
+                            "objects": entry.get("objects") if isinstance(entry.get("objects"), int) else 0,
+                            "md5": entry.get("md5") if isinstance(entry.get("md5"), str) else "",
+                            "captured_at": entry.get("captured_at") if isinstance(entry.get("captured_at"), (int, float)) else time.time()})
+                jobs.append(job)
+            ids = {job["id"] for job in jobs}
+            chosen = saved.get("chosen") if isinstance(saved, dict) else None
+            self.chosen = {k: v for k, v in (chosen.items() if isinstance(chosen, dict) else [])
+                           if isinstance(k, str) and isinstance(v, str) and v in ids}
+            self.jobs = jobs
+        except Exception:
+            self.jobs, self.chosen = [], {}
 
     def _save_jobs(self):
-        """Write down the plates this window holds, so a plugin reload does not lose them."""
-        with self.lock:
-            rows = [dict({k: job.get(k) for k in JOB_SAVED_KEYS}, file=os.path.basename(job["path"]))
-                    for job in self.jobs if job["ready"] and job["path"]]
-            chosen = dict(self.chosen)
-        path = os.path.join(self.slice_dir, JOBS_FILE)
-        try:
-            if not rows:
-                self._remove_file(path)
-                return
-            os.makedirs(self.slice_dir, exist_ok=True)
-            write_private(path, json.dumps({"jobs": rows, "chosen": chosen}))
-        except OSError:
-            pass      # the plates still work in this session; only a reload would lose them
+        """Write down the plates this window holds, so a plugin reload does not lose them. Saved whole
+        through a temporary file and a rename, one save at a time, so a crash or two saves at once
+        never leave a half-written or older file behind."""
+        with self._jobs_save_lock:
+            with self.lock:
+                rows = [dict({k: job.get(k) for k in JOB_SAVED_KEYS}, file=os.path.basename(job["path"]))
+                        for job in self.jobs if job["ready"] and job["path"]]
+                chosen = dict(self.chosen)
+            path = os.path.join(self.slice_dir, JOBS_FILE)
+            try:
+                if not rows:
+                    self._remove_file(path)
+                    return
+                os.makedirs(self.slice_dir, exist_ok=True)
+                write_private(path + ".tmp", json.dumps({"jobs": rows, "chosen": chosen}))
+                os.replace(path + ".tmp", path)
+            except OSError:
+                pass      # the plates still work in this session; only a reload would lose them
 
     def _touch_slice_dir(self):
         """Mark this window's sliced copies as still in use. Cheap, and at most every few minutes."""
@@ -3621,7 +3663,10 @@ class FarmApp:
             return
         log.until = self.store.debug_until
         if not log.enabled():
+            # Off: no sink at all, so no debug text is even built.
+            set_debug_sink(None)
             return
+        set_debug_sink(log.write, log.file_code)
         names = set()
         try:
             for entry in self.library():
@@ -3646,7 +3691,7 @@ class FarmApp:
         log = self.debug_log
         return {"on": log.enabled(), "until": _clock(log.until) if log.enabled() else "",
                 "until_day": time.strftime("%a", time.localtime(log.until)) if log.enabled() else "",
-                "hours": DEBUG_HOURS, "size": log.size(),
+                "hours": DEBUG_LOG_HOURS, "size": log.size(),
                 # Shown only in this panel, so the user can tell P1, P2... apart. Never written to the log.
                 "labels": [{"label": "P%d" % number, "name": printer.get("name", "")}
                            for number, printer in enumerate(self.store.printers, 1)]}
@@ -4659,7 +4704,7 @@ class FarmApp:
                 if printer_id in self._storage_busy or self.sends.get(printer_id, {}).get("active"):
                     continue
                 if printer.get("kind") == KIND_CC1:
-                    continue        # experimental: only status, upload, start and stop are sent to it
+                    continue        # experimental: only status, upload and start are sent to it
 
                 if not force and printer_id in self._storage_at and now - self._storage_at[printer_id] < STORAGE_INTERVAL:
                     continue
@@ -4935,9 +4980,9 @@ class FarmApp:
             status["checked_at"] = time.time()   # wall clock, shown on the card
             before = (self.status.get(printer_id) or {}).get("state")
             if before != status.get("state"):
-                debug("state", '%s: %s -> %s (%s) file="%s" %s' % (
+                debug("state", '%s: %s -> %s (%s) %s %s' % (
                     printer.get("name", ""), before, status.get("state"), status.get("state_text", ""),
-                    status.get("filename") or "", status.get("detail") or ""))
+                    ('file="%s"' % status["filename"]) if status.get("filename") else "no file", status.get("detail") or ""))
             event = None
             if status.get("state") in WATCHED_STATES:
                 name = (self.store.get(printer_id) or printer).get("name") or "Printer"
@@ -5063,13 +5108,13 @@ PANEL_HTML = r"""<style>
   details.old > summary { cursor: pointer; color: var(--orca-muted); font-size: 12px; }
 </style>
 
-<div class="row spread">
+<div class="row spread" style="flex-wrap:wrap;row-gap:4px">
   <h3 style="white-space:nowrap">Farm Send <span id="version" class="tiny muted" style="font-weight:normal" title="The Farm Send version this window is running"></span> <span id="newer" class="pill st-busy" role="button" tabindex="0" style="display:none;font-weight:normal;cursor:pointer"></span></h3>
   <div class="row">
     <button type="button" class="quiet" id="btn-refresh" title="Ask every printer for its status now">Refresh</button>
     <button type="button" class="quiet" id="btn-import" title="Add printers from your OrcaSlicer printer presets">Import</button>
     <button type="button" class="quiet" id="btn-add" title="Add a printer by address">Add</button>
-    <button type="button" class="quiet" id="btn-settings" title="Settings: open at start, debug log" aria-label="Settings">&#9881;</button>
+    <button type="button" class="icon" id="btn-settings" title="Settings: open at start, debug log" aria-label="Settings" style="font-size:18px;line-height:1;padding:2px 2px">&#9881;</button>
   </div>
 </div>
 
@@ -5308,7 +5353,7 @@ PANEL_HTML = r"""<style>
         "<option value='elegoo_cc2'>Elegoo Centauri Carbon 2</option>" +
         "<option value='elegoo_cc1'>Elegoo Centauri Carbon (experimental, untested)</option></select></label>" +
       "<p class='small warn' id='row-cc1' style='margin:4px 0 0'>Experimental: never run on a real Centauri Carbon by the developer. " +
-        "It checks status, uploads, starts and stops prints; nothing else. Watch the first prints, and turn on the debug log in Settings (&#9881;) so you can report what happened.</p>" +
+        "It checks status, uploads and starts prints; nothing else. Watch the first prints, and turn on the debug log in Settings (&#9881;) so you can report what happened.</p>" +
       "<label class='field'>IP address or host name<input id='f-address' value='" + esc(p.address) + "' placeholder='192.168.1.50'></label>" +
       "<label class='field' id='row-code'>Access code<input id='f-code' value='" + esc(p.access_code) + "' placeholder='shown on the printer screen'></label>" +
       "<label class='field' id='row-key'>API key (leave empty if none)<input id='f-key' value='" + esc(p.api_key) + "'></label>" +
@@ -6136,7 +6181,7 @@ PANEL_HTML = r"""<style>
     var body = state.printers.map(function (p) {
       var st = storeOf(p), whole = state.storage[p.id];
       var cells;
-      if (p.kind === "elegoo_cc1") cells = "<td colspan='4' class='muted' title='This first version only checks status, uploads, starts and stops prints on a Centauri Carbon'>not on a Centauri Carbon yet</td>";
+      if (p.kind === "elegoo_cc1") cells = "<td colspan='4' class='muted' title='This first version only checks status, uploads and starts prints on a Centauri Carbon'>not on a Centauri Carbon yet</td>";
       else if (st === null) cells = "<td colspan='4' class='muted'>none to list</td>";
       else if (!st || st.count == null) cells = "<td colspan='4' class='muted'>" + esc(whole && whole.error ? whole.error : "counting...") + "</td>";
       else {

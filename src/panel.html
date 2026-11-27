@@ -74,13 +74,13 @@
   details.old > summary { cursor: pointer; color: var(--orca-muted); font-size: 12px; }
 </style>
 
-<div class="row spread">
+<div class="row spread" style="flex-wrap:wrap;row-gap:4px">
   <h3 style="white-space:nowrap">Farm Send <span id="version" class="tiny muted" style="font-weight:normal" title="The Farm Send version this window is running"></span> <span id="newer" class="pill st-busy" role="button" tabindex="0" style="display:none;font-weight:normal;cursor:pointer"></span></h3>
   <div class="row">
     <button type="button" class="quiet" id="btn-refresh" title="Ask every printer for its status now">Refresh</button>
     <button type="button" class="quiet" id="btn-import" title="Add printers from your OrcaSlicer printer presets">Import</button>
     <button type="button" class="quiet" id="btn-add" title="Add a printer by address">Add</button>
-    <button type="button" class="quiet" id="btn-settings" title="Settings: open at start, debug log" aria-label="Settings">&#9881;</button>
+    <button type="button" class="icon" id="btn-settings" title="Settings: open at start, debug log" aria-label="Settings" style="font-size:18px;line-height:1;padding:2px 2px">&#9881;</button>
   </div>
 </div>
 
@@ -319,7 +319,7 @@
         "<option value='elegoo_cc2'>Elegoo Centauri Carbon 2</option>" +
         "<option value='elegoo_cc1'>Elegoo Centauri Carbon (experimental, untested)</option></select></label>" +
       "<p class='small warn' id='row-cc1' style='margin:4px 0 0'>Experimental: never run on a real Centauri Carbon by the developer. " +
-        "It checks status, uploads, starts and stops prints; nothing else. Watch the first prints, and turn on the debug log in Settings (&#9881;) so you can report what happened.</p>" +
+        "It checks status, uploads and starts prints; nothing else. Watch the first prints, and turn on the debug log in Settings (&#9881;) so you can report what happened.</p>" +
       "<label class='field'>IP address or host name<input id='f-address' value='" + esc(p.address) + "' placeholder='192.168.1.50'></label>" +
       "<label class='field' id='row-code'>Access code<input id='f-code' value='" + esc(p.access_code) + "' placeholder='shown on the printer screen'></label>" +
       "<label class='field' id='row-key'>API key (leave empty if none)<input id='f-key' value='" + esc(p.api_key) + "'></label>" +
@@ -1147,7 +1147,7 @@
     var body = state.printers.map(function (p) {
       var st = storeOf(p), whole = state.storage[p.id];
       var cells;
-      if (p.kind === "elegoo_cc1") cells = "<td colspan='4' class='muted' title='This first version only checks status, uploads, starts and stops prints on a Centauri Carbon'>not on a Centauri Carbon yet</td>";
+      if (p.kind === "elegoo_cc1") cells = "<td colspan='4' class='muted' title='This first version only checks status, uploads and starts prints on a Centauri Carbon'>not on a Centauri Carbon yet</td>";
       else if (st === null) cells = "<td colspan='4' class='muted'>none to list</td>";
       else if (!st || st.count == null) cells = "<td colspan='4' class='muted'>" + esc(whole && whole.error ? whole.error : "counting...") + "</td>";
       else {

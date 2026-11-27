@@ -182,7 +182,7 @@ class DebugLogTests(unittest.TestCase):
 
     PRINTERS = [{"name": "Kitchen CC2", "address": "192.168.1.50", "access_code": "AB12CD"},
                 {"name": "Mike's Garage U1", "address": "printer.local:7125", "api_key": "deadbeef0123456789"}]
-    NAMES = ["Sarah Jones keychain", "Kate gift", "Lisa orders", "Wedding - Tom & Lisa"]
+    NAMES = ["Sarah Jones keychain", "Kate gift", "Lisa orders", "Wedding - Tom & Lisa", "Amy", "Zo\u00eb"]
     # Real shapes of what printers, Python and Farm Send produce, each holding something private.
     LEAKS = [
         'GET http://192.168.1.77:7125/server/files/metadata?filename=Sarah%20Jones%20Ring.gcode HTTP/1.1',
@@ -206,12 +206,16 @@ class DebugLogTests(unittest.TestCase):
         'ssid=MyHomeWiFi_Smiths wifi password: hunter22, mac aa:bb:cc:dd:ee:ff',
         'Kitchen CC2 at 192.168.1.50 code AB12CD; kitchen cc2; Mike\'s Garage U1 at printer.local:7125',
         'thumb data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk',
+        'send P1: "Started Amy" ok and "Uploaded Zo\u00eb"',                              # short item names (review 2)
+        "OSError: 'C:\\Users\\Sarah Jones\\AppData\\Roaming\\farm_send\\slices\\ab12cd34'",
+        'HTTP 404 from printer: File gcodes/Sarah Jones keychain.gcode does not exist',
+        'HTTP 404 from printer: File gcodes/Emily Rose name tag.gcode does not exist',      # a name not in the library
     ]
     FORBIDDEN = ["Sarah", "Jones", "Emily", "Rose", "Anna", "M\u00fcller", "Mikes", "Garage", "7f3c0a9d11e2", "192.168",
                  "JohnSmith", "janedoe", "fe80", "2001:db8", "johns-macbook", "eyJ", "deadbeef", "John", "Smith",
                  "jsmith", "Johnny", "Appleseed", "Lisa", "Tom", "SARAH", "F012345678", "98765432", "11112222", "4321",
                  "55667788", "Kate", "Ann Lee", "MyHomeWiFi", "hunter22", "aa:bb", "Kitchen", "kitchen", "AB12CD",
-                 "printer.local", "iVBORw0K"]
+                 "printer.local", "iVBORw0K", "Amy", "Zo\u00eb"]
 
     def setUp(self):
         self.folder = tempfile.TemporaryDirectory(); self.addCleanup(self.folder.cleanup)
@@ -241,6 +245,22 @@ class DebugLogTests(unittest.TestCase):
         self.assertIn('"TotalSize":12345', out)
         self.assertIn('"CC1":true', out)
         self.assertIn("Boxes", out)
+
+    def test_safe_fields_keep_only_one_word_states_and_hex_colors(self):
+        code = self.log.file_code
+        out = core.debug_json('{"state":"Sarah Jones printing","color":"Jones","filament_color":"#FFAA00",'
+                              '"status":"printing","state_message":"File Kate.gcode missing"}', code)
+        for word in ("Sarah", "Jones", "Kate"):
+            self.assertNotIn(word, out)
+        self.assertIn('"filament_color":"#FFAA00"', out)
+        self.assertIn('"status":"printing"', out)
+
+    def test_debug_text_is_free_and_harmless_when_off(self):
+        core.set_debug_sink(None)
+        self.assertEqual(core.debug_reply(b'{"a":1}'), "")
+        core.set_debug_sink(lambda event, text: None)
+        self.addCleanup(core.set_debug_sink, None)
+        self.assertIn("unreadable", core.debug_reply(b"[" * 3000 + b"]" * 3000))     # never raises
 
     def test_printer_json_is_allow_listed(self):
         code = self.log.file_code
@@ -412,6 +432,13 @@ class CC1Tests(unittest.TestCase):
             self.client.start_print("a.gcode", {})
         with self.assertRaisesRegex(core.FarmError, "cannot find the file"):
             self.client.start_print("missing.gcode", {})
+
+    def test_firmware_variants_still_work(self):
+        self.fake.omit_success = True            # OrcaSlicer only checks code == "000000"
+        self.fake.echo_request_id = False        # the answer is matched by its command instead
+        self.client.upload(self._gcode(), "a.gcode")
+        self.client.start_print("a.gcode", {})
+        self.assertEqual(self.client.status()["state"], "printing")
 
     def test_a_full_printer_says_so(self):
         self.fake.max_clients = 0
@@ -2203,6 +2230,29 @@ class AppTests(unittest.TestCase):
         self.assertEqual(self._saved_ids(), [])
         window = os.path.basename(self.app.slice_dir)
         self.assertEqual(FarmApp(self.folder.name, lambda message: None, window_id=window).jobs, [])
+
+    def test_a_damaged_plate_file_never_stops_the_panel(self):
+        window = os.path.basename(self.app.slice_dir)
+        os.makedirs(self.app.slice_dir, exist_ok=True)
+        for broken in ('{"jobs":5}', '{"jobs":[],"chosen":["a"]}', '{"jobs":[],"chosen":{"k":["x"]}}',
+                       '{"jobs":[{"id":["x"],"ready":true,"key":"k","file":"a.gcode","meta":{}}]}',
+                       '{"jobs":[{"id":"x","ready":true,"key":"k","file":"a.gcode","meta":"oops"}]}', "not json", "[]"):
+            with open(os.path.join(self.app.slice_dir, "jobs.json"), "w") as handle:
+                handle.write(broken)
+            again = FarmApp(self.folder.name, lambda message: None, window_id=window)
+            self.assertEqual(again.jobs, [], broken)
+            again.snapshot()                                       # and the panel can draw
+
+    def test_plate_saves_at_the_same_time_keep_the_newest(self):
+        self.slice(U1_GCODE)
+        self.slice(CC2_GCODE)
+        threads = [threading.Thread(target=self.app._save_jobs) for _ in range(20)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(len(self._saved_ids()), 2)
+        self.assertFalse(os.path.exists(os.path.join(self.app.slice_dir, "jobs.json.tmp")))
 
     def test_a_reload_skips_a_saved_plate_whose_copy_is_gone(self):
         job = self.slice(U1_GCODE)

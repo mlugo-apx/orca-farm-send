@@ -460,6 +460,8 @@ class FakeCC1:
         self.no_start_ack = False      # the start command is carried out but never answered
         self.start_ack = 0
         self.prefix = False            # send frames as "<length>{...}", as some firmware does
+        self.omit_success = False      # upload answers carry only "code", not "success"
+        self.echo_request_id = True
         self.max_clients, self.open, self.opened, self.clean_closes = max_clients, 0, 0, 0
         self.status_reads, self.upload_parts = 0, []
         self._uploads, self._lock = {}, threading.Lock()
@@ -512,6 +514,8 @@ class FakeCC1:
                                 outer.check_polls = getattr(outer, "check_after_upload", 0)
                 reply = {"code": "000000", "messages": None, "data": {}, "success": True} if ok else \
                         {"code": "111111", "messages": [{"field": "common_field", "message": -2}], "data": {}, "success": False}
+                if outer.omit_success:
+                    reply.pop("success", None)
                 raw = json.dumps(reply).encode()
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(raw)))
@@ -615,7 +619,8 @@ class FakeCC1:
 
     def _ack(self, conn, request, data):
         body = request.get("Data") or {}
-        self._send(conn, {"Id": "x", "Data": {"Cmd": body.get("Cmd"), "Data": data, "RequestID": body.get("RequestID"),
+        self._send(conn, {"Id": "x", "Data": {"Cmd": body.get("Cmd"), "Data": data,
+                                              "RequestID": body.get("RequestID") if self.echo_request_id else "other",
                                               "MainboardID": self.MAINBOARD, "TimeStamp": 1735032553},
                           "Topic": "sdcp/response/" + self.MAINBOARD})
 

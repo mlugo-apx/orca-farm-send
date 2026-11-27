@@ -7,7 +7,7 @@ A docked panel for small print farms: slice a plate once per printer type, then 
 - **Elegoo Centauri Carbon 2**: upload and start the print, on several printers at once from one dialog.
 - **Snapmaker U1**: upload and start the print, with bed leveling, flow calibration and time-lapse options.
 - **Other Moonraker / Klipper printers**: upload and a plain start. Not tested beyond the U1.
-- **Elegoo Centauri Carbon (the first model)**: **experimental, never run on a real one by the developer.** Status, upload, start and stop only. See [Centauri Carbon (experimental)](#centauri-carbon-experimental).
+- **Elegoo Centauri Carbon (the first model)**: **experimental, never run on a real one by the developer.** Status, upload and start only. See [Centauri Carbon (experimental)](#centauri-carbon-experimental).
 
 Each printer card shows its state, and while printing its progress, time left and expected finish time. **Details** on a card adds temperatures, when it was last checked, and what is loaded: the rolls of a Centauri Carbon 2's Canvas unit or the four toolheads of a U1, as small tags with color and material. Status updates on its own every few seconds; **Refresh** in the header asks every printer now, and the refresh icon on a card asks that one. The version is shown next to the panel title.
 
@@ -134,7 +134,7 @@ What it does: live status (state, progress, time left, temperatures), upload, st
 What it does not do yet: stored-file counts, clean-up, time-lapse recordings, printing only some parts of a plate, and picking a Canvas roll (multi-color plates print as the printer maps them). Those use printer commands that, sent wrong, can crash the printer's control program, so this version never sends them.
 
 Safety rules it follows, each covered by a test:
-- Only four commands are ever sent: status, printer info, start and stop.
+- Only three commands are ever sent: status, printer info and start. (Stop is built and tested, but nothing in the panel uses it yet.)
 - Nothing is uploaded unless the printer clearly reports idle, and never under the name of the file it is printing.
 - The printer is checked again right before the start, after it has finished checking the new file.
 - The start is sent once. If the printer does not answer, Farm Send reads its status and shows it; it never sends the start again.
