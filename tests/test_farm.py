@@ -29,10 +29,12 @@ if os.environ.get("FARM_SEND_BUNDLE"):
     core = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(core)
     FarmApp = core.FarmApp
+    app_module = core          # the module FarmApp looks names up in: everything is in the one file
     print("testing bundle: %s" % os.environ["FARM_SEND_BUNDLE"], file=sys.stderr)
 else:
     import core  # noqa: E402
     from app import FarmApp  # noqa: E402
+    import app as app_module  # noqa: E402
 from fakes import FakeCC1, FakeCC2, FakeMoonraker  # noqa: E402
 
 U1_GCODE = "; HEADER_BLOCK_START\n; total layer number: 12\n; filament used [g] = 0.00, 3.50\n; total filament used [g] = 3.50\n" \
@@ -1654,6 +1656,36 @@ class AppTests(unittest.TestCase):
         self.assertEqual(fake.bad_commands, [])
         u1 = self.app.snapshot()["types"]
         self.assertTrue(any("Centauri Carbon" in (t.get("label") or "") for t in u1))
+
+    def test_a_blocked_printer_is_not_asked_again_until_refresh(self):
+        calls = []
+        real = app_module.make_client
+        def blocked(printer, timeout=6):
+            calls.append(printer["id"])
+            raise PermissionError("network not approved")
+        app_module.make_client = blocked
+        self.addCleanup(setattr, app_module, "make_client", real)
+        self.app.check_storage = lambda *args, **kwargs: None              # count status checks only
+        self.app.poll(force=True, only=self.p_u1["id"])
+        self.assertTrue(wait_for(lambda: (self.app.status.get(self.p_u1["id"]) or {}).get("state_text") == "Blocked"))
+        before = calls.count(self.p_u1["id"])
+        self.app._status_at.clear()
+        self.app.poll()                                                    # the timed poll skips it
+        time.sleep(0.3)
+        self.assertEqual(calls.count(self.p_u1["id"]), before)
+        self.app.poll(force=True, only=self.p_u1["id"])                    # Refresh asks again
+        self.assertTrue(wait_for(lambda: calls.count(self.p_u1["id"]) == before + 1))
+
+    def test_a_printer_removed_elsewhere_stops_being_polled(self):
+        other = FarmApp(self.folder.name, lambda message: None)           # another window removes it
+        other.store.remove(self.p_u1b["id"])
+        seen = []
+        real = app_module.make_client
+        app_module.make_client = lambda printer, timeout=6: seen.append(printer["id"]) or real(printer, timeout)
+        self.addCleanup(setattr, app_module, "make_client", real)
+        self.app.poll(force=True)
+        time.sleep(0.5)
+        self.assertNotIn(self.p_u1b["id"], seen)
 
     def test_send_messages_name_the_part_and_keep_the_file_name_for_hover(self):
         self.slice()

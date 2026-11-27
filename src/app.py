@@ -27,7 +27,7 @@ NEWER_CHECK_INTERVAL = 60.0    # seconds between looks for a newer installed Far
 STATUS_MIN_INTERVAL_CC2 = 8.0   # each CC2 poll is a full MQTT connect + register; be gentle
 STORAGE_INTERVAL = 600.0        # how often each printer's stored files are counted
 AUTO_CLEAN_INTERVAL = 86400.0   # automatic cleanup runs at most once a day per printer
-BLOCKED_TEXT = "OrcaSlicer blocked network access to this printer. Approve the permission prompt, then it retries."
+BLOCKED_TEXT = "OrcaSlicer blocked network access to this printer. Approve the permission prompt, then click Refresh."
 
 
 def _clock(when):
@@ -1638,11 +1638,17 @@ class FarmApp:
         now = time.monotonic()
         todo = []
         with self.lock:
+            # A printer removed in another window (or anywhere else) must stop being asked at once.
+            self.store.sync()
             for printer in self.store.printers:
                 printer_id = printer["id"]
                 if only is not None and printer_id != only:
                     continue
                 if printer_id in self._status_busy:
+                    continue
+                if not force and (self.status.get(printer_id) or {}).get("state_text") == "Blocked":
+                    # OrcaSlicer asked the user about this printer. Asking again every few seconds would
+                    # queue one permission prompt per poll; the next try waits for Refresh.
                     continue
                 interval = STATUS_MIN_INTERVAL_CC2 if printer.get("kind") in (KIND_CC2, KIND_CC1) else STATUS_MIN_INTERVAL
                 if not force and now - self._status_at.get(printer_id, 0) < interval:
