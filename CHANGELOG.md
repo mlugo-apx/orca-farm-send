@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.2
+
+- The note on a printer card ("U1-1 finished ...", "cancelled", "paused") survives a plugin reload and an OrcaSlicer restart. It is kept in `farm_send_notices.json` in the plugin's storage folder and still leaves the card at Bed cleared or when the printer moves on.
+
 ## 0.4.1
 
 - Printer cards: the "finished", "cancelled" and "paused" note names the part ("U1-1 finished Fixed_Lanai_Lighting_Clip_Standard_v3_2") instead of the long file name, the same as Orca's notification. The note and the printing line stay on one line and end in "..." when the name is too long; hover shows the full note and file name.

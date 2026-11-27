@@ -19,6 +19,7 @@ SLICE_DIR = "slices"
 SLICE_KEEP_S = 12 * 3600      # sliced copies of a window that is gone are dropped after this long
 SLICE_TOUCH_S = 600
 DEBUG_TAIL_LINES = 400        # newest debug log lines offered for a trouble report
+NOTICES_FILE = "farm_send_notices.json"
 JOBS_FILE = "jobs.json"       # in each window's slice folder: the plates it holds, read back after a reload
 JOB_SAVED_KEYS = ("id", "name", "captured_at", "ready", "stale", "settled", "meta", "key", "plate", "objects", "md5")
 LIBRARY_DIR = "library"   # kept plates: <id>.gcode plus <id>.json describing it
@@ -139,7 +140,10 @@ class FarmApp:
         self._status_at = {}
         self._status_busy = set()
         self._watched = {}        # printer id -> last status in a watched state, for change notices
-        self.notices = {}         # printer id -> {level, text, at}: the last change, kept on the card
+        # printer id -> {level, text, at, file, state}: the last change, kept on the card. Saved to a file
+        # so a plugin reload (or an OrcaSlicer restart) does not drop "U1-1 finished ..." from the card.
+        self._notices_path = os.path.join(storage_dir, NOTICES_FILE)
+        self.notices = self._load_notices()
         self.sends = {}           # printer id -> {active, text, percent, ok}
         self._cancel = {}
         # Slicing presets. read_presets() must run on the UI thread and returns the current selection
@@ -171,6 +175,34 @@ class FarmApp:
                     os.rmdir(path)
                 elif name.endswith(".gcode") or name.endswith(".part"):      # from before 0.3.3
                     self._remove_file(path)
+            except OSError:
+                pass
+
+    def _load_notices(self):
+        """The notes printer cards showed before a reload. Anything odd in the file is ignored."""
+        try:
+            with open(self._notices_path, "r", encoding="utf-8") as handle:
+                saved = json.load(handle)
+        except (OSError, ValueError):
+            return {}
+        notes = {}
+        for printer_id, note in (saved.items() if isinstance(saved, dict) else []):
+            if not isinstance(note, dict) or not isinstance(note.get("text"), str) or not isinstance(note.get("state"), str):
+                continue
+            at = note.get("at")
+            notes[str(printer_id)] = {"level": "error" if note.get("level") == "error" else "info", "text": note["text"][:300],
+                                      "at": float(at) if isinstance(at, (int, float)) and not isinstance(at, bool) else time.time(),
+                                      "file": str(note.get("file") or "")[:200], "state": note["state"][:20]}
+        return notes
+
+    def _save_notices(self):
+        """Write the card notes down, whole, through a temporary file. Never breaks a status read."""
+        with self._jobs_save_lock:
+            with self.lock:
+                notes = {key: dict(value) for key, value in self.notices.items()}
+            try:
+                write_private(self._notices_path + ".tmp", json.dumps(notes))
+                os.replace(self._notices_path + ".tmp", self._notices_path)
             except OSError:
                 pass
 
@@ -666,12 +698,14 @@ class FarmApp:
                     pass
             # Clearing the bed is the user saying they have seen how the print ended, so the note
             # about it leaves the card too. A printer that is free should not show its last file.
-            self.notices.pop(printer_id, None)
+            had_note = self.notices.pop(printer_id, None) is not None
             status = self.status.get(printer_id)
             if status is not None:
                 status = dict(status, needs_clearing=False)
                 status.pop("notice", None)
                 self.status[printer_id] = status
+        if had_note:
+            self._save_notices()
         if status is not None:
             self.post({"command": "status", "id": printer_id, "status": status})
         if counted is not None:
@@ -766,10 +800,13 @@ class FarmApp:
             if self.sends.get(printer_id, {}).get("active"):
                 return
             self.store.remove(printer_id)
+            had_note = printer_id in self.notices
             for table in (self.status, self._status_at, self.sends, self._watched, self.notices, self.storage, self._storage_at):
                 table.pop(printer_id, None)
             self.cleaned.forget(printer_id)
             self.beds.forget(printer_id)
+        if had_note:
+            self._save_notices()
         self.post_state()
 
     def _cmd_import_presets(self, message):
@@ -1676,6 +1713,7 @@ class FarmApp:
             status = {"state": "offline", "state_text": "Error", "detail": str(error), "filename": "", "progress": None,
                       "remaining_s": None, "nozzle": None, "bed": None, "errors": []}
         ended, ended_file = None, ""
+        notes_changed = False
         with self.lock:
             self._status_busy.discard(printer_id)
             self._status_at[printer_id] = time.monotonic()
@@ -1696,6 +1734,7 @@ class FarmApp:
                 self._watched[printer_id] = status
                 note = self.notices.get(printer_id)
                 if event:
+                    notes_changed = True
                     self.notices[printer_id] = {"level": event[0], "text": event[1], "at": status["checked_at"],
                                                 "file": os.path.basename(ended_file or status.get("filename") or ""),
                                                 "state": status["state"]}
@@ -1703,6 +1742,7 @@ class FarmApp:
                     # Over once the printer moved on: the next print runs, a pause was resumed, an
                     # error was cleared. A note raised while printing stays for the rest of the print.
                     del self.notices[printer_id]
+                    notes_changed = True
             if printer_id in self.notices:
                 status["notice"] = self.notices[printer_id]
             change = bed_needs_clearing(self.beds.get(printer_id), status)
@@ -1728,6 +1768,8 @@ class FarmApp:
                 del self.sends[printer_id]
         if stale:
             self.post({"command": "send", "id": printer_id, "send": None})
+        if notes_changed:
+            self._save_notices()
         if ended:
             self.runs.end(printer_id, ended, ended_file)
         if event:

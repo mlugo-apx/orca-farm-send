@@ -1707,6 +1707,24 @@ class AppTests(unittest.TestCase):
         time.sleep(0.5)
         self.assertNotIn(self.p_u1b["id"], seen)
 
+    def test_a_card_note_survives_a_plugin_reload_until_bed_cleared(self):
+        self.u1.state = "printing"
+        self._read(self.p_u1)
+        self.u1.state = "complete"
+        note = self._read(self.p_u1)["notice"]
+        self.assertIn("finished", note["text"])
+        reloaded = FarmApp(self.folder.name, lambda message: None)            # the plugin was reloaded
+        self.assertEqual(reloaded.notices[self.p_u1["id"]]["text"], note["text"])
+        self.assertEqual(reloaded.notices[self.p_u1["id"]]["file"], note["file"])
+        reloaded.handle({"command": "bed_cleared", "id": self.p_u1["id"]})
+        self.assertNotIn(self.p_u1["id"], FarmApp(self.folder.name, lambda message: None).notices)
+
+    def test_a_damaged_notes_file_is_ignored(self):
+        for broken in ("not json", "[]", '{"x": 5}', '{"x": {"text": 5, "state": "idle"}}', '{"x": {"text": "t"}}'):
+            with open(os.path.join(self.folder.name, "farm_send_notices.json"), "w") as handle:
+                handle.write(broken)
+            self.assertEqual(FarmApp(self.folder.name, lambda message: None).notices, {}, broken)
+
     def test_send_messages_name_the_part_and_keep_the_file_name_for_hover(self):
         self.slice()
         (sent,) = self.send([self.p_u1], False)
