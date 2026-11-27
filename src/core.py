@@ -1629,6 +1629,19 @@ def normalize_cc2_status(info):
 WATCHED_STATES = ("idle", "printing", "paused", "error")
 
 
+def part_name(filename):
+    """The part a printer's file is for, as people call it: the name Farm Send gave a file without its
+    filament, time and date ("Pool_Drain_v26_PETG_4h24m_20261125-211432.gcode" -> "Pool_Drain_v26").
+    Matches partName() in the panel. Any other file keeps its name without the .gcode."""
+    name = os.path.basename(str(filename or "")).strip()
+    name = re.sub(r"\.gcode(\.3mf)?$", "", name, flags=re.I)
+    ours = re.sub(r"_\d{8}-\d{6}$", "", name)
+    if ours != name:
+        ours = re.sub(r"_[^_]+_(\d+h)?\d+m$", "", ours)
+    ours = re.sub(r"\.(stl|3mf|step|stp|obj|amf)(_\d+)?$", "", ours, flags=re.I)
+    return ours or name
+
+
 def status_event(before, now, name):
     """What changed on a printer between two status reads that is worth telling the user.
 
@@ -1638,7 +1651,7 @@ def status_event(before, now, name):
     if not before or now.get("state") not in WATCHED_STATES:
         return None
     was, state = before.get("state"), now.get("state")
-    job = before.get("filename") or now.get("filename") or "its print"
+    job = part_name(before.get("filename") or now.get("filename")) or "its print"
     if state == "error" and was != "error":
         return "error", "%s stopped with an error: %s" % (name, now.get("state_text") or "Error")
     if state == "paused" and was == "printing":

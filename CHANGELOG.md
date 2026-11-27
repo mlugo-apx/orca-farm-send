@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.1
+
+- Printer cards: the "finished", "cancelled" and "paused" note names the part ("U1-1 finished Fixed_Lanai_Lighting_Clip_Standard_v3_2") instead of the long file name, the same as Orca's notification. The note and the printing line stay on one line and end in "..." when the name is too long; hover shows the full note and file name.
+
 ## 0.4.0
 
 - **Elegoo Centauri Carbon (the first model), experimental.** Never run on a real one by the developer: it was built from OrcaSlicer's own Elegoo upload code and Elegoo's SDK, and tested against a stand-in. Live status, upload, start (bed leveling and time-lapse from the send dialog, plate type from the G-code), and Bed cleared. Not yet: stored files, clean-up, time-lapse recordings, part skipping, Canvas roll picking. It only ever sends status, printer-info and start commands; uploads only to an idle printer and never over the file being printed; checks again right before the start; never sends a start twice; closes each connection properly. Cards say "experimental". Owners: please report how it went.

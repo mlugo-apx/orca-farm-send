@@ -104,6 +104,15 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(core.strip_model_suffix("x.stl_a"), "x.stl_a")
         self.assertNotEqual(core.job_filename("a", when=1), core.job_filename("a", when=2))
 
+    def test_part_name_drops_what_farm_send_added_to_the_file_name(self):
+        self.assertEqual(core.part_name("Fixed_Lanai_Lighting_Clip_Standard_v3_2_PETG_2h28m_20261127-080532.gcode"),
+                         "Fixed_Lanai_Lighting_Clip_Standard_v3_2")
+        self.assertEqual(core.part_name("gcodes/Pool_Drain_x4_3h12m_20261120-172323.gcode"), "Pool_Drain")
+        self.assertEqual(core.part_name("Pool_Drain_2in_10in_pill_v26.stl_2_PETG_3h25m_20261125-195531.gcode"),
+                         "Pool_Drain_2in_10in_pill_v26")
+        self.assertEqual(core.part_name("someone_elses_file.gcode"), "someone_elses_file")   # not ours: only .gcode goes
+        self.assertEqual(core.part_name(""), "")
+
     def test_old_files_sent_from_a_kept_plate_are_marked(self):
         items = ["Pool Drain", "Pool", "Rail clip"]
         library = core.job_filename("Pool Drain_x4_3h12m")          # sent from the library
@@ -1563,7 +1572,7 @@ class AppTests(unittest.TestCase):
         self.assertNotIn("notice", self._read(self.p_u1))       # starting is not news
         self.u1.state = "paused"
         self.assertEqual(self._read(self.p_u1)["notice"]["level"], "error")
-        self.assertEqual(self.notes[-1], ("error", "Farm Send: U1 #1 paused busy.gcode"))
+        self.assertEqual(self.notes[-1], ("error", "Farm Send: U1 #1 paused busy"))
         self.assertEqual(len(self.notes), 1)
         self._read(self.p_u1)
         self.assertEqual(len(self.notes), 1)                    # told once, but the card keeps the note
@@ -1572,8 +1581,9 @@ class AppTests(unittest.TestCase):
         self.assertNotIn("notice", self._read(self.p_u1))
         self.u1.state = "complete"
         status = self._read(self.p_u1)
-        self.assertEqual(self.notes[-1], ("info", "Farm Send: U1 #1 finished busy.gcode"))
-        self.assertEqual(status["notice"]["text"], "U1 #1 finished busy.gcode")
+        self.assertEqual(self.notes[-1], ("info", "Farm Send: U1 #1 finished busy"))
+        self.assertEqual(status["notice"]["text"], "U1 #1 finished busy")
+        self.assertEqual(status["notice"]["file"], "busy.gcode")                  # the full name, for hover
         self.assertIn("notice", self._read(self.p_u1))          # stays on the card while idle
         self.u1.state = "printing"                              # next print: the old note is cleared
         self.assertNotIn("notice", self._read(self.p_u1))
@@ -1593,7 +1603,7 @@ class AppTests(unittest.TestCase):
         self.app.store.upsert(dict(self.p_u1, address=address))
         self.u1.state = "cancelled"
         self._read(self.p_u1)
-        self.assertEqual(self.notes, [("info", "Farm Send: U1 #1: busy.gcode was cancelled")])
+        self.assertEqual(self.notes, [("info", "Farm Send: U1 #1: busy was cancelled")])
 
     def test_cc2_finish_is_only_claimed_at_100_percent(self):
         self.cc2.status_code = 2

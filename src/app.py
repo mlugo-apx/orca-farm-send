@@ -1697,6 +1697,7 @@ class FarmApp:
                 note = self.notices.get(printer_id)
                 if event:
                     self.notices[printer_id] = {"level": event[0], "text": event[1], "at": status["checked_at"],
+                                                "file": os.path.basename(ended_file or status.get("filename") or ""),
                                                 "state": status["state"]}
                 elif note and note["state"] != status["state"] and status["state"] in ("idle", "printing"):
                     # Over once the printer moved on: the next print runs, a pause was resumed, an

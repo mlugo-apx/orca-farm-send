@@ -71,6 +71,10 @@
   .kv > .k { color: var(--fs-soft); white-space: nowrap; }
   .kv > .v { min-width: 0; overflow-wrap: anywhere; }
   .name { font-weight: 600; overflow-wrap: anywhere; }
+  /* A file or part name on a printer card: one line, cut with "..."; the full name shows on hover. */
+  .clip { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .noteline { display: flex; gap: 0; min-width: 0; }
+  .noteline > .when { flex: none; white-space: nowrap; }
   details.old > summary { cursor: pointer; color: var(--orca-muted); font-size: 12px; }
 </style>
 
@@ -1014,7 +1018,7 @@
     var lines = "";
     if (status.state === "printing" || status.state === "paused") {
       var pct = status.progress == null ? null : Math.round(status.progress);
-      lines += "<div class='name small' title='" + esc(status.filename) + "'>" + nameHtml(partName(status.filename)) + "</div>" +
+      lines += "<div class='name small clip' title='" + esc(status.filename) + "'>" + esc(partName(status.filename)) + "</div>" +
                "<div class='bar'><i style='width:" + (pct || 0) + "%'></i></div>" +
                "<div class='facts small'><span>" + (pct == null ? "" : "<b>" + pct + "%</b>") +
                (status.remaining_s == null ? "" : "<span class='soft'> \u00b7 " + duration(status.remaining_s) + " left</span>") + "</span><span>" +
@@ -1036,8 +1040,9 @@
     }
     var details = lines;
     lines = main + (detailsOpen[p.id] ? details : "");
-    if (status.notice) lines += "<div class='small " + (status.notice.level === "error" ? "err" : "ok") + "'>" + esc(status.notice.text) +
-                                " \u00b7 " + clock(new Date(status.notice.at * 1000), false) + "</div>";
+    if (status.notice) lines += "<div class='small noteline " + (status.notice.level === "error" ? "err" : "ok") + "'" +
+                                " title='" + esc(status.notice.text + (status.notice.file ? "\n" + status.notice.file : "")) + "'><span class='clip'>" + esc(status.notice.text) +
+                                "</span><span class='when'>&nbsp;\u00b7 " + clock(new Date(status.notice.at * 1000), false) + "</span></div>";
     if (status.state === "offline" && status.detail) lines += "<div class='small muted'>" + esc(status.detail) + "</div>";
     var stored = state.storage[p.id];
     if (stored && stored.many) lines += "<div class='small warn'>" + stored.count + " stored files. Uploads to this printer can start failing: clean up below.</div>";
