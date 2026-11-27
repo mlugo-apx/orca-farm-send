@@ -99,6 +99,20 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(core.strip_model_suffix("x.stl_a"), "x.stl_a")
         self.assertNotEqual(core.job_filename("a", when=1), core.job_filename("a", when=2))
 
+    def test_old_files_sent_from_a_kept_plate_are_marked(self):
+        items = ["Pool Drain", "Pool", "Rail clip"]
+        library = core.job_filename("Pool Drain_x4_3h12m")          # sent from the library
+        sliced = core.job_filename("Pool Drain_PLA_3h12m")          # sliced, later kept under that name
+        self.assertEqual(core.kept_item(library, items), "Pool Drain")
+        self.assertEqual(core.kept_item(sliced, items), "Pool Drain")
+        self.assertEqual(core.kept_item(core.job_filename("Pool Drain_x2").upper(), items), "Pool Drain")
+        self.assertEqual(core.kept_item(core.job_filename("Pool Drain v2_PLA_1h"), items), "")   # a different part
+        self.assertEqual(core.kept_item(core.job_filename("Rail clip holder_PLA_20m"), items), "")
+        self.assertEqual(core.kept_item("someone_else.gcode", items), "")
+        rows = core.old_list([{"name": "gcodes/" + library, "modified": 5, "size": 9}], ["Pool Drain"])
+        self.assertEqual(rows[0]["kept"], "Pool Drain")
+        self.assertNotIn("kept", core.old_list([{"name": library}])[0])
+
     def test_validate(self):
         good = {"name": "U1", "kind": core.KIND_MOONRAKER, "address": "http://192.168.0.60/", "model": "Snapmaker U1"}
         self.assertEqual(core.validate_printer(good)["address"], "192.168.0.60")
@@ -1189,7 +1203,14 @@ class AppTests(unittest.TestCase):
 
     def copies(self):
         folder = self.app.slice_dir            # each window keeps its sliced copies in its own folder
-        return sorted(os.listdir(folder)) if os.path.isdir(folder) else []
+        return sorted(name for name in os.listdir(folder) if name != "jobs.json") if os.path.isdir(folder) else []
+
+    def _saved_ids(self):
+        try:
+            with open(os.path.join(self.app.slice_dir, "jobs.json")) as handle:
+                return sorted(row["id"] for row in json.load(handle)["jobs"])
+        except (OSError, ValueError):
+            return []
 
     def _statuses(self):
         return [post["id"] for post in self.posts if post.get("command") == "status"]
@@ -1274,6 +1295,17 @@ class AppTests(unittest.TestCase):
         self.assertEqual(core.status_event(printing, dict(printing, errors=[205]), "P"),
                          ("error", "P reports a problem while printing (code 205)"))
         self.assertIsNone(core.status_event(dict(printing, errors=[205]), dict(printing, errors=[205]), "P"))
+
+    def test_send_messages_name_the_part_and_keep_the_file_name_for_hover(self):
+        self.slice()
+        (sent,) = self.send([self.p_u1], False)
+        self.assertEqual(sent["text"], "Uploaded widget")
+        self.assertTrue(sent["file"].startswith("widget_") and sent["file"].endswith(".gcode"), sent["file"])
+        self.app.handle({"command": "bed_cleared", "id": self.p_u1["id"]})
+        (sent,) = self.send([self.p_u1], True)
+        self.assertTrue(sent["text"].startswith("Started widget. "), sent["text"])   # the fake is not a Snapmaker
+        self.assertTrue(sent["file"].endswith(".gcode"))
+        self.assertIn(("info", "Farm Send: U1 #1 started printing widget"), self.notes)
 
     def test_bed_must_be_cleared_before_the_next_print(self):
         self.slice()
@@ -1817,6 +1849,36 @@ class AppTests(unittest.TestCase):
         self.slice(U1_GCODE)
         self.slice(CC2_GCODE)
         self.assertEqual(set(self.stale_by_type().values()), {False})
+
+    def test_a_plugin_reload_gives_the_window_its_sliced_plates_back(self):
+        u1 = self.slice(U1_GCODE)
+        cc2 = self.slice(CC2_GCODE)
+        self.assertTrue(wait_for(lambda: self._saved_ids() == sorted([u1["id"], cc2["id"]])))
+        window = os.path.basename(self.app.slice_dir)
+        reloaded = FarmApp(self.folder.name, lambda message: None, window_id=window)
+        self.assertEqual(sorted(job["id"] for job in reloaded.jobs), sorted([u1["id"], cc2["id"]]))
+        again = {job["id"]: job for job in reloaded.jobs}[u1["id"]]
+        self.assertEqual((again["path"], again["key"], again["meta"]["printer_model"]), (u1["path"], u1["key"], "Snapmaker U1"))
+        self.assertEqual(reloaded._job_for(self.p_u1)["id"], u1["id"])            # the cards still send it
+        self.assertEqual(reloaded._job_for(self.p_cc2)["id"], cc2["id"])
+        self.assertTrue(reloaded.snapshot()["jobs"][0]["ready"])
+        # A different window, or OrcaSlicer started again, does not take them.
+        self.assertEqual(FarmApp(self.folder.name, lambda message: None).jobs, [])
+
+    def test_a_reload_after_the_project_closed_brings_nothing_back(self):
+        self.slice(U1_GCODE)
+        self.assertTrue(wait_for(lambda: len(self._saved_ids()) == 1))
+        self.app.project_closed()
+        self.assertEqual(self._saved_ids(), [])
+        window = os.path.basename(self.app.slice_dir)
+        self.assertEqual(FarmApp(self.folder.name, lambda message: None, window_id=window).jobs, [])
+
+    def test_a_reload_skips_a_saved_plate_whose_copy_is_gone(self):
+        job = self.slice(U1_GCODE)
+        self.assertTrue(wait_for(lambda: len(self._saved_ids()) == 1))
+        os.remove(job["path"])
+        window = os.path.basename(self.app.slice_dir)
+        self.assertEqual(FarmApp(self.folder.name, lambda message: None, window_id=window).jobs, [])
 
     def test_project_close_removes_copies(self):
         self.slice(U1_GCODE)

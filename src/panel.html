@@ -1047,7 +1047,8 @@
         sendLine = "<div class='small'>" + esc(sending.text) + "</div><div class='bar'><i style='width:" + Math.round(sending.percent || 0) + "%'></i></div>" +
                    "<button type='button' class='quiet mini' data-cancel='" + esc(p.id) + "'>Cancel</button>";
       } else {
-        sendLine = "<div class='small " + (sending.ok ? "ok" : "err") + "'>" + esc(sending.text) + "</div>";
+        sendLine = "<div class='small " + (sending.ok ? "ok" : "err") + "'" + (sending.file ? " title='" + esc(sending.file) + "'" : "") + ">" +
+                   nameHtml(sending.text) + "</div>";
       }
     }
     var hint = "";
@@ -1203,7 +1204,8 @@
     return "<details class='old' style='margin:2px 0 6px 20px'><summary>Show the " + n + " " + storeWord(n) + "</summary>" +
       list.map(function (f) {
         return "<div class='small' style='margin-top:4px'><div style='overflow-wrap:anywhere'>" + nameHtml(f.name) + "</div>" +
-               "<div class='tiny muted'>" + esc(day(f.modified)) + (f.size ? " \u00b7 " + (f.size < 1048576 ? Math.max(1, Math.round(f.size / 1024)) + " KB" : megabytes(f.size)) : "") + "</div></div>";
+               "<div class='tiny muted'>" + esc(day(f.modified)) + (f.size ? " \u00b7 " + (f.size < 1048576 ? Math.max(1, Math.round(f.size / 1024)) + " KB" : megabytes(f.size)) : "") +
+               (f.kept ? " \u00b7 <span class='ok'>in the library as " + esc(f.kept) + "</span>" : "") + "</div></div>";
       }).join("") +
       (n > list.length ? "<div class='tiny muted' style='margin-top:4px'>and " + (n - list.length) + " more</div>" : "") + "</details>";
   }

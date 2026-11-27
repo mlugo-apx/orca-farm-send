@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.22
+
+- Sliced plates survive a plugin reload. Reloading Farm Send (for example after installing a new version) used to drop every plate held under Plates; the window now gets them back, with the plate each printer type sends still picked. Closing the project, or restarting OrcaSlicer, still clears them.
+- "Uploaded" and "Started" lines on the printer cards, and the notifications, name the part ("Started Pool_Drain_v26") instead of the long file name; the file name is in the hover text.
+- In the clean-up dialog's file list, a file sent from a kept plate, or sliced under a name you later kept, is marked "in the library as <name>", so you can see it can be sent again without slicing. The match is by name only.
+
 ## 0.3.21
 
 - Tidier panel text. Library plates and sliced plates show their facts as labelled rows (Print, Toolhead, Process, Kept) that wrap instead of being cut off at the panel edge, and preset names drop the printer they are for ("@Elegoo CC2 0.4 nozzle"), since the printer is already shown.

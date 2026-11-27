@@ -1,7 +1,9 @@
 # BUNDLE-STRIP-BEGIN
 import os
+import sys
 import tempfile
 import threading
+import uuid
 
 import orca
 from app import FarmApp, WorkerPool
@@ -48,6 +50,22 @@ def _saved_hosts():
     return sorted(hosts)
 
 
+def _window_id():
+    """A name for this OrcaSlicer window that stays the same when the plugin is reloaded.
+
+    A reload removes the plugin's own modules but keeps OrcaSlicer's Python running, so the name
+    is kept on the sys module, which outlives the plugin. Each OrcaSlicer window is its own process
+    with its own Python, so two windows never share a name, and a restart starts a new one."""
+    name = getattr(sys, "_farm_send_window_id", None)
+    if not isinstance(name, str) or len(name) != 8:
+        name = uuid.uuid4().hex[:8]
+        try:
+            sys._farm_send_window_id = name
+        except Exception:
+            pass
+    return name
+
+
 class FarmSend(orca.script.ScriptPluginCapabilityBase):
     panel = None
     pool = None
@@ -72,7 +90,8 @@ class FarmSend(orca.script.ScriptPluginCapabilityBase):
             storage = orca.host.plugin.storage()
             self.app = FarmApp(storage, self._post, self._notify, (), self._default_name,
                                read_presets=self._read_presets, apply_presets=self._apply_presets,
-                               list_presets=self._list_printer_presets, spawn=self.pool.submit)
+                               list_presets=self._list_printer_presets, spawn=self.pool.submit,
+                               window_id=_window_id())
         return self.app
 
     def _post(self, message):

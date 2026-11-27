@@ -91,7 +91,7 @@ Fill spaces parts by their convex outline, so parts with hooks or notches pack l
 
 **Several plates in one project**
 
-After **Slice all**, every plate is held for its printer type, one line each; click a line for its details. **Save all to library** names and keeps every plate not saved yet in one dialog, each with its own name, parts count and folder. The dot in front of a plate marks the one the printer cards send; click another plate's dot to change it. The printer type OrcaSlicer is set to stays open and the others fold to one line; **clear** drops the sliced plates of a type. Slicing a plate again replaces that plate only.
+After **Slice all**, every plate is held for its printer type, one line each; click a line for its details. **Save all to library** names and keeps every plate not saved yet in one dialog, each with its own name, parts count and folder. The dot in front of a plate marks the one the printer cards send; click another plate's dot to change it. The printer type OrcaSlicer is set to stays open and the others fold to one line; **clear** drops the sliced plates of a type. Slicing a plate again replaces that plate only. Sliced plates are kept when Farm Send is reloaded; closing the project or restarting OrcaSlicer clears them.
 
 **Toolhead names**
 
@@ -102,7 +102,7 @@ After **Slice all**, every plate is held for its printer type, one line each; cl
 <img src="docs/videos.png" alt="Stored box on its Videos tab: a table of recordings, size and oldest recording per printer, how many are old under the rule, and Clean up" width="354">
 
 The **Stored** box at the bottom lists every printer with its file count, size and oldest file, and how many files count as old under your rule.
-The pencil next to refresh sets the rule: keep files newer than N days, or keep the newest N files. **Clean up** shows what will be removed per printer and asks before deleting. Every printer is ticked in that dialog; untick any you want to leave alone.
+The pencil next to refresh sets the rule: keep files newer than N days, or keep the newest N files. **Clean up** shows what will be removed per printer, with each file's name, date and size under **Show the N files**, and asks before deleting. A file sent from a kept plate is marked "in the library as <name>" (matched by name). Every printer is ticked in that dialog; untick any you want to leave alone.
 The file a printer is printing is always kept. A Centauri Carbon 2 is only cleaned while idle. Deleted files cannot be brought back.
 
 The **Videos** tab of the same box does this for time-lapse recordings, with its own rule. Recordings are removed only when you click Clean up, never automatically.

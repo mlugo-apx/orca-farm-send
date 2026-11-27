@@ -2013,10 +2013,31 @@ def storage_summary(files):
 OLD_LIST_MAX = 300   # old files listed by name in the clean-up dialog, per printer
 
 
-def old_list(items):
-    """The files or recordings a clean-up would remove, for the dialog: name, date and size, oldest first."""
-    return [{"name": os.path.basename(str(item.get("name") or "")), "modified": item.get("modified") or 0,
-             "size": item.get("size") or 0} for item in items[:OLD_LIST_MAX]]
+def old_list(items, kept=()):
+    """The files or recordings a clean-up would remove, for the dialog: name, date and size, oldest first.
+    kept: item names of the library plates for this printer; a file sent from one of them is marked."""
+    rows = []
+    for item in items[:OLD_LIST_MAX]:
+        name = os.path.basename(str(item.get("name") or ""))
+        row = {"name": name, "modified": item.get("modified") or 0, "size": item.get("size") or 0}
+        if kept:
+            row["kept"] = kept_item(name, kept)
+        rows.append(row)
+    return rows
+
+
+def kept_item(filename, items):
+    """The library item a file on a printer was sent from, or "". Read from the name Farm Send gave
+    the file: <item>_x<parts>_... when sent from the library, <item>_<filament>_<time>_... when
+    sliced. A name is not proof the file is the same G-code, only that a kept plate of that name exists."""
+    stem = re.sub(r"\.gcode(\.3mf)?$", "", os.path.basename(str(filename or "")), flags=re.I)
+    stem = re.sub(r"_\d{8}-\d{6}$", "", stem).lower()
+    for item in sorted(set(items), key=len, reverse=True):
+        base = safe_filename(strip_model_suffix(item or ""))[:80].lower()
+        if base and (stem == base or re.match(re.escape(base) + r"_x\d+(_|$)", stem)
+                     or re.fullmatch(re.escape(base) + r"_[^_]+_(\d+h)?\d+m", stem)):
+            return item
+    return ""
 
 
 def file_stamp(path):

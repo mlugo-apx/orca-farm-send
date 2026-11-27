@@ -18,6 +18,8 @@ from core import (videos_to_clean, newest_installed, record_version, version_key
 SLICE_DIR = "slices"
 SLICE_KEEP_S = 12 * 3600      # sliced copies of a window that is gone are dropped after this long
 SLICE_TOUCH_S = 600
+JOBS_FILE = "jobs.json"       # in each window's slice folder: the plates it holds, read back after a reload
+JOB_SAVED_KEYS = ("id", "name", "captured_at", "ready", "stale", "settled", "meta", "key", "plate", "objects", "md5")
 LIBRARY_DIR = "library"   # kept plates: <id>.gcode plus <id>.json describing it
 STATUS_MIN_INTERVAL = 3.0
 NEWER_CHECK_INTERVAL = 60.0    # seconds between looks for a newer installed Farm Send
@@ -86,7 +88,7 @@ class WorkerPool:
 
 class FarmApp:
     def __init__(self, storage_dir, post, notify=None, preset_dirs=(), default_name=None, spawn=None,
-                 read_presets=None, apply_presets=None, list_presets=None):
+                 read_presets=None, apply_presets=None, list_presets=None, window_id=None):
         self.store = PrinterStore(os.path.join(storage_dir, STORE_FILE))
         set_shared_dir(storage_dir)   # every OrcaSlicer window shares one client slot per CC2
         self.storage_dir = storage_dir
@@ -115,15 +117,17 @@ class FarmApp:
         # the second printer type would destroy the plate sliced for the first.
         self.jobs = []
         # Each OrcaSlicer window keeps its sliced copies in a folder of its own, so a second window
-        # starting up never removes the plates another window still holds.
+        # starting up never removes the plates another window still holds. window_id names that
+        # folder; the plugin passes the same one again after a reload, so the window gets its plates back.
         self.slice_root = os.path.join(storage_dir, SLICE_DIR)
-        self.slice_dir = os.path.join(self.slice_root, uuid.uuid4().hex[:8])
+        self.slice_dir = os.path.join(self.slice_root, window_id or uuid.uuid4().hex[:8])
         self._slice_touched = time.monotonic()
         self.library_dir = os.path.join(storage_dir, LIBRARY_DIR)
         self._library_cache, self._library_stamp = None, None
         self.chosen = {}        # printer type key -> id of the sliced plate its cards send
         self._saved_names = {}  # md5 of a kept plate -> its item name, refreshed with every snapshot
         self._clear_slice_dir()
+        self._load_jobs()
         self.slicing = False
         self.status = {}          # printer id -> normalized status
         self._status_at = {}
@@ -156,13 +160,55 @@ class FarmApp:
                     continue
                 if os.path.isdir(path):
                     for inner in os.listdir(path):
-                        if inner.endswith(".gcode") or inner.endswith(".part"):
+                        if inner.endswith(".gcode") or inner.endswith(".part") or inner == JOBS_FILE:
                             self._remove_file(os.path.join(path, inner))
                     os.rmdir(path)
                 elif name.endswith(".gcode") or name.endswith(".part"):      # from before 0.3.3
                     self._remove_file(path)
             except OSError:
                 pass
+
+    def _load_jobs(self):
+        """Take back the plates this window held before the plugin was reloaded. Only plates whose
+        copy is still in this window's folder come back; anything else is dropped."""
+        try:
+            with open(os.path.join(self.slice_dir, JOBS_FILE), "r", encoding="utf-8") as handle:
+                saved = json.load(handle)
+        except (OSError, ValueError):
+            return
+        if not isinstance(saved, dict):
+            return
+        jobs = []
+        for entry in saved.get("jobs") or []:
+            if not isinstance(entry, dict) or not entry.get("ready") or not entry.get("key"):
+                continue
+            name = os.path.basename(str(entry.get("file") or ""))
+            path = os.path.join(self.slice_dir, name)
+            if not name.endswith(".gcode") or not os.path.isfile(path):
+                continue
+            job = {k: entry.get(k) for k in JOB_SAVED_KEYS}
+            job.update({"path": path, "source": "", "ready": True, "error": "",
+                        "stale": bool(entry.get("stale")), "meta": entry.get("meta") or {}})
+            jobs.append(job)
+        self.jobs = jobs
+        ids = {job["id"] for job in jobs}
+        self.chosen = {k: v for k, v in (saved.get("chosen") or {}).items() if v in ids}
+
+    def _save_jobs(self):
+        """Write down the plates this window holds, so a plugin reload does not lose them."""
+        with self.lock:
+            rows = [dict({k: job.get(k) for k in JOB_SAVED_KEYS}, file=os.path.basename(job["path"]))
+                    for job in self.jobs if job["ready"] and job["path"]]
+            chosen = dict(self.chosen)
+        path = os.path.join(self.slice_dir, JOBS_FILE)
+        try:
+            if not rows:
+                self._remove_file(path)
+                return
+            os.makedirs(self.slice_dir, exist_ok=True)
+            write_private(path, json.dumps({"jobs": rows, "chosen": chosen}))
+        except OSError:
+            pass      # the plates still work in this session; only a reload would lose them
 
     def _touch_slice_dir(self):
         """Mark this window's sliced copies as still in use. Cheap, and at most every few minutes."""
@@ -284,6 +330,7 @@ class FarmApp:
         if job["error"]:
             self._remove_file(copy + ".part")
             self._remove_file(copy)
+        self._save_jobs()
         self.post_state()
 
     def _farm_model(self, model):
@@ -298,6 +345,7 @@ class FarmApp:
                 if job["ready"] and not job.get("settled") and not job["stale"]:
                     job["stale"] = changed = True
         if changed:
+            self._save_jobs()
             self.post_state()
 
     def project_closed(self):
@@ -306,6 +354,7 @@ class FarmApp:
             self.jobs, self.slicing = [], False
         for path in paths:
             self._remove_file(path)
+        self._save_jobs()
         self.post_state()
 
     def _job_for(self, printer):
@@ -328,6 +377,7 @@ class FarmApp:
             job = next((j for j in self.jobs if j["id"] == message.get("id") and j["ready"]), None)
             if job is not None:
                 self.chosen[job["key"]] = job["id"]
+        self._save_jobs()
         self.post_state()
 
     def _job_base_name(self, job):
@@ -726,8 +776,9 @@ class FarmApp:
         for printer, snapshot in work:
             self._spawn(self._send_worker, printer, snapshot, start, options)
 
-    def _set_send(self, printer_id, active, text, percent=None, ok=None, started=False):
-        entry = {"active": active, "text": text, "percent": percent, "ok": ok, "started": started, "at": time.monotonic()}
+    def _set_send(self, printer_id, active, text, percent=None, ok=None, started=False, file=""):
+        entry = {"active": active, "text": text, "percent": percent, "ok": ok, "started": started, "file": file,
+                 "at": time.monotonic()}
         with self.lock:
             self.sends[printer_id] = entry
         self.post({"command": "send", "id": printer_id, "send": entry})
@@ -749,9 +800,11 @@ class FarmApp:
 
             self._set_send(printer_id, True, "Uploading 0%", percent=0)
             remote = client.upload(snapshot["path"], snapshot["name"], progress=progress, cancelled=cancel.is_set)
+            # Messages name the part, not the long file name; the file name stays on hover.
+            label = snapshot.get("item") or remote
             if not start:
-                self._set_send(printer_id, False, "Uploaded %s" % remote, ok=True)
-                self._notify("info", "Farm Send: uploaded %s to %s" % (remote, name))
+                self._set_send(printer_id, False, "Uploaded %s" % label, ok=True, file=remote)
+                self._notify("info", "Farm Send: uploaded %s to %s" % (label, name))
                 return
             if cancel.is_set():
                 raise FarmError("Cancelled after upload. The file is on the printer but was not started.")
@@ -788,8 +841,8 @@ class FarmApp:
             self.runs.start(printer, remote, item=snapshot.get("item") or snapshot.get("name") or "", parts=snapshot.get("parts"),
                             kept=snapshot.get("keep"), source=snapshot.get("source", "sliced"),
                             toolhead=snapshot.get("toolhead"))
-            self._set_send(printer_id, False, "Started %s%s" % (remote, note), ok=True, started=True)
-            self._notify("info", "Farm Send: %s started printing %s" % (name, remote))
+            self._set_send(printer_id, False, "Started %s%s" % (label, note), ok=True, started=True, file=remote)
+            self._notify("info", "Farm Send: %s started printing %s" % (name, label))
         except FarmError as error:
             self._set_send(printer_id, False, str(error), ok=False)
             self._notify("error", "Farm Send: %s: %s" % (name, error))
@@ -1047,6 +1100,7 @@ class FarmApp:
             self.chosen.pop(key, None)
         for job in gone:
             self._remove_file(job["path"])
+        self._save_jobs()
         self.post_state()
 
     def _cmd_library_delete(self, message):
@@ -1298,7 +1352,8 @@ class FarmApp:
                 entry["videos"] = before.get("videos")
                 old = files_to_clean(files, self.store.cleanup, self._protected(printer_id))
                 entry["removable"] = len(old)
-                entry["old"] = old_list(old)
+                entry["old"] = old_list(old, [e.get("item") for e in self.library()
+                                              if e.get("item") and model_matches(e.get("printer_model"), printer.get("model"))])
                 entry["many"] = printer.get("kind") == KIND_CC2 and entry["count"] >= CC2_MANY_FILES
                 entry["error"] = ""
             if videos is not False:
