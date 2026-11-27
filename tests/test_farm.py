@@ -299,6 +299,16 @@ class DebugLogTests(unittest.TestCase):
         self.log.write("send", "after", now=self.log.until + 1)     # switched itself off
         self.assertEqual(len(self.log.tail()), 1)
 
+    def test_repeated_answers_are_counted_not_written(self):
+        self.log.until = time.time() + 60
+        for ms in range(50):
+            self.log.write("http", "GET P1:80/printer/objects/query -> 200 in %d ms: {\"state\":\"printing\",\"eventtime\":%d.5}" % (ms, 384100 + ms))
+        self.log.write("http", "GET P1:80/printer/objects/query -> 200 in 9 ms: {\"state\":\"complete\"}")
+        lines = self.log.tail()
+        self.assertEqual(len(lines), 2)
+        self.assertIn("complete", lines[1])
+        self.assertIn("repeated 49 more times", lines[1])
+
     def test_log_is_capped_at_two_files(self):
         self.log.until = time.time() + 60
         for number in range(3000):

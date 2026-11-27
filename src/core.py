@@ -475,6 +475,7 @@ class DebugLog:
         self._lock = threading.Lock()
         self._swaps = []          # (compiled whole-word pattern, replacement), longest first
         self._salt = None
+        self._last = {}           # what each kind of message said last, and how often it repeated since
 
     def enabled(self, now=None):
         return (time.time() if now is None else now) < self.until
@@ -568,6 +569,21 @@ class DebugLog:
         line = self.redact("%s %s" % (event, text)).replace("\r", " ").replace("\n", " | ")
         if len(line) > DEBUG_TEXT_MAX:
             line = line[:DEBUG_TEXT_MAX] + "...(%d more)" % (len(line) - DEBUG_TEXT_MAX)
+        # Status checks repeat the same answer every few seconds. A repeat is counted, not written, so
+        # the 2 MB hold hours of changes instead of minutes of the same reply.
+        same = re.sub(r"\b\d+ ms\b|\d{9,}(\.\d+)?|\b\d{5,}\.\d+", "#", line)
+        key = re.split(r" -> |\{", same, 1)[0][:160]        # the question (request or topic), not the answer
+        with self._lock:
+            last = self._last.get(key)
+            if last is not None and last[0] == same:
+                last[1] += 1
+                return
+            repeated = last[1] if last is not None else 0
+            if len(self._last) > 500:
+                self._last.clear()
+            self._last[key] = [same, 0]
+        if repeated:
+            line += " (the previous answer repeated %d more time%s)" % (repeated, "" if repeated == 1 else "s")
         data = ("%s %s %s\n" % (stamp, self.window, line)).encode("utf-8", errors="replace")
         with self._lock:
             try:
