@@ -8,6 +8,7 @@ import os
 import re
 import socket
 import struct
+import sys
 import threading
 import time
 import urllib.parse
@@ -252,14 +253,22 @@ def http_request(url, method="GET", data=None, headers=None, timeout=6):
         send_headers.update(headers or {})
         if data is not None:
             send_headers.setdefault("Content-Length", str(len(data)))
+        started = time.monotonic()
         connection.request(method, path, body=data, headers=send_headers)
         response = connection.getresponse()
-        return response.status, response.read()
+        raw = response.read()
+        if _debug_sink is not None:
+            debug("http", "%s %s:%s%s -> %d, sent %d bytes, got %d bytes in %d ms: %s" % (
+                method, host, port, path, response.status, len(data or b""), len(raw),
+                (time.monotonic() - started) * 1000, debug_reply(raw[:16384]) if raw else "-"))
+        return response.status, raw
     except PermissionError:
         raise
     except (socket.timeout, TimeoutError):
+        debug("http", "%s %s:%s%s -> timed out after %s s" % (method, host, port, path, timeout))
         raise FarmError("Cannot reach printer: timed out")
     except (OSError, http.client.HTTPException) as error:
+        debug("http", "%s %s:%s%s -> %s" % (method, host, port, path, debug_trace()))
         raise FarmError("Cannot reach printer: %s" % (getattr(error, "strerror", None) or error))
     finally:
         connection.close()
@@ -292,6 +301,298 @@ def http_json(url, method="GET", data=None, headers=None, timeout=6):
 
 MAX_REPLY_BYTES = 4 * 1024 * 1024    # no printer reply this plugin reads is anywhere near this
 MAX_WS_FRAMES = 2000                 # unrelated notifications tolerated while waiting for one reply
+
+
+# --------------------------------------------------------------------------------------
+# Debug log: off by default, switched on in Settings for DEBUG_LOG_HOURS, for trouble reports
+# --------------------------------------------------------------------------------------
+#
+# The log is meant to be pasted into a public issue, and this farm prints personalised orders whose
+# file and part names carry customers' names. So it works by ALLOW-LIST: what a printer sends is passed
+# through sanitize_json(), which keeps numbers, true/false and a short list of known-safe text fields,
+# and replaces every other text value. Farm Send's own lines are built from safe parts only: printer
+# numbers (P1, P2...), codes of file names, states and numbers. redact() then scrubs the whole line a
+# second time, for anything that slipped through.
+
+DEBUG_LOG_FILE = "farm_send_debug.log"
+DEBUG_SALT_FILE = "farm_send_debug_salt"
+DEBUG_LOG_MAX = 1024 * 1024        # bytes per file; one previous file is kept, so 2 MB at most
+DEBUG_LOG_HOURS = 24               # it switches itself off after this, so it is never left on for weeks
+DEBUG_TEXT_MAX = 900               # characters of one line kept, counted AFTER redaction
+_debug_sink = None
+
+# Text values a printer sends that are safe to keep: states, result codes and versions. Matched without
+# regard to case. Anything not listed is replaced, however harmless it looks.
+_SAFE_TEXT_KEYS = frozenset(k.lower() for k in (
+    "state", "state_text", "status", "state_message", "print_state", "result", "code", "success",
+    "firmwareversion", "protocolversion", "firmware_version", "software_version", "klipper_version",
+    "brandname", "model", "printer_model", "machine_model", "method", "jsonrpc", "type", "action",
+    "Cmd", "Topic", "error_code", "level", "filament_color", "filament_type", "color", "material", "storage_media",
+    "print_layout", "ota_version"))
+# Keys whose text value is a file or path: kept as a code, with the file type, so lines about one file match.
+_FILE_KEYS = frozenset(k.lower() for k in (
+    "filename", "file", "filepath", "path", "url", "gcode_name", "thumbnail", "file_name", "current_file",
+    "remote", "name_file"))
+_VERSIONISH = re.compile(r"^[Vv]?\d+(\.\d+){1,3}([-+.][0-9A-Za-z]{1,12})?$")
+_SHORT_CODE = re.compile(r"^[A-Za-z0-9_.:-]{0,12}$")        # "ok", "idle", "000000", "standby"
+_STATEISH = re.compile(r"^[A-Za-z_ ]{1,24}$")
+
+_SECRET_FIELD = re.compile(
+    r"""(?i)((?<![a-z0-9_])["']?(?:access[_-]?code|lan[_-]?code|api[_-]?key|x-api-key|password|passwd|pin|token|"""
+    r"""secret|serial|serial[_-]?number|sn|mainboard[_-]?id|mainboard[_-]?ip|mac|mac[_-]?address|client[_-]?id|"""
+    r"""username|user|user[_-]?name|key|name|display[_-]?name|device[_-]?name|plate[_-]?name|object[_-]?name|"""
+    r"""current[_-]?object|excluded[_-]?objects|objects|folder|machine[_-]?name|host|host[_-]?name|ssid|wifi|"""
+    r"""email|owner|nickname|item|part|label|object)["']?\s*[:=]\s*)("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[[^\]]*\]|[^,;}\]|&\n"']+)""")
+_FILE_FIELD = re.compile(
+    r"""(?i)((?<![a-z0-9_])["']?(?:file[_-]?name|file|filepath|path|url|gcode[_-]?name|thumbnail|remote|current[_-]?file)"""
+    r"""["']?\s*[:=]\s*)("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')""")
+_FILE = re.compile(r"(?i)(?<![<\w%-])[^\s\"'/\\|<>:=,{}()\[\]&?]+\.(gcode|3mf|stl|step|stp|obj|amf|mp4|jpe?g|png|zip)\b(?!>)")
+_TOPIC_ID = re.compile(r"(?i)\b(sdcp/[a-z]+/|elegoo/|device/)[0-9a-z_-]{6,}")
+_LONG_TOKEN = re.compile(r"(?<![A-Za-z0-9+=_-])(?=[A-Za-z0-9+=_-]*\d)[A-Za-z0-9+=_-]{20,}(?![A-Za-z0-9+=_-])")
+_BASE64 = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
+# Quoted text holding a file name ('/x/Kate gift.gcode' in an error message): coded whole, spaces and all.
+_QUOTED_FILE = re.compile(r"""(["'])([^"'\n]{0,300}?\.(?:gcode|3mf|stl|step|stp|obj|amf|mp4|jpe?g|png|zip))\1""", re.I)
+_IPV4 = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])")
+# Five or more groups, or a "::" form: a time of day (12:30:45) has only three.
+_IPV6 = re.compile(r"(?i)(?<![0-9a-z:])\[?(?:(?:[0-9a-f]{1,4}:){4,7}[0-9a-f]{1,4}"
+                   r"|(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6})?::(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6})?)"
+                   r"(?:%\w+)?\]?(?![0-9a-z:])")
+_MAC = re.compile(r"(?i)(?<![0-9a-f:])(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}(?![0-9a-f:])")
+_EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+_HOSTNAME = re.compile(r"(?i)\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.(?:local|lan|home|internal|localdomain)\b")
+_HOME = re.compile(r"(?i)(?:[a-z]:)?(?:\\\\|\\|/)+(?:users|home|documents and settings)(?:\\\\|\\|/)+[^\\/\s\"']+")
+
+
+_debug_code = None
+
+
+def set_debug_sink(sink, code=None):
+    """sink(event, text) receives every debug message; None stops them. code(name) turns a file name
+    into its short code for sanitize_json. One per OrcaSlicer window."""
+    global _debug_sink, _debug_code
+    _debug_sink, _debug_code = sink, code
+
+
+def debug_reply(raw):
+    """A printer's reply or message, sanitized for the log (see sanitize_json)."""
+    return debug_json(raw, _debug_code or (lambda name: "<file>"))
+
+
+def debug(event, text=""):
+    """Record one thing for the debug log, if it is on. Never raises and costs nothing when off."""
+    sink = _debug_sink
+    if sink is None:
+        return
+    try:
+        sink(event, text)
+    except Exception:
+        pass
+
+
+def debug_on():
+    """True when a debug sink is set; callers use it to skip building costly messages."""
+    return _debug_sink is not None
+
+
+def sanitize_json(value, code, key=""):
+    """A copy of a printer's JSON with every text value not known to be safe replaced. code(text)
+    turns a file name into a short code. Numbers, true/false and null are kept: they are what a
+    trouble report needs (states, layers, temperatures, error and ack codes)."""
+    if isinstance(value, dict):
+        return {str(k): sanitize_json(v, code, str(k)) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [sanitize_json(v, code, key) for v in value[:50]] + (["...%d more" % (len(value) - 50)] if len(value) > 50 else [])
+    if not isinstance(value, str):
+        return value
+    lowered = key.lower()
+    if lowered in _FILE_KEYS:
+        return code(value) if value else ""
+    if lowered in _SAFE_TEXT_KEYS and (_STATEISH.match(value) or _SHORT_CODE.match(value) or _VERSIONISH.match(value)):
+        return value
+    if lowered == "topic":
+        return _TOPIC_ID.sub(lambda m: m.group(1) + "<id>", value)
+    if _VERSIONISH.match(value) or (len(value) <= 8 and re.match(r"^[0-9.+-]*$", value)):
+        return value
+    return "<text:%d>" % len(value)
+
+
+def debug_json(raw, code):
+    """Printer reply bytes or text, as safe text for the log: parsed and sanitized when it is JSON
+    (with or without a number before it, as some Centauri firmware sends), else only its length."""
+    if isinstance(raw, (bytes, bytearray)):
+        raw = bytes(raw).decode("utf-8", errors="replace")
+    text = str(raw or "")
+    stripped = re.sub(r"^\d+(?=[\[{])", "", text.strip())
+    try:
+        return json.dumps(sanitize_json(json.loads(stripped), code), separators=(",", ":"), ensure_ascii=False)
+    except ValueError:
+        if text.strip() in ("ping", "pong", "ok", ""):
+            return text.strip()
+        return "<%d bytes, not JSON>" % len(text)
+
+
+def debug_trace():
+    """The current exception for the log: where it happened in Farm Send's code and its type. Its message
+    can carry file or part names, so it is scrubbed by redact() like everything else."""
+    import traceback as _traceback
+    kind, error, trace = sys.exc_info()
+    frames = ["%s:%d %s" % (os.path.basename(f.filename), f.lineno, f.name) for f in _traceback.extract_tb(trace)][-6:]
+    return "%s: %s [%s]" % (getattr(kind, "__name__", "Error"), error, " < ".join(reversed(frames)))
+
+
+class DebugLog:
+    """A small log file in the plugin's storage folder, shared by every OrcaSlicer window.
+
+    redact() is the second layer over sanitize_json() and the safe-parts rule for Farm Send's own lines.
+    Removed or replaced: saved access codes and API keys; printer names and addresses (P1, P2, ... by
+    their order in the panel); other IPv4/IPv6/MAC addresses and local host names; e-mail addresses;
+    home folders in paths; values of fields naming a person, device, network, credential, part or folder;
+    device ids in message topics and long tokens; and file, part, item, folder and toolhead names, which
+    can carry a customer's name: each becomes a short code, the same every time on this computer (salted,
+    so a guessed name cannot be confirmed from the code), so lines about one file can still be matched up.
+    The log never leaves the computer by itself."""
+
+    def __init__(self, folder, window=""):
+        self.folder = folder
+        self.path = os.path.join(folder, DEBUG_LOG_FILE)
+        self.window = window or "-"
+        self.until = 0.0
+        self._lock = threading.Lock()
+        self._swaps = []          # (compiled whole-word pattern, replacement), longest first
+        self._salt = None
+
+    def enabled(self, now=None):
+        return (time.time() if now is None else now) < self.until
+
+    def _salt_value(self):
+        if self._salt is None:
+            path = os.path.join(self.folder, DEBUG_SALT_FILE)
+            try:
+                with open(path, "r", encoding="ascii") as handle:
+                    salt = handle.read().strip()
+                if not re.fullmatch(r"[0-9a-f]{32}", salt):
+                    raise ValueError
+            except (OSError, ValueError):
+                salt = uuid.uuid4().hex
+                try:
+                    write_private(path, salt)
+                except OSError:
+                    pass
+            self._salt = salt
+        return self._salt
+
+    def code_of(self, text):
+        digest = hashlib.sha256((self._salt_value() + "\n" + str(text)).encode("utf-8", errors="replace"))
+        return digest.hexdigest()[:6]
+
+    def file_code(self, name):
+        """A file or path as <file-1a2b3c.gcode>: its type kept, its name replaced."""
+        name = str(name or "")
+        match = re.search(r"\.([A-Za-z0-9]{1,5})$", name)
+        return "<file-%s%s>" % (self.code_of(name), ("." + match.group(1).lower()) if match else "")
+
+    def set_context(self, printers, names=(), secrets=()):
+        """What to remove from every line. printers: the saved printers, in panel order. names: part,
+        item, folder, order and toolhead names. secrets: anything else that must never be written."""
+        swaps = []
+
+        def add(value, replacement, minimum):
+            value = str(value or "").strip()
+            if len(value) < minimum or (value.isdigit() and len(value) < 6):
+                return
+            swaps.append((value, replacement))
+
+        for number, printer in enumerate(printers, 1):
+            label = "P%d" % number
+            for field in ("access_code", "api_key"):
+                add(printer.get(field), "<hidden>", 4)
+            address = host_of(printer.get("address") or "")
+            add(address, label, 3)
+            if address.count(":") == 1:
+                add(address.rsplit(":", 1)[0], label, 3)
+            add(printer.get("name"), label, 2)
+        for name in names:
+            add(name, "<name-%s>" % self.code_of(str(name).strip().lower()), 4)
+        for value in secrets:
+            add(value, "<hidden>", 4)
+        swaps.sort(key=lambda pair: len(pair[0]), reverse=True)
+        self._swaps = [(re.compile(r"(?i)(?<![A-Za-z0-9])" + re.escape(value) + r"(?![A-Za-z0-9])"), replacement)
+                       for value, replacement in swaps]
+
+    def redact(self, text):
+        # Not URL-decoded on purpose: an encoded name ("Sarah%20Jones.gcode") stays one token and is coded whole.
+        text = str(text)
+        text = _HOME.sub("~", text)
+        for pattern, replacement in self._swaps:           # known names first: before files are coded
+            text = pattern.sub(replacement, text)
+        text = _FILE_FIELD.sub(lambda m: m.group(1) + '"%s"' % self.file_code(m.group(2)[1:-1]), text)
+        text = _QUOTED_FILE.sub(lambda m: m.group(1) + self.file_code(m.group(2)) + m.group(1), text)
+        text = _FILE.sub(lambda m: self.file_code(m.group(0)), text)
+        text = _EMAIL.sub("<email>", text)
+        text = _SECRET_FIELD.sub(lambda m: m.group(1) + ('"<hidden>"' if m.group(2)[:1] in "\"'[" else "<hidden>"), text)
+        text = _TOPIC_ID.sub(lambda m: m.group(1) + "<id>", text)
+        text = _MAC.sub("<mac>", text)
+        text = _IPV4.sub("<ip>", text)
+        text = _IPV6.sub("<ip6>", text)
+        text = _HOSTNAME.sub("<host>", text)
+        text = _BASE64.sub("<data>", text)
+        return _LONG_TOKEN.sub("<id>", text)
+
+    def write(self, event, text="", now=None):
+        now = time.time() if now is None else now
+        if not self.enabled(now):
+            return
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)) + ".%03d" % int((now % 1) * 1000)
+        # Redacted BEFORE it is cut, so a name cut in half is never written.
+        line = self.redact("%s %s" % (event, text)).replace("\r", " ").replace("\n", " | ")
+        if len(line) > DEBUG_TEXT_MAX:
+            line = line[:DEBUG_TEXT_MAX] + "...(%d more)" % (len(line) - DEBUG_TEXT_MAX)
+        data = ("%s %s %s\n" % (stamp, self.window, line)).encode("utf-8", errors="replace")
+        with self._lock:
+            try:
+                try:
+                    if os.path.getsize(self.path) + len(data) > DEBUG_LOG_MAX:
+                        os.replace(self.path, self.path + ".1")
+                except OSError:
+                    pass
+                # Owner-only from the start, like the printer file; appended through a call that names it.
+                fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+                try:
+                    os.write(fd, data)
+                finally:
+                    os.close(fd)
+            except OSError:
+                pass        # a log that cannot be written must never break a print
+
+    def size(self):
+        total = 0
+        for path in (self.path, self.path + ".1"):
+            try:
+                total += os.path.getsize(path)
+            except OSError:
+                pass
+        return total
+
+    def tail(self, lines=300):
+        """The newest lines, oldest first, across the current and the previous file."""
+        found = []
+        for path in (self.path, self.path + ".1"):
+            try:
+                with open(path, "rb") as handle:
+                    found = handle.read().decode("utf-8", errors="replace").splitlines() + found
+            except OSError:
+                pass
+            if len(found) >= lines:
+                break
+        return found[-lines:]
+
+    def clear(self):
+        with self._lock:
+            for path in (self.path, self.path + ".1"):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
 
 
 class RpcError(Exception):
@@ -339,6 +640,7 @@ def websocket_rpc(address, method, params, timeout=20, path="/websocket"):
         if b" 101 " not in head.split(b"\r\n")[0] + b" ":
             raise RpcError(-32601, "Printer does not offer a websocket API")
         payload = json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}).encode("utf-8")
+        debug("ws", "%s:%s%s send %s" % (host, port or 80, path, debug_reply(payload)))
         mask = os.urandom(4)
         size = len(payload)
         if size < 126:
@@ -379,6 +681,7 @@ def websocket_rpc(address, method, params, timeout=20, path="/websocket"):
             message = bytearray()
             if not isinstance(reply, dict) or reply.get("id") != request_id:
                 continue        # status notifications the printer pushes to every client
+            debug("ws", "%s:%s%s reply %s" % (host, port or 80, path, debug_reply(json.dumps(reply)[:16384])))
             if "error" in reply:
                 error = reply["error"] if isinstance(reply["error"], dict) else {}
                 raise RpcError(error.get("code", -1), str(error.get("message", "printer error")))
@@ -492,6 +795,7 @@ class MiniMqtt:
             payload = json.dumps(payload)
         if isinstance(payload, str):
             payload = payload.encode("utf-8")
+        debug("mqtt", "%s publish %s %s" % (self.host, topic, debug_reply(payload)))
         self._send(0x32, _mqtt_str(topic) + struct.pack("!H", self._next_id()) + payload)
 
     def _recv_exact(self, count, deadline):
@@ -562,6 +866,8 @@ class MiniMqtt:
                 offset += 2
                 if qos == 1:
                     self._send(0x40, packet_id)
+            if _debug_sink is not None:
+                debug("mqtt", "%s message %s %s" % (self.host, topic, debug_reply(data[offset:offset + 16384])))
             return topic, data[offset:]
 
 
@@ -1820,6 +2126,7 @@ class PrinterStore:
         self.cleanup = dict(DEFAULT_CLEANUP)
         self.video_cleanup = dict(DEFAULT_CLEANUP)
         self.auto_open = True
+        self.debug_until = 0.0      # the debug log records until this time (epoch seconds); 0 = off
         self._stamp = None
         self.load()
 
@@ -1847,11 +2154,18 @@ class PrinterStore:
         self.auto_open = bool(value)
         self.save()
 
+    def set_debug(self, on, now=None):
+        """Switch the debug log on for DEBUG_LOG_HOURS, or off."""
+        self.sync()
+        self.debug_until = ((time.time() if now is None else now) + DEBUG_LOG_HOURS * 3600) if on else 0.0
+        self.save()
+
     def load(self):
         self.combos = {}
         self.cleanup = dict(DEFAULT_CLEANUP)
         self.video_cleanup = dict(DEFAULT_CLEANUP)
         self.auto_open = True
+        self.debug_until = 0.0
         self._stamp = file_stamp(self.path)
         try:
             with open(self.path, "r", encoding="utf-8") as handle:
@@ -1863,6 +2177,8 @@ class PrinterStore:
             self.cleanup = clean_rule(data.get("cleanup"))
             self.video_cleanup = dict(clean_rule(data.get("video_cleanup")), auto=False)
             self.auto_open = data.get("auto_open") is not False
+            until = data.get("debug_until")
+            self.debug_until = float(until) if isinstance(until, (int, float)) and until > 0 else 0.0
         except (OSError, ValueError, AttributeError):
             self.printers = []
 
@@ -1873,7 +2189,7 @@ class PrinterStore:
             # with wider permissions, and O_NOFOLLOW refuses a symlink planted at the temp name.
             write_private(temp, json.dumps({"version": 1, "printers": self.printers, "combos": self.combos,
                                             "cleanup": self.cleanup, "video_cleanup": self.video_cleanup,
-                                            "auto_open": self.auto_open}, indent=2))
+                                            "auto_open": self.auto_open, "debug_until": self.debug_until}, indent=2))
             os.replace(temp, self.path)
             self._stamp = file_stamp(self.path)
 

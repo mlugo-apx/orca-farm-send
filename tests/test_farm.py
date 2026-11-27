@@ -173,6 +173,125 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(found["U1 #1"]["api_key"], "")
 
 
+class DebugLogTests(unittest.TestCase):
+    """The debug log is meant to be pasted into a public issue. Customer names live in part and file
+    names on this farm, so nothing that could identify a person, device or network may reach it."""
+
+    PRINTERS = [{"name": "Kitchen CC2", "address": "192.168.1.50", "access_code": "AB12CD"},
+                {"name": "Mike's Garage U1", "address": "printer.local:7125", "api_key": "deadbeef0123456789"}]
+    NAMES = ["Sarah Jones keychain", "Kate gift", "Lisa orders", "Wedding - Tom & Lisa"]
+    # Real shapes of what printers, Python and Farm Send produce, each holding something private.
+    LEAKS = [
+        'GET http://192.168.1.77:7125/server/files/metadata?filename=Sarah%20Jones%20Ring.gcode HTTP/1.1',
+        '{"result":{"filename":"Emily Rose name tag_PLA_1h2m.gcode","print_stats":{"state":"printing"}}}',
+        '{"Id":"","Data":{"Cmd":0,"Data":{},"RequestID":"a1b2","MainboardID":"7f3c0a9d11e2","TimeStamp":1700000000000,"From":1},"Topic":"sdcp/request/7f3c0a9d11e2"}',
+        '{"Status":{"CurrentStatus":[1],"PrintInfo":{"Status":13,"CurrentLayer":5,"TotalLayer":200,"Filename":"Anna M\u00fcller Schl\u00fcsselanh\u00e4nger.gcode"}},"Topic":"sdcp/status/7f3c0a9d11e2"}',
+        '{"Attributes":{"Name":"Centauri Carbon","MachineName":"Mikes Garage CC","MainboardIP":"192.168.1.88","MainboardID":"7f3c0a9d11e2","FirmwareVersion":"V1.1.46"}}',
+        'open C:\\Users\\JohnSmith\\Documents\\orders\\cube.3mf',
+        'open C:\\\\Users\\\\JohnSmith\\\\AppData',
+        'path /Users/janedoe/Library/OrcaSlicer and /home/janedoe/.config/OrcaSlicer',
+        'connect fe80::1ff:fe23:4567:890a%eth0 and [2001:db8::42]:7125 and johns-macbook.local',
+        'auth Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJqb2huQGV4LmNvbSJ9.abc and X-Api-Key: deadbeef0123456789',
+        'url-encoded name=John%20Smith%40example.com part=Sarah%27s%20ring mail jsmith@example.com',
+        'part name Sarah Jones keychain (copy 2) and object: Johnny Appleseed Birthday Plaque',
+        '{"plate_name":"Wedding - Tom & Lisa","object_name":"Tom & Lisa topper","folder":"Lisa orders"}',
+        '{"exclude_object":{"objects":[{"name":"SARAH_JONES_KEYCHAIN.STL_ID_0_COPY_0"}],"current_object":"SARAH_JONES_KEYCHAIN.STL_ID_0_COPY_0"}}',
+        '{"sn":"F012345678","token":"abc","accessCode":"98765432","access-code":"11112222","pin":"4321","lan_code":"55667788"}',
+        'Content-Disposition: form-data; name="File"; filename="Kate gift.gcode"',
+        "FileNotFoundError: [Errno 2] No such file or directory: '/home/x/Kate gift.gcode'",
+        "{'name': 'Ann Lee', 'filename': 'Ann Lee.gcode'}",
+        'ssid=MyHomeWiFi_Smiths wifi password: hunter22, mac aa:bb:cc:dd:ee:ff',
+        'Kitchen CC2 at 192.168.1.50 code AB12CD; kitchen cc2; Mike\'s Garage U1 at printer.local:7125',
+        'thumb data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk',
+    ]
+    FORBIDDEN = ["Sarah", "Jones", "Emily", "Rose", "Anna", "M\u00fcller", "Mikes", "Garage", "7f3c0a9d11e2", "192.168",
+                 "JohnSmith", "janedoe", "fe80", "2001:db8", "johns-macbook", "eyJ", "deadbeef", "John", "Smith",
+                 "jsmith", "Johnny", "Appleseed", "Lisa", "Tom", "SARAH", "F012345678", "98765432", "11112222", "4321",
+                 "55667788", "Kate", "Ann Lee", "MyHomeWiFi", "hunter22", "aa:bb", "Kitchen", "kitchen", "AB12CD",
+                 "printer.local", "iVBORw0K"]
+
+    def setUp(self):
+        self.folder = tempfile.TemporaryDirectory(); self.addCleanup(self.folder.cleanup)
+        self.log = core.DebugLog(self.folder.name, "w1")
+        self.log.set_context(self.PRINTERS, names=self.NAMES)
+
+    def test_nothing_private_survives_redaction(self):
+        for line in self.LEAKS:
+            out = self.log.redact(line)
+            for word in self.FORBIDDEN:
+                self.assertNotIn(word, out, "%r leaked from %r: %r" % (word, line, out))
+
+    def test_what_a_trouble_report_needs_survives(self):
+        out = self.log.redact('{"Cmd":128,"Data":{"Ack":2},"CurrentLayer":5,"TotalTicks":3600,"code":"000000",'
+                              '"state":"complete","FirmwareVersion":"V1.1.46"} temps 210.5/215 eta 01:02:03 '
+                              'GET http://P1:7125/server/files/list TotalSize=12345')
+        for kept in ('"Cmd":128', '"Ack":2', '"CurrentLayer":5', '"TotalTicks":3600', '"code":"000000"',
+                     '"state":"complete"', "V1.1.46", "210.5/215", "01:02:03", ":7125/server/files/list", "TotalSize=12345"):
+            self.assertIn(kept, out)
+        self.assertIn("P1", self.log.redact("Kitchen CC2"))
+        self.assertIn("P2", self.log.redact("printer.local:7125"))
+
+    def test_short_or_numeric_saved_values_do_not_eat_numbers(self):
+        self.log.set_context([{"name": "10", "address": "10.0.0.2", "access_code": "1234"}, {"name": "CC"}], names=["Box"])
+        out = self.log.redact('{"Status":10,"TotalSize":12345,"CC1":true} Boxes')
+        self.assertIn('"Status":10', out)
+        self.assertIn('"TotalSize":12345', out)
+        self.assertIn('"CC1":true', out)
+        self.assertIn("Boxes", out)
+
+    def test_printer_json_is_allow_listed(self):
+        code = self.log.file_code
+        out = core.debug_json(b'42{"Status":{"PrintInfo":{"Status":13,"Filename":"/local/Kate gift.gcode","Note":"for Kate"},'
+                              b'"CurrentStatus":[1]},"state":"printing","message":"File Kate gift.gcode not found"}', code)
+        self.assertNotIn("Kate", out)
+        self.assertIn('"Status":13', out)
+        self.assertIn('"CurrentStatus":[1]', out)
+        self.assertIn('"state":"printing"', out)
+        self.assertIn("<text:", out)
+        self.assertEqual(core.debug_json("not json at all", code), "<15 bytes, not JSON>")
+        self.assertEqual(core.debug_json("pong", code), "pong")
+
+    def test_codes_are_stable_but_salted_per_install(self):
+        first = self.log.file_code("Kate gift.gcode")
+        self.assertEqual(first, self.log.file_code("Kate gift.gcode"))
+        self.assertTrue(first.endswith(".gcode>"))
+        other = tempfile.TemporaryDirectory(); self.addCleanup(other.cleanup)
+        self.assertNotEqual(first, core.DebugLog(other.name).file_code("Kate gift.gcode"))   # a guess cannot be checked
+        salt = os.path.join(self.folder.name, core.DEBUG_SALT_FILE)
+        if hasattr(os, "getuid"):
+            self.assertEqual(stat.S_IMODE(os.stat(salt).st_mode), 0o600)
+
+    def test_writes_only_while_on_redacted_before_cut_and_owner_only(self):
+        self.log.write("state", "nothing yet")
+        self.assertFalse(os.path.exists(self.log.path))           # off by default
+        self.log.until = time.time() + 60
+        self.log.write("send", '"Filename":"' + "x" * 950 + ' Sarah Jones Wedding"')
+        (line,) = self.log.tail()
+        self.assertNotIn("Sarah", line)                            # redacted first, then cut
+        self.assertNotIn("Wedding", line)
+        if hasattr(os, "getuid"):
+            self.assertEqual(stat.S_IMODE(os.stat(self.log.path).st_mode), 0o600)
+        self.log.write("send", "after", now=self.log.until + 1)     # switched itself off
+        self.assertEqual(len(self.log.tail()), 1)
+
+    def test_log_is_capped_at_two_files(self):
+        self.log.until = time.time() + 60
+        for number in range(3000):
+            self.log.write("state", "line %d %s" % (number, "ok " * 290))
+        self.assertTrue(os.path.exists(self.log.path + ".1"))
+        self.assertLessEqual(self.log.size(), 2 * core.DEBUG_LOG_MAX + 2000)
+        self.assertIn("line 2999", self.log.tail()[-1])
+        self.log.clear()
+        self.assertEqual(self.log.size(), 0)
+
+    def test_switch_is_saved_and_turns_itself_off(self):
+        store = core.PrinterStore(os.path.join(self.folder.name, "store.json"))
+        store.set_debug(True, now=1000.0)
+        self.assertEqual(core.PrinterStore(store.path).debug_until, 1000.0 + core.DEBUG_LOG_HOURS * 3600)
+        store.set_debug(False)
+        self.assertEqual(core.PrinterStore(store.path).debug_until, 0.0)
+
+
 class MoonrakerTests(unittest.TestCase):
     def setUp(self):
         self.fake = FakeMoonraker()
@@ -1295,6 +1414,30 @@ class AppTests(unittest.TestCase):
         self.assertEqual(core.status_event(printing, dict(printing, errors=[205]), "P"),
                          ("error", "P reports a problem while printing (code 205)"))
         self.assertIsNone(core.status_event(dict(printing, errors=[205]), dict(printing, errors=[205]), "P"))
+
+    def test_debug_log_records_a_real_send_without_the_customers_name(self):
+        self.app.handle({"command": "set_debug", "on": True})
+        self.assertTrue(self.app.snapshot()["debug"]["on"])
+        self.slice(U1_GCODE, "Sarah Jones keychain.stl")
+        self.slice(CC2_GCODE, "Sarah Jones keychain.stl")
+        self.send([self.p_u1, self.p_cc2], True)
+        self._read(self.p_u1)
+        lines = self.app.debug_log.tail(2000)
+        text = "\n".join(lines)
+        for event in (" log-on ", " http ", " mqtt ", " send ", " state "):
+            self.assertIn(event, text)
+        for word in ("Sarah", "Jones", "keychain", "SARAH", "abc123", "127.0.0.1", "U1 #1", "CC1"):
+            self.assertNotIn(word, text, word)
+        self.assertIn("P1", text)
+        self.app.handle({"command": "debug_log", "action": "show"})
+        shown = [post for post in self.posts if post.get("command") == "debug_log"][-1]["text"]
+        self.assertNotIn("Sarah", shown)
+        self.app.handle({"command": "set_debug", "on": False})
+        before = len(self.app.debug_log.tail(5000))
+        self._read(self.p_u1)
+        self.assertEqual(len(self.app.debug_log.tail(5000)), before)          # off: nothing more is written
+        self.app.handle({"command": "debug_log", "action": "clear"})
+        self.assertEqual(self.app.debug_log.size(), 0)
 
     def test_send_messages_name_the_part_and_keep_the_file_name_for_hover(self):
         self.slice()

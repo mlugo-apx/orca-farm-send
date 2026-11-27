@@ -80,6 +80,7 @@
     <button type="button" class="quiet" id="btn-refresh" title="Ask every printer for its status now">Refresh</button>
     <button type="button" class="quiet" id="btn-import" title="Add printers from your OrcaSlicer printer presets">Import</button>
     <button type="button" class="quiet" id="btn-add" title="Add a printer by address">Add</button>
+    <button type="button" class="quiet" id="btn-settings" title="Settings: open at start, debug log" aria-label="Settings">&#9881;</button>
   </div>
 </div>
 
@@ -89,8 +90,7 @@
 <div class="box" id="storage" style="display:none;margin-top:14px"></div>
 <p id="empty" class="muted" style="display:none">No printers yet. Use Import to pull them from your printer presets, or Add.</p>
 
-<p class="small muted" style="margin-top:14px"><label title="Open this panel by itself when OrcaSlicer starts or a project is opened. Off: open it from the Plugins dialog."><input type="checkbox" id="auto-open"> Open this panel when OrcaSlicer starts</label></p>
-<p class="small muted" style="margin-top:6px;text-align:right"><button type="button" class="linkish" id="btn-runs" title="Every print this panel started, and how it ended">Print history</button></p>
+<p class="small muted" style="margin-top:14px;text-align:right"><span id="debug-on" class="pill st-busy" role="button" tabindex="0" style="display:none;cursor:pointer;float:left" title="The debug log is recording. Click for Settings."></span><button type="button" class="linkish" id="btn-runs" title="Every print this panel started, and how it ended">Print history</button></p>
 <p class="small muted" style="margin-top:3px;text-align:right"><button type="button" class="linkish" id="btn-report" title="Tell the developer what went wrong or what you would like added">Report a problem or request an enhancement</button></p>
 
 <div id="overlay"><div id="dialog"></div></div>
@@ -1263,8 +1263,12 @@
       "Printer names, addresses and access codes are left out. Messages can include file names, so read it before posting.</p>" +
       "<textarea id='r-text' readonly rows='10' style='width:100%;box-sizing:border-box;margin-top:8px;font-family:monospace;font-size:11px'>" + esc(text) + "</textarea>" +
       "<div class='row' style='margin-top:10px;justify-content:flex-end;gap:8px'><span id='r-note' class='small muted'></span>" +
-      "<button type='button' class='quiet' id='r-close'>Close</button><button type='button' id='r-copy'>Copy</button></div>");
+      "<button type='button' class='quiet' id='r-close'>Close</button>" +
+      ((state.debug || {}).size ? "<button type='button' class='quiet' id='r-log'>Debug log</button>" : "") +
+      "<button type='button' id='r-copy'>Copy</button></div>" +
+      ((state.debug || {}).size ? "" : "<p class='tiny muted' style='margin:8px 0 0'>For a problem that comes back, switch on the debug log in Settings (&#9881;), make it happen again, then add the log to the issue.</p>"));
     $("r-close").onclick = hideDialog;
+    if ($("r-log")) $("r-log").onclick = function () { send("debug_log", { action: "show" }); };
     $("r-copy").onclick = function () {
       var box = $("r-text"), done = false;
       box.focus(); box.select();
@@ -1307,7 +1311,50 @@
       $("r-note").textContent = done ? "Copied" : "Could not copy";
     };
   }
-  $("auto-open").onchange = function () { send("set_auto_open", { on: this.checked }); };
+  // ---- settings ------------------------------------------------------------------------------------------------------
+  function kiloBytes(n) { return n < 1024 ? (n ? "1 KB" : "empty") : n < 1048576 ? Math.round(n / 1024) + " KB" : megabytes(n); }
+  function settingsDialog() {
+    var d = state.debug || {}, labels = (d.labels || []).map(function (row) {
+      return "<span class='k'>" + esc(row.label) + "</span><span class='v'>" + esc(row.name) + "</span>";
+    }).join("");
+    showDialog("<h4>Settings</h4>" +
+      "<div class='check'><input type='checkbox' id='s-open'" + (state.auto_open ? " checked" : "") + "><label for='s-open'>Open this panel when OrcaSlicer starts</label></div>" +
+      "<p class='tiny muted' style='margin:2px 0 0 20px'>Off: open it from the Plugins dialog.</p>" +
+      "<h4 style='margin-top:14px'>Debug log</h4>" +
+      "<p class='small muted' style='margin:0'>Records what Farm Send asks each printer and what it answers, for a trouble report. " +
+      "Access codes, keys, addresses, printer names, device serials and the names of files and parts are replaced before anything is written, " +
+      "so it can be pasted into a public issue. Nothing is sent anywhere: you copy it yourself. Read it before you post it.</p>" +
+      "<div class='check' style='margin-top:6px'><input type='checkbox' id='s-debug'" + (d.on ? " checked" : "") + "><label for='s-debug'>" +
+      (d.on ? "Recording until " + esc(d.until_day + " " + d.until) : "Record for the next " + esc(d.hours || 24) + " hours") + "</label></div>" +
+      "<p class='tiny muted' style='margin:2px 0 0 20px'>It switches itself off after " + esc(d.hours || 24) + " hours. Size: " + esc(kiloBytes(d.size || 0)) + " (2 MB at most).</p>" +
+      (labels ? "<p class='tiny muted' style='margin:8px 0 2px'>Printers appear in the log as:</p><div class='kv'>" + labels + "</div>" : "") +
+      "<div class='dialog-actions'><button type='button' class='quiet' id='s-clear'" + (d.size ? "" : " disabled") + ">Clear log</button>" +
+      "<button type='button' class='quiet' id='s-copy'" + (d.size ? "" : " disabled") + ">Show log</button>" +
+      "<button type='button' id='s-close'>Close</button></div>");
+    $("s-open").onchange = function () { send("set_auto_open", { on: this.checked }); };
+    $("s-debug").onchange = function () { send("set_debug", { on: this.checked }); };
+    $("s-clear").onclick = function () { send("debug_log", { action: "clear" }); };
+    $("s-copy").onclick = function () { send("debug_log", { action: "show" }); };
+    $("s-close").onclick = hideDialog;
+  }
+  function debugLogDialog(text) {
+    showDialog("<h4>Debug log</h4><p class='small muted' style='margin:0'>The newest lines. Read it before you post it: " +
+      "names, addresses and codes are replaced, but check nothing private is left.</p>" +
+      "<textarea id='d-text' readonly rows='14' style='width:100%;box-sizing:border-box;margin-top:8px;font-family:monospace;font-size:10px;white-space:pre'>" + esc(text) + "</textarea>" +
+      "<div class='row' style='margin-top:10px;justify-content:flex-end;gap:8px'><span id='d-note' class='small muted'></span>" +
+      "<button type='button' class='quiet' id='d-back'>Back</button><button type='button' id='d-copy'>Copy</button></div>");
+    $("d-back").onclick = settingsDialog;
+    $("d-copy").onclick = function () {
+      var box = $("d-text"), done = false;
+      box.focus(); box.select();
+      try { done = document.execCommand("copy"); } catch (e) { done = false; }
+      $("d-note").textContent = done ? "Copied" : "Select the text and copy it";
+    };
+  }
+  function settingsOpen() { return !!$("s-debug"); }
+  $("btn-settings").onclick = settingsDialog;
+  $("debug-on").onclick = settingsDialog;
+  $("debug-on").onkeydown = function (event) { if (event.key === "Enter" || event.key === " ") settingsDialog(); };
   $("btn-refresh").onclick = function () { refresh(state.printers.map(function (p) { return p.id; })); recount(); };
   $("btn-import").onclick = function () { send("import_presets"); };
   $("newer").onclick = showNewer;
@@ -1327,7 +1374,14 @@
       }
       if (message.status) state.status = message.status;
       if (message.sends) state.sends = message.sends;
-      if ("auto_open" in message) $("auto-open").checked = !!message.auto_open;
+      if ("auto_open" in message) state.auto_open = !!message.auto_open;
+      var debugChanged = message.debug && JSON.stringify(message.debug) !== JSON.stringify(state.debug || null);
+      if (message.debug) {
+        state.debug = message.debug;
+        $("debug-on").style.display = message.debug.on ? "" : "none";
+        $("debug-on").textContent = message.debug.on ? "Debug log on" : "";
+      }
+      if (debugChanged && settingsOpen()) settingsDialog();       // keep its switch, size and labels current
       render();
     } else if (message.command === "status") {
       delete refreshing[message.id];
@@ -1338,6 +1392,8 @@
       runsDialog(message);
     } else if (message.command === "report") {
       reportDialog(message.text || "");
+    } else if (message.command === "debug_log") {
+      debugLogDialog(message.text || "");
     } else if (message.command === "library_result") {
       if (message.ok) { hideDialog(); libNote = message.text ? { ok: true, text: message.text } : null; plateView = "library"; renderJob(); }
       else if ($("l-result")) { $("l-result").className = "small err"; $("l-result").textContent = message.text; }

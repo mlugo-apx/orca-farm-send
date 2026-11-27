@@ -10,7 +10,7 @@ import threading
 import time
 import uuid
 
-from core import (videos_to_clean, newest_installed, record_version, version_key, RunLog, run_result, toolhead_color_problem, count_objects, file_stamp, OrderBook, plan_order, CC2_MANY_FILES, nozzle_mismatch, toolhead_problem, write_private, file_md5, STORE_FILE, KIND_CC2, WATCHED_STATES, BedLog, FarmError, bed_needs_clearing, files_to_clean, rule_text,
+from core import (DebugLog, debug, debug_trace, set_debug_sink, videos_to_clean, newest_installed, record_version, version_key, RunLog, run_result, toolhead_color_problem, count_objects, file_stamp, OrderBook, plan_order, CC2_MANY_FILES, nozzle_mismatch, toolhead_problem, write_private, file_md5, STORE_FILE, KIND_CC2, WATCHED_STATES, BedLog, FarmError, bed_needs_clearing, files_to_clean, rule_text,
                   storage_summary, old_list, PrinterStore, can_start, job_filename, make_client, model_key, model_matches,
                   parse_gcode_meta, preset_to_printer, presets_to_printers, set_shared_dir, status_event, strip_model_suffix, validate_printer)
 # BUNDLE-STRIP-END
@@ -18,6 +18,8 @@ from core import (videos_to_clean, newest_installed, record_version, version_key
 SLICE_DIR = "slices"
 SLICE_KEEP_S = 12 * 3600      # sliced copies of a window that is gone are dropped after this long
 SLICE_TOUCH_S = 600
+DEBUG_HOURS = 24              # matches core.DEBUG_LOG_HOURS; shown in Settings
+DEBUG_TAIL_LINES = 400        # newest debug log lines offered for a trouble report
 JOBS_FILE = "jobs.json"       # in each window's slice folder: the plates it holds, read back after a reload
 JOB_SAVED_KEYS = ("id", "name", "captured_at", "ready", "stale", "settled", "meta", "key", "plate", "objects", "md5")
 LIBRARY_DIR = "library"   # kept plates: <id>.gcode plus <id>.json describing it
@@ -128,6 +130,11 @@ class FarmApp:
         self._saved_names = {}  # md5 of a kept plate -> its item name, refreshed with every snapshot
         self._clear_slice_dir()
         self._load_jobs()
+        # The debug log, off unless switched on in Settings. Every printer request and answer passes
+        # through core.debug(), which lands here; redaction happens in DebugLog before anything is written.
+        self.debug_log = DebugLog(storage_dir, window=os.path.basename(self.slice_dir))
+        self._refresh_debug()
+        set_debug_sink(self.debug_log.write, self.debug_log.file_code)
         self.slicing = False
         self.status = {}          # printer id -> normalized status
         self._status_at = {}
@@ -326,12 +333,70 @@ class FarmApp:
         except OSError as error:
             job["error"] = "Cannot read the sliced G-code: %s" % (error.strerror or error)
         except Exception as error:      # never leave the panel stuck on "Reading..."
+            debug("error", "reading a slice: %s" % debug_trace())
             job["error"] = "Could not read the sliced G-code: %s" % error
         if job["error"]:
             self._remove_file(copy + ".part")
             self._remove_file(copy)
         self._save_jobs()
         self.post_state()
+
+    def _refresh_debug(self):
+        """Bring the debug log's switch and its list of things to hide up to date."""
+        log = getattr(self, "debug_log", None)
+        if log is None:
+            return
+        log.until = self.store.debug_until
+        if not log.enabled():
+            return
+        names = set()
+        try:
+            for entry in self.library():
+                names.update((entry.get("item"), entry.get("folder")))
+        except Exception:
+            pass
+        names.update(order.get("item") for order in self.orders.orders)
+        names.update(self.orders.toolhead_names)
+        names.update(job.get("name") for job in self.jobs)
+        names.update(self.library_folders())
+        log.set_context(self.store.printers, names=[n for n in names if n], secrets=self._debug_secrets())
+
+    def _debug_secrets(self):
+        """Values that must never reach the debug log besides the printers' own codes and keys."""
+        try:
+            with open(os.path.join(self.storage_dir, "cc2_client_token"), "r", encoding="ascii") as handle:
+                return [handle.read().strip()]
+        except OSError:
+            return []
+
+    def _debug_view(self):
+        log = self.debug_log
+        return {"on": log.enabled(), "until": _clock(log.until) if log.enabled() else "",
+                "until_day": time.strftime("%a", time.localtime(log.until)) if log.enabled() else "",
+                "hours": DEBUG_HOURS, "size": log.size(),
+                # Shown only in this panel, so the user can tell P1, P2... apart. Never written to the log.
+                "labels": [{"label": "P%d" % number, "name": printer.get("name", "")}
+                           for number, printer in enumerate(self.store.printers, 1)]}
+
+    def _cmd_set_debug(self, message):
+        try:
+            self.store.set_debug(bool(message.get("on")))
+        except OSError as error:
+            self._notify("error", "Farm Send: could not save the setting: %s" % (error.strerror or error))
+        self._refresh_debug()
+        if self.debug_log.enabled():
+            self.debug_log.write("log-on", "Farm Send %s on %s; switched on until %s" % (
+                globals().get("PLUGIN_VERSION", "dev"), sys.platform, _clock(self.debug_log.until)))
+        self.post_state()
+
+    def _cmd_debug_log(self, message):
+        """Copy (send the newest lines to the panel to show and copy) or clear the debug log."""
+        if message.get("action") == "clear":
+            self.debug_log.clear()
+            self.post_state()
+            return
+        lines = self.debug_log.tail(DEBUG_TAIL_LINES)
+        self.post({"command": "debug_log", "text": "\n".join(lines) if lines else "(the debug log is empty)"})
 
     def _farm_model(self, model):
         """True when a printer in the farm is of this model."""
@@ -421,6 +486,7 @@ class FarmApp:
             # Another OrcaSlicer window may have saved printers, orders or library plates since.
             self.store.sync()
             self.orders.sync()
+            self._refresh_debug()
             stamp = file_stamp(self.library_dir)
             if stamp != self._library_stamp:
                 self._library_stamp, self._library_cache = stamp, None
@@ -457,6 +523,7 @@ class FarmApp:
                 "combo_note": dict(self.combo_note),
                 "can_switch": self._apply_presets is not None,
                 "auto_open": self.store.auto_open,
+                "debug": self._debug_view(),
             }
 
     def _combo_views(self):
@@ -644,6 +711,7 @@ class FarmApp:
                 text += " Not applied: %s." % "; ".join(skipped)
             self._set_combo_note(text, ok=not skipped)
         except Exception as error:
+            debug("error", "switching presets: %s" % debug_trace())
             self._set_combo_note("Presets not switched: %s" % error, ok=False)
         # The selection is re-read on the next poll, which runs on the UI thread.
         self.post_state()
@@ -779,6 +847,11 @@ class FarmApp:
     def _set_send(self, printer_id, active, text, percent=None, ok=None, started=False, file=""):
         entry = {"active": active, "text": text, "percent": percent, "ok": ok, "started": started, "file": file,
                  "at": time.monotonic()}
+        if not active or percent in (None, 0, 100):       # not every upload percent
+            printer = self.store.get(printer_id) or {}
+            debug("send", '%s: "%s"%s%s' % (printer.get("name", printer_id), text,
+                                           "" if ok is None else (" ok" if ok else " FAILED"),
+                                           (' file="%s"' % file) if file else ""))
         with self.lock:
             self.sends[printer_id] = entry
         self.post({"command": "send", "id": printer_id, "send": entry})
@@ -854,6 +927,7 @@ class FarmApp:
         except OSError as error:
             self._set_send(printer_id, False, "Cannot read the sliced G-code: %s" % (error.strerror or error), ok=False)
         except Exception as error:  # never leave a card stuck on "Uploading"
+            debug("error", "send: %s" % debug_trace())
             self._set_send(printer_id, False, "Unexpected error: %s" % error, ok=False)
         finally:
             self._cancel.pop(printer_id, None)
@@ -1471,6 +1545,7 @@ class FarmApp:
         except PermissionError:
             self._set_send(printer_id, False, BLOCKED_TEXT, ok=False)
         except Exception as error:
+            debug("error", "send: %s" % debug_trace())
             self._set_send(printer_id, False, "Unexpected error: %s" % error, ok=False)
         finally:
             self._cancel.pop(printer_id, None)
@@ -1514,6 +1589,7 @@ class FarmApp:
         except PermissionError:
             self._set_send(printer_id, False, BLOCKED_TEXT, ok=False)
         except Exception as error:
+            debug("error", "send: %s" % debug_trace())
             self._set_send(printer_id, False, "Unexpected error: %s" % error, ok=False)
         finally:
             self._cancel.pop(printer_id, None)
@@ -1567,6 +1643,7 @@ class FarmApp:
             status = {"state": "offline", "state_text": "Blocked", "detail": BLOCKED_TEXT, "filename": "", "progress": None,
                       "remaining_s": None, "nozzle": None, "bed": None, "errors": []}
         except Exception as error:
+            debug("error", "status of %s: %s" % (printer.get("name", ""), debug_trace()))
             status = {"state": "offline", "state_text": "Error", "detail": str(error), "filename": "", "progress": None,
                       "remaining_s": None, "nozzle": None, "bed": None, "errors": []}
         ended, ended_file = None, ""
@@ -1576,6 +1653,11 @@ class FarmApp:
             if self.store.get(printer_id) is None:
                 return
             status["checked_at"] = time.time()   # wall clock, shown on the card
+            before = (self.status.get(printer_id) or {}).get("state")
+            if before != status.get("state"):
+                debug("state", '%s: %s -> %s (%s) file="%s" %s' % (
+                    printer.get("name", ""), before, status.get("state"), status.get("state_text", ""),
+                    status.get("filename") or "", status.get("detail") or ""))
             event = None
             if status.get("state") in WATCHED_STATES:
                 name = (self.store.get(printer_id) or printer).get("name") or "Printer"
