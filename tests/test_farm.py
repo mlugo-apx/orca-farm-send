@@ -1513,7 +1513,8 @@ class AppTests(unittest.TestCase):
 
     def copies(self):
         folder = self.app.slice_dir            # each window keeps its sliced copies in its own folder
-        return sorted(name for name in os.listdir(folder) if name != "jobs.json") if os.path.isdir(folder) else []
+        # jobs.json (and its temporary copy during a save) lists the plates; it is not a sliced copy.
+        return sorted(name for name in os.listdir(folder) if not name.startswith("jobs.json")) if os.path.isdir(folder) else []
 
     def _saved_ids(self):
         try:
