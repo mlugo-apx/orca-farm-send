@@ -247,13 +247,14 @@ The first in-app checks ran in an OrcaSlicer instance on a hidden virtual displa
 | CC2 layer counts kept for clean-up | Real: the storage folder holds counts for 20 and 26 recordings on the two CC2s |
 | Slice for a printer outside the farm is ignored | Inside OrcaSlicer 2.5.1 (0.3.15): a cube sliced for an Anycubic Kobra 2 Max left no plate row, no "Slicing..." and no kept copy |
 | Order split and start | Real, inside OrcaSlicer 2.5.2 (2026-11-22): an order of 110 clips with kept plates for both printer types; Print next planned 15 on each CC2 and 21 on each U1, and all five uploaded and started |
+| Orders after the first round | Real, on all five printers (reported by the user, 2026-11-27): finished prints showed Bed cleared, the good-part counts went in, and Print next carried on |
+| Card notes kept and cleared | Real, OrcaSlicer 2.5.2 (2026-11-27): Bed cleared on four printers removed each card note and its saved copy |
 | Newer-version pill and Stored table | Inside OrcaSlicer 2.5.2 (2026-11-21): a window on an older build showed the orange pill after 0.3.19 was installed, clicking it opened the reload steps, and after the reload the Stored box showed as a table |
 
 ### Checked only against the test printers
 
 These pass the automated tests, which use stand-in printers, but have not been seen working on a real printer or in real use:
 
-- **Orders after the first round**: good-part counts from Bed cleared and the next round. The first real order was started on 2026-11-22 and is still printing.
 - **Automatic daily G-code clean-up**, and G-code clean-up deleting real files (only probe files have been deleted on a real CC2; U1 file delete is proven).
 - **Paused and error notices.**
 - **Clean-up guards**: a busy CC2 refusing video clean-up, and a U1 keeping the recording of the print that is running.
