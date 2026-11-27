@@ -4,12 +4,12 @@
 |---|---|
 | File | `dist/farm_send_any.py` |
 | Name | Farm Send |
-| Version | 0.3.22 |
+| Version | 0.4.0 |
 | Type | Script |
 | Min. OrcaSlicer version | 2.5.0 (the only choice the form offers) |
 | Icon | `docs/icon.png` (square; the hub stores it at 320 x 320) |
 | Description media | `docs/screenshot.png` |
-| Tags | print farm, send, multi printer, elegoo, centauri carbon 2, snapmaker u1, moonraker |
+| Tags | print farm, send, multi printer, elegoo, centauri carbon 2, centauri carbon, snapmaker u1, moonraker |
 | Public Plugin | on |
 
 ## Description
@@ -18,6 +18,7 @@ Farm Send is a docked panel for small print farms. Slice a plate once per printe
 
 - Elegoo Centauri Carbon 2: upload and start, on several printers at once from one dialog.
 - Snapmaker U1: upload and start, with bed leveling, flow calibration and time-lapse options.
+- Elegoo Centauri Carbon (the first model): EXPERIMENTAL, never run on a real one by the developer. Status, upload, start and stop only. Owners: please try it with the debug log on and report.
 - Live status for every printer: progress, time left, expected finish time, temperatures.
 - Printers grouped into Needs attention, Available and Busy.
 - A notification when a print finishes, pauses or fails.
@@ -30,12 +31,14 @@ Farm Send is a docked panel for small print farms. Slice a plate once per printe
 - Orders: enter a quantity and it is split evenly over the free printers, with a count of good parts.
 - Every plate of a multi-plate project is held after Slice all.
 - Print history: what was started on which printer and how it ended, with a CSV copy.
+- A debug log for trouble reports, off until you switch it on in Settings. Codes, addresses and file names are removed before anything is written.
 
 **What it reads and where it goes**
 
 - It reads your OrcaSlicer presets: which printer, process and filament presets are selected, and, when you click Import, your own printer presets (name, model, nozzle size, address and access code or API key). OrcaSlicer has no permission prompt for reading presets, so nothing asks you.
 - It connects only to the printer addresses you save, on your own network, to send files and commands. Nothing read from your presets goes anywhere else: no cloud, no telemetry, no update check.
 - Printer access codes are kept as plain text in the plugin's own storage folder, readable only by your user account.
+- The debug log, when you switch it on, stays on your computer; you copy it into a report yourself.
 
 Early release. Developed and tested on Linux with two Centauri Carbon 2s and three Snapmaker U1s (firmware 2.1.2). Windows and macOS are untested; reports welcome. It talks only to the printer addresses you save: no cloud, no telemetry.
 

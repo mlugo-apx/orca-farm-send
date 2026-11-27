@@ -1,0 +1,48 @@
+name: Centauri Carbon test report
+description: You tried the experimental support for the first Elegoo Centauri Carbon (0.4.0 or later). Good or bad, this helps.
+labels: [centauri-carbon]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for trying it. The developer has no Centauri Carbon, so your report is the only way to know it works.
+        Before you send a plate, switch on the debug log: the gear (⚙) in the panel header > Settings > Debug log.
+        Never post an access code or API key. The debug log removes them, plus addresses and file names; still read it before posting.
+  - type: input
+    id: firmware
+    attributes:
+      label: Printer firmware version
+      description: On the printer's screen, for example V1.1.46
+    validations:
+      required: true
+  - type: input
+    id: orca
+    attributes:
+      label: OrcaSlicer version and operating system
+      description: Help > About, and Windows / macOS / Linux
+    validations:
+      required: true
+  - type: checkboxes
+    id: worked
+    attributes:
+      label: What worked?
+      options:
+        - label: The card showed the right state (idle / printing) and temperatures
+        - label: Upload finished
+        - label: The print started
+        - label: Progress and time left looked right while printing
+        - label: A finished print showed "Bed cleared"
+        - label: Stop (cancel) worked
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you clicked, what you expected, what you saw. Any message shown on the card or on the printer.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Debug log
+      description: Settings > Show log > Copy, then paste here.
+      render: text

@@ -1,6 +1,12 @@
 # Changelog
 
-## 0.3.22
+## 0.4.0
+
+- **Elegoo Centauri Carbon (the first model), experimental.** Never run on a real one by the developer: it was built from OrcaSlicer's own Elegoo upload code and Elegoo's SDK, and tested against a stand-in. Live status, upload, start (bed leveling and time-lapse from the send dialog, plate type from the G-code), stop, and Bed cleared. Not yet: stored files, clean-up, time-lapse recordings, part skipping, Canvas roll picking. It only ever sends status, printer-info, start and stop commands; uploads only to an idle printer and never over the file being printed; checks again right before the start; never sends a start twice; closes each connection properly. Cards say "experimental". Owners: please report how it went.
+- **Settings** (gear in the header): open the panel at start (moved here from the bottom of the panel) and the debug log.
+- **Debug log** for trouble reports: off until switched on, switches itself off after 24 hours, two files of 1 MB at most, owner-only. It records printer requests and answers, state changes, sends and errors. Before anything is written, codes, keys, addresses, device ids, host names and home folders are removed, printers become P1, P2..., file and part names become salted codes (they can carry customers' names), and printer replies keep only fields known to be safe. **Show log** in Settings and **Debug log** in the report dialog show it to copy.
+
+From 0.3.22 (not released on its own):
 
 - Sliced plates survive a plugin reload. Reloading Farm Send (for example after installing a new version) used to drop every plate held under Plates; the window now gets them back, with the plate each printer type sends still picked. Closing the project, or restarting OrcaSlicer, still clears them.
 - "Uploaded" and "Started" lines on the printer cards, and the notifications, name the part ("Started Pool_Drain_v26") instead of the long file name; the file name is in the hover text.

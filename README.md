@@ -7,6 +7,7 @@ A docked panel for small print farms: slice a plate once per printer type, then 
 - **Elegoo Centauri Carbon 2**: upload and start the print, on several printers at once from one dialog.
 - **Snapmaker U1**: upload and start the print, with bed leveling, flow calibration and time-lapse options.
 - **Other Moonraker / Klipper printers**: upload and a plain start. Not tested beyond the U1.
+- **Elegoo Centauri Carbon (the first model)**: **experimental, never run on a real one by the developer.** Status, upload, start and stop only. See [Centauri Carbon (experimental)](#centauri-carbon-experimental).
 
 Each printer card shows its state, and while printing its progress, time left and expected finish time. **Details** on a card adds temperatures, when it was last checked, and what is loaded: the rolls of a Centauri Carbon 2's Canvas unit or the four toolheads of a U1, as small tags with color and material. Status updates on its own every few seconds; **Refresh** in the header asks every printer now, and the refresh icon on a card asks that one. The version is shown next to the panel title.
 
@@ -22,6 +23,7 @@ Farm Send uses OrcaSlicer's Python plugin system (OrcaSlicer 2.5.1 or newer), wh
 | Windows, macOS | **Not tested.** Reports welcome |
 | Centauri Carbon 2 | Tested on two printers, single-filament jobs. Slicer filament slot N prints from roll N of the Canvas unit (verified with slot 1 on two printers). Multi-color jobs are not tested |
 | Snapmaker U1 | Tested on three printers, firmware 2.1.2. Slicer filament slot N prints on toolhead N |
+| Centauri Carbon (first model) | **Never run on a real printer.** Built from OrcaSlicer's own Elegoo upload code and Elegoo's SDK, and tested only against a stand-in |
 
 The printer protocols were worked out from the vendors' own clients, not from published specifications. A firmware update can break them.
 
@@ -123,6 +125,38 @@ A Centauri Carbon 2 holding 250 or more files shows a warning on its card: uploa
 - A plate sliced for a different nozzle size than the printer preset records is refused. Click **Import** once so the plugin knows each printer's nozzle size; a printer with no size on record is not checked.
 - After a print ends, the printer is held under Needs attention and cannot be started again until you click **Bed cleared** on its card. Uploading without printing is still allowed. This is remembered across restarts and shared between OrcaSlicer windows. It only knows about prints the panel saw, or a printer that reports a completed print when first seen, so still look at the bed.
 
+## Centauri Carbon (experimental)
+
+Added in 0.4.0 at a user's request. Nobody on the project owns one, so it has only met a stand-in printer written from OrcaSlicer's own Elegoo upload code (`ElegooLink.cpp`), Elegoo's `elegoo-link` SDK and Elegoo's protocol notes. If you have one and try it, please report what happened, good or bad.
+
+What it does: live status (state, progress, time left, temperatures), upload, start (with bed leveling and time-lapse from the send dialog, and the plate type read from the G-code), and Bed cleared like every other printer. Add it with **Add** and the type "Elegoo Centauri Carbon (experimental, untested)", or **Import** a printer preset for it. It has no access code.
+
+What it does not do yet: stored-file counts, clean-up, time-lapse recordings, printing only some parts of a plate, and picking a Canvas roll (multi-color plates print as the printer maps them). Those use printer commands that, sent wrong, can crash the printer's control program, so this version never sends them.
+
+Safety rules it follows, each covered by a test:
+- Only four commands are ever sent: status, printer info, start and stop.
+- Nothing is uploaded unless the printer clearly reports idle, and never under the name of the file it is printing.
+- The printer is checked again right before the start, after it has finished checking the new file.
+- The start is sent once. If the printer does not answer, Farm Send reads its status and shows it; it never sends the start again.
+- Each connection is closed properly (the printer accepts only about five at once, shared with Elegoo's app and slicers), and the status is read at most every 8 seconds.
+
+To report: turn on the debug log in **Settings** (the gear in the header), send one plate, then use **Report a problem** and add the log. Say which firmware the printer runs. Not known yet, and the log will tell: which network port the printer takes uploads on (Farm Send tries 80, then 3030), and how it reports a finished print.
+
+## Settings and the debug log
+
+The gear in the header opens **Settings**: whether the panel opens when OrcaSlicer starts, and the **debug log**.
+
+The debug log records what Farm Send asks each printer and what the printer answers, plus state changes, sends and errors, so a problem can be traced. It is off until you switch it on, and it switches itself off after 24 hours. It keeps two files of at most 1 MB each (`farm_send_debug.log` in the plugin's storage folder, readable only by your account), and **Show log** in Settings shows the newest lines to copy.
+
+It is meant to be pasted into a public issue, so before anything is written it is cleaned:
+- Access codes, API keys, passwords, tokens, device serials and board ids, network names and MAC addresses are removed.
+- Printer names and addresses become P1, P2, ... (Settings shows which is which; that list is never written to the log). Other IP addresses and local host names are replaced too.
+- File, part, item, folder and toolhead names can carry a customer's name, so each becomes a short code such as `<file-3fa2c1.gcode>`, the same every time on your computer, so lines about one file can still be matched. The codes are salted per install, so a guessed name cannot be checked against them.
+- What printers send is passed through a list of fields known to be safe (states, codes, numbers, temperatures, versions); any other text is replaced by its length.
+- Your home folder in a path becomes `~`.
+
+Nothing is sent anywhere: you copy it yourself. Read it before you post it.
+
 ## Install
 
 1. OrcaSlicer > menu > **Plugins** > **Install local plugin** > `dist/farm_send/farm_send.py`
@@ -144,6 +178,7 @@ If you install both the Plugin Hub copy and a local file copy, only one can be a
 - **Presets**: the panel reads which printer, process and filament presets are selected, and **Import** reads your own printer presets (name, model, nozzle size, address and API key) to offer them as printers. OrcaSlicer has no permission prompt for reading presets, so nothing asks you; nothing read this way leaves your computer except to reach the printer itself.
 - **Access codes are stored as plain text** in `<OrcaSlicer config>/orca_plugins/plugin_data/farm_send/farm_send_printers.json`. The file is created readable only by your user account. Anyone with access to your account can read it, as with the printer presets OrcaSlicer itself stores.
 - Printers are reached over plain HTTP, MQTT and websocket on your local network, as the vendors' own slicers do. Use it on a network you trust.
+- **Debug log**: off unless you switch it on in Settings; cleaned of codes, addresses and names before anything is written; never sent anywhere. See [Settings and the debug log](#settings-and-the-debug-log).
 
 ## Print history
 
@@ -151,7 +186,7 @@ If you install both the Plugin Hub copy and a local file copy, only one can be a
 
 ## Reporting a problem or requesting an enhancement
 
-Open an issue at https://github.com/mlugo-apx/orca-farm-send/issues and pick the form that fits. For an enhancement, describe what you want to do and how you do it today. For a problem, click **Report a problem or request an enhancement** at the bottom of the panel first: it collects the plugin version, your system, and each printer's model and state, ready to paste. Printer names, addresses and access codes are left out; messages can include file names, so read it before posting. Add your OrcaSlicer version, the printer's firmware version, what you clicked, and the exact message shown.
+Open an issue at https://github.com/mlugo-apx/orca-farm-send/issues and pick the form that fits. For an enhancement, describe what you want to do and how you do it today. For a problem, click **Report a problem or request an enhancement** at the bottom of the panel first: it collects the plugin version, your system, and each printer's model and state, ready to paste. Printer names, addresses and access codes are left out; messages can include file names, so read it before posting. Add your OrcaSlicer version, the printer's firmware version, what you clicked, and the exact message shown. For a problem that comes back, switch on the [debug log](#settings-and-the-debug-log), make it happen again, and add the log.
 
 ## Develop
 
@@ -223,5 +258,7 @@ These pass the automated tests, which use stand-in printers, but have not been s
 - **Paused and error notices.**
 - **Clean-up guards**: a busy CC2 refusing video clean-up, and a U1 keeping the recording of the print that is running.
 - **Multi-color CC2 jobs** (several rolls in one print) and **Windows / macOS**.
+- **Everything about the first Centauri Carbon** (0.4.0, experimental): never run on a real one.
+- **Sliced plates surviving a plugin reload** (0.3.22) inside OrcaSlicer itself: proven by tests; the window-id part relies on OrcaSlicer keeping Python running across a reload, read from its source.
 
 The U1 time-lapse clean-up shipped in 0.3.9 to 0.3.12 passed its tests and failed on every real U1, because the stand-in printer allowed what the real one refuses. The stand-in now refuses it too, but treat this list as untested until it moves into the table above.
