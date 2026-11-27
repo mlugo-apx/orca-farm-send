@@ -4,7 +4,7 @@
 |---|---|
 | File | `dist/farm_send_any.py` |
 | Name | Farm Send |
-| Version | 0.4.2 |
+| Version | 0.5.0 |
 | Type | Script |
 | Min. OrcaSlicer version | 2.5.0 (the only choice the form offers) |
 | Icon | `docs/icon.png` (square; the hub stores it at 320 x 320) |
@@ -44,7 +44,7 @@ Early release. Developed and tested on Linux with two Centauri Carbon 2s and thr
 
 Full instructions, a worked example of an order over two printer types, release notes and the source: https://github.com/mlugo-apx/orca-farm-send
 
-Found a problem, or want something added? Click **Report a problem or request an enhancement** at the bottom of the panel and open an issue at https://github.com/mlugo-apx/orca-farm-send/issues
+Found a problem, or want something added? Click **Report a problem** at the bottom of the panel and open an issue at https://github.com/mlugo-apx/orca-farm-send/issues
 
 It starts real prints. Look at the bed before you confirm.
 

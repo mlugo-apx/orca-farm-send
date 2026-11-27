@@ -1725,6 +1725,17 @@ class AppTests(unittest.TestCase):
                 handle.write(broken)
             self.assertEqual(FarmApp(self.folder.name, lambda message: None).notices, {}, broken)
 
+    def test_print_history_shows_clean_names_and_the_plate_view_has_time_and_grams(self):
+        job = self.slice()
+        view = self.app.snapshot()["jobs"][0]
+        self.assertEqual((view["time_s"], view["filament_g"]), (3723, 3.5))          # 1h 2m 3s, 3.50 g
+        self.app.runs.start(self.p_u1, "Pool_Drain_v26.stl_2_PETG_3h25m_20261125-195531.gcode", item="Pool_Drain_v26.stl_2")
+        self.app.runs.start(self.p_u1, "Clip_x4_1h00m_20261125-195531.gcode", item="")
+        self.app.handle({"command": "runs"})
+        rows = [post for post in self.posts if post.get("command") == "runs"][-1]["runs"]
+        self.assertEqual([row["item"] for row in rows[:2]], ["Clip", "Pool_Drain_v26"])
+        self.assertTrue(job["ready"])
+
     def test_send_messages_name_the_part_and_keep_the_file_name_for_hover(self):
         self.slice()
         (sent,) = self.send([self.p_u1], False)

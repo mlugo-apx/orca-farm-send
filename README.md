@@ -9,7 +9,7 @@ A docked panel for small print farms: slice a plate once per printer type, then 
 - **Other Moonraker / Klipper printers**: upload and a plain start. Not tested beyond the U1.
 - **Elegoo Centauri Carbon (the first model)**: **experimental, never run on a real one by the developer.** Status, upload and start only. See [Centauri Carbon (experimental)](#centauri-carbon-experimental).
 
-Each printer card shows its state, and while printing its progress, time left and expected finish time. **Details** on a card adds temperatures, when it was last checked, and what is loaded: the rolls of a Centauri Carbon 2's Canvas unit or the four toolheads of a U1, as small tags with color and material. Status updates on its own every few seconds; **Refresh** in the header asks every printer now, and the refresh icon on a card asks that one. The version is shown next to the panel title.
+Each printer card shows its state, and while printing its progress, time left and expected finish time. **Details** on a card adds temperatures, when it was last checked, and what is loaded: the rolls of a Centauri Carbon 2's Canvas unit or the four toolheads of a U1, as small tags with color and material. Status updates on its own every few seconds; the circular arrow in the header asks every printer now, and the one on a card asks that printer. The version is shown next to the panel title.
 
 While the panel is open, OrcaSlicer shows a notification when a print finishes, is cancelled, pauses, or a printer stops with an error. The same note stays on the printer card until the printer moves on. Nothing is reported while OrcaSlicer is closed, and the notification appears inside OrcaSlicer, not as a system notification.
 
@@ -37,7 +37,7 @@ The panel reads top to bottom in the order you work:
 2. The printer list is grouped: **Needs attention** (paused, error, offline, or a finished print still on the bed), **Available** (idle with a clear bed) and **Busy** (one line each; click a line for details). Each group folds with the arrow in front of its name, and each card folds with the arrow in its corner.
 3. On a printer card click **Upload**, or **Upload and print**, and confirm. The printer gets the plate sliced for its type.
 
-To send everything at once, click **select all available**, then **Upload and print on all**.
+To send everything at once, click **Select all available**, then **Upload and print on all**.
 The U1s get the U1 plate and the CC2s get the CC2 plate, in one action.
 
 The plugin keeps its own copy of each slice, because OrcaSlicer overwrites its temp G-code on the next slice.
@@ -47,7 +47,7 @@ You can re-arrange the bed between types: the "plate changed" warning only ever 
 
 **Presets per printer type**
 
-Select the printer, process and filament presets you use for one printer type, click **presets** on that type's row, then **Remember current**.
+Select the printer, process and filament presets you use for one printer type, click **Edit presets** on that type's row, then **Remember current**.
 **Use presets** on the row then switches all three OrcaSlicer selections back in one click. Then slice.
 **In use** marks the type whose remembered presets OrcaSlicer is set to right now. **Forget** in the presets dialog drops what was remembered for that type.
 If a preset has unsaved edits, OrcaSlicer shows its normal save or discard dialog first.
@@ -162,11 +162,11 @@ Nothing is sent anywhere: you copy it yourself. Read it before you post it.
 1. OrcaSlicer > menu > **Plugins** > **Install local plugin** > `dist/farm_send/farm_send.py`
 2. Tick **Activate**. OrcaSlicer asks once for: read access to its own temp G-code folder, permission to start threads, and network access to each saved printer address. Answering No stops the plugin from loading.
 3. Expand the row and click the run arrow. The panel docks to the right of the 3D view.
-4. **Import** pulls printers from the printer presets OrcaSlicer has loaded (address and access code). **Add** adds one by hand; **Test connection** fills in the model. On a printer card, the circular arrow asks that printer for its status now, and the pencil edits its name, address or access code, or removes it.
+4. The **+** in the header offers **Import from presets**, which pulls printers from the printer presets OrcaSlicer has loaded (address and access code), and **Add by address**, which adds one by hand; **Test connection** fills in the model. On a printer card, the circular arrow asks that printer for its status now, and the pencil edits its name, address or access code, or removes it.
 
 To load a newer build into a running OrcaSlicer: Plugins > **Refresh**, untick and tick Farm Send, then run it. When a newer version has been installed than the one the window is running, an orange "↻ 0.3.x" label replaces the version next to the panel title; click it (or hover over it) for these steps.
 
-From then on the panel opens by itself when OrcaSlicer starts. It opens once per session, so closing it keeps it closed. Untick **Open this panel when OrcaSlicer starts** at the bottom of the panel to open it only from the Plugins dialog.
+From then on the panel opens by itself when OrcaSlicer starts. It opens once per session, so closing it keeps it closed. Untick **Open this panel when OrcaSlicer starts** in **Settings** (the gear) to open it only from the Plugins dialog.
 After adding a printer, OrcaSlicer asks for network access to it the next time the plugin loads.
 
 If you install both the Plugin Hub copy and a local file copy, only one can be active at a time; OrcaSlicer reports a "capability collision" for the second. Each copy keeps its own printer list.
@@ -182,11 +182,11 @@ If you install both the Plugin Hub copy and a local file copy, only one can be a
 
 ## Print history
 
-**Print history** at the bottom of the panel lists every print started from the panel: the item, the printer, when, how many parts, how long it took and how it ended (finished, cancelled, error, or stopped early), plus the good-parts count if you entered one at **Bed cleared**. A line per printer counts started, finished and not finished. **Copy as CSV** puts the list on the clipboard for a spreadsheet. It is kept in `farm_send_runs.json` in the plugin's storage folder, newest 2000 prints. Prints started at the printer are not recorded, and an ending is only noticed while the panel is open.
+**Print history** at the bottom of the panel lists every print started from the panel: the item, the printer, when, how many parts, how long it took and how it ended (finished, cancelled, error, or stopped early), plus the good-parts count if you entered one at **Bed cleared**. A table counts, per printer, started, finished and not finished prints and the share that finished; a menu shows one printer's prints only; entries are grouped by day. **Copy as CSV** puts the list on the clipboard for a spreadsheet. It is kept in `farm_send_runs.json` in the plugin's storage folder, newest 2000 prints. Prints started at the printer are not recorded, and an ending is only noticed while the panel is open.
 
 ## Reporting a problem or requesting an enhancement
 
-Open an issue at https://github.com/mlugo-apx/orca-farm-send/issues and pick the form that fits. For an enhancement, describe what you want to do and how you do it today. For a problem, click **Report a problem or request an enhancement** at the bottom of the panel first: it collects the plugin version, your system, and each printer's model and state, ready to paste. Printer names, addresses and access codes are left out; messages can include file names, so read it before posting. Add your OrcaSlicer version, the printer's firmware version, what you clicked, and the exact message shown. For a problem that comes back, switch on the [debug log](#settings-and-the-debug-log), make it happen again, and add the log.
+Open an issue at https://github.com/mlugo-apx/orca-farm-send/issues and pick the form that fits. For an enhancement, describe what you want to do and how you do it today. For a problem, click **Report a problem** at the bottom of the panel first: it collects the plugin version, your system, and each printer's model and state, ready to paste. Printer names, addresses and access codes are left out; messages can include file names, so read it before posting. Add your OrcaSlicer version, the printer's firmware version, what you clicked, and the exact message shown. For a problem that comes back, switch on the [debug log](#settings-and-the-debug-log), make it happen again, and add the log.
 
 ## Develop
 

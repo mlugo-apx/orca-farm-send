@@ -12,7 +12,7 @@ import uuid
 
 from core import (DebugLog, debug, debug_trace, set_debug_sink, videos_to_clean, newest_installed, record_version, version_key, RunLog, run_result, toolhead_color_problem, count_objects, file_stamp, OrderBook, plan_order, CC2_MANY_FILES, KIND_CC1, KIND_MOONRAKER, DEBUG_LOG_HOURS, nozzle_mismatch, toolhead_problem, write_private, file_md5, STORE_FILE, KIND_CC2, WATCHED_STATES, BedLog, FarmError, bed_needs_clearing, files_to_clean, rule_text,
                   storage_summary, old_list, PrinterStore, can_start, job_filename, make_client, model_key, model_matches,
-                  parse_gcode_meta, preset_to_printer, presets_to_printers, set_shared_dir, status_event, strip_model_suffix, validate_printer)
+                  parse_gcode_meta, preset_to_printer, presets_to_printers, set_shared_dir, status_event, strip_model_suffix, validate_printer, part_name)
 # BUNDLE-STRIP-END
 
 SLICE_DIR = "slices"
@@ -522,6 +522,7 @@ class FarmApp:
             "saved_as": self._saved_names.get(job.get("md5") or "", ""),
             "chosen": job is self._chosen_plate(job.get("key")),
             "display_name": self._job_base_name(job), "summary": " · ".join(bits),
+            "time_s": meta.get("time_s"), "filament_g": meta.get("filament_g"),
             "printer_model": meta.get("printer_model", ""), "sliced_at": _clock(job["captured_at"]),
             "post_process": bool((meta.get("post_process") or "").strip()),
             "filaments": list(meta.get("filaments") or []),
@@ -665,7 +666,8 @@ class FarmApp:
         for run in reversed(self.runs.runs[-300:]):
             took = (run["ended_at"] - run["started_at"]) if run.get("ended_at") else None
             rows.append({"when": time.strftime("%b %d %H:%M", time.localtime(run.get("started_at") or 0)),
-                         "printer": run.get("printer", ""), "item": run.get("item") or run.get("file", ""),
+                         # Older entries kept OrcaSlicer's copy suffix ("part.stl_2"); shown clean.
+                         "printer": run.get("printer", ""), "item": strip_model_suffix(run.get("item") or "") or part_name(run.get("file", "")),
                          "parts": run.get("kept") or run.get("parts"), "of": run.get("parts") if run.get("kept") else None,
                          "result": run.get("result") or "open", "good": run.get("good"),
                          "took": _short_duration(took) if took else "", "source": run.get("source", "")})

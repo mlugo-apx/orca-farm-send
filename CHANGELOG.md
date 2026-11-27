@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.0
+
+A visual refresh after a design review; nothing about sending or printing changed.
+
+- Header on one line: refresh, **+** (Import from presets / Add by address) and the Settings gear as icons.
+- Buttons: the in-panel text links (Clear, Edit presets, Select all available, Unselect all, Toolhead names, Expand/Collapse all folders, Details) are now quiet buttons with a proper click area; every button is at least 24 px tall and shows a focus outline for keyboard use. Clean up has a red outline; the solid red stays in its confirm.
+- Status tags (Idle, Printing, Finished...) are a soft tint without a border, so they never look like buttons. Coloured text is lighter on a dark theme (darker on a light one) so it is easier to read.
+- Plates, Library, Orders and G-code / Videos switch as a neutral segmented control; the accent colour now only marks the main action.
+- Printer cards: **Bed cleared** is the main button on a finished card; a printer with no plate for its type shows the reason instead of greyed-out buttons; a free printer no longer repeats "Idle" in a tag.
+- Send confirmation: warnings first, the plate's facts as rows with the expected finish time, printers as name tags (address on hover), and a total of printers and grams.
+- Print history: grouped by day, each result as a coloured tag, a table per printer with the share of prints that finished, a menu to show one printer, and clean names for older entries ("part.stl_2" shown as "part").
+- The update notice and "Debug log on" are small buttons. "Report a problem or request an enhancement" is now "Report a problem".
+
 ## 0.4.2
 
 - The note on a printer card ("U1-1 finished ...", "cancelled", "paused") survives a plugin reload and an OrcaSlicer restart. It is kept in `farm_send_notices.json` in the plugin's storage folder and still leaves the card at Bed cleared or when the printer moves on.

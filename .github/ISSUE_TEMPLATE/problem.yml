@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        In the Farm Send panel, click **Report a problem or request an enhancement** at the bottom and paste what it gives you into the first box.
+        In the Farm Send panel, click **Report a problem** at the bottom and paste what it gives you into the first box.
         Never post a printer access code or API key.
   - type: textarea
     id: details
