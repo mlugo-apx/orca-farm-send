@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.1
+
+- Send confirmation: the expected finish time has its own **Done** row instead of breaking across lines at the end of the Print row; the file size is left out there; the printer and gram total only shows when two or more printers are sent; a Centauri Carbon 2 plate says **Roll 1** (it has rolls, not toolheads), also in the library and plate rows and the loaded-roll check; a single printer's name is not repeated in front of that check.
+
 ## 0.5.0
 
 A visual refresh after a design review; nothing about sending or printing changed.

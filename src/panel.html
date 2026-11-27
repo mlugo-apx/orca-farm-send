@@ -178,9 +178,11 @@
     }).join("");
     return html ? "<div class='kv'>" + html + "</div>" : "";
   }
+  // A Centauri Carbon 2 feeds from the rolls of its Canvas unit; other printers have toolheads.
+  function slotWord(model) { return /centauri\s*carbon\s*2/i.test(model || "") ? "Roll" : "Toolhead"; }
   function filamentRows(job) {
     return (job.filaments || []).map(function (f) {
-      return ["Toolhead " + f.slot, swatch(f.color) + esc(presetShort(f.preset || f.type || "")) +
+      return [slotWord(job.printer_model) + " " + f.slot, swatch(f.color) + esc(presetShort(f.preset || f.type || "")) +
               (f.grams != null ? " <span class='muted'>" + esc(f.grams) + " g</span>" : "")];
     });
   }
@@ -206,10 +208,11 @@
     if (!tools.length) return "";
     (job.filaments || []).forEach(function (f) {
       var tool = tools.filter(function (x) { return x.slot === f.slot; })[0];
-      if (!tool) { notes.push("<span class='warn'>no toolhead " + f.slot + "</span>"); return; }
-      if (!tool.loaded) { notes.push("<span class='warn'>toolhead " + f.slot + " reports no filament</span>"); return; }
+      var word = slotWord(printer.model).toLowerCase();
+      if (!tool) { notes.push("<span class='warn'>no " + word + " " + f.slot + "</span>"); return; }
+      if (!tool.loaded) { notes.push("<span class='warn'>" + word + " " + f.slot + " reports no filament</span>"); return; }
       var differs = colorGap(tool.color, f.color) > 90 || (tool.type && f.type && tool.type.toUpperCase() !== f.type.toUpperCase());
-      notes.push((differs ? "<span class='warn'>" : "<span class='muted'>") + "toolhead " + f.slot + " has " + swatch(tool.color) +
+      notes.push((differs ? "<span class='warn'>" : "<span class='muted'>") + word + " " + f.slot + " has " + swatch(tool.color) +
                  esc(tool.type || "?") + (differs ? ", plate wants " + swatch(f.color) + esc(f.type || "") : "") + "</span>");
     });
     return notes.length ? "<div class='small'>" + notes.join(", ") + "</div>" : "";
@@ -314,23 +317,28 @@
       if (g.job.stale) warnings.push(esc(g.job.display_name) + ": the plate changed after this slice. Re-slice if the change matters.");
       if (g.job.post_process) warnings.push(esc(g.job.display_name) + ": post-processing scripts are not applied to this file.");
     });
-    var grams = 0, total = 0;
+    var grams = 0, total = printers.length;
     var body = (warnings.length ? "<div class='box small warn' style='margin-top:8px'>" + warnings.join("<br>") + "</div>" : "") +
       groups.map(function (g) {
         if (g.job.filament_g != null) grams += g.job.filament_g * g.printers.length;
-        total += g.printers.length;
-        var done = start && g.job.time_s ? " \u00b7 " + finishAt(g.job.time_s) : "";
+        // The file size does not help decide anything here; the finish time gets a row of its own.
+        var facts = String(g.job.summary || "").replace(/ \u00b7 [\d.]+ MB$/, "");
+        var done = start && g.job.time_s ? finishAt(g.job.time_s).replace(/^done /, "") : "";
         return "<div class='box' style='margin-top:8px'><div class='name small clip' title='" + esc(g.job.display_name) + "'>" + esc(g.job.display_name) + "</div>" +
-          kv([["Print", esc(g.job.summary) + done], ["For", esc(g.job.printer_model)]]) +
+          kv([["Print", esc(facts)], ["Done", esc(done)], ["For", esc(g.job.printer_model)]]) +
           filamentLines(g.job) +
           "<div style='margin-top:4px'>" + g.printers.map(function (p) {
             // The address is on hover: the name is what the user knows the printer by.
             return "<span class='chip small' title='" + esc(p.address) + "'>" + esc(p.name) + "</span>";
           }).join("") + "</div>" +
-          g.printers.map(function (p) { var note = loadedNote(p, g.job); return note ? "<div class='small'>" + esc(p.name) + ": " + note.replace(/^<div class='small'>|<\/div>$/g, "") + "</div>" : ""; }).join("") +
+          g.printers.map(function (p) {
+            var note = loadedNote(p, g.job);
+            // The printer's name in front only when several are listed.
+            return note ? "<div class='small'>" + (total > 1 ? esc(p.name) + ": " : "") + note.replace(/^<div class='small'>|<\/div>$/g, "") + "</div>" : "";
+          }).join("") +
           "</div>";
       }).join("") +
-      (total > 1 || grams ? "<div class='small soft' style='margin-top:6px'>" + total + " printer" + (total === 1 ? "" : "s") +
+      (total > 1 ? "<div class='small soft' style='margin-top:6px'>" + total + " printer" + (total === 1 ? "" : "s") +
         (grams ? " \u00b7 " + (Math.round(grams * 10) / 10) + " g of filament" : "") + "</div>" : "");
     var options = "";
     if (start) {
